@@ -114,3 +114,33 @@ flyway.table=file_history
 		t.Errorf("expected DefaultSchema 'file_ds' preserved from file, got %s", nw.config.DefaultSchema)
 	}
 }
+
+func TestNowayFlociIntegration(t *testing.T) {
+	endpoint := os.Getenv("FLOCI_BIGQUERY_ENDPOINT")
+	if endpoint == "" {
+		endpoint = os.Getenv("BIGQUERY_EMULATOR_HOST")
+	}
+	if endpoint == "" {
+		endpoint = "http://localhost:4588/bigquery/v2/"
+	}
+
+	nw, err := New(
+		WithProject("floci-local"),
+		WithDataset("floci_noway_e2e"),
+		WithEndpoint(endpoint),
+		WithLocations("migrations"),
+		WithFS(fstest.MapFS{
+			"migrations/V1__init.sql": &fstest.MapFile{
+				Data: []byte("SELECT 1;"),
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("failed to initialize noway with floci endpoint: %v", err)
+	}
+	defer nw.Close()
+
+	if nw.config.GCPBigQueryEndpoint != endpoint {
+		t.Errorf("expected endpoint %s, got %s", endpoint, nw.config.GCPBigQueryEndpoint)
+	}
+}

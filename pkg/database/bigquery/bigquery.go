@@ -3,6 +3,7 @@ package bigquery
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -34,10 +35,27 @@ func New(ctx context.Context, cfg *config.Configuration) (*BigQueryDatabase, err
 
 	var opts []option.ClientOption
 
-	if cfg.GCPCredentialsJSON != "" {
-		opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
-	} else if cfg.GCPCredentialsFile != "" {
-		opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
+	endpoint := cfg.GCPBigQueryEndpoint
+	if endpoint == "" {
+		endpoint = os.Getenv("BIGQUERY_EMULATOR_HOST")
+	}
+	if endpoint != "" {
+		if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+			endpoint = "http://" + endpoint
+		}
+		if !strings.HasSuffix(endpoint, "/") {
+			endpoint += "/"
+		}
+		if !strings.Contains(endpoint, "/bigquery/v2/") {
+			endpoint += "bigquery/v2/"
+		}
+		opts = append(opts, option.WithEndpoint(endpoint), option.WithoutAuthentication())
+	} else {
+		if cfg.GCPCredentialsJSON != "" {
+			opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
+		} else if cfg.GCPCredentialsFile != "" {
+			opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
+		}
 	}
 
 	client, err := bigquery.NewClient(ctx, cfg.GCPProjectID, opts...)
@@ -98,12 +116,35 @@ func (db *BigQueryDatabase) GetCurrentUser(ctx context.Context) (string, error) 
 
 // EnsureSchema creates the dataset if it does not exist.
 func (db *BigQueryDatabase) EnsureSchema(ctx context.Context, schema string) error {
-	sql := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", db.Quote(schema))
-	return db.ExecuteStatement(ctx, sql)
+	ds := db.client.Dataset(schema)
+	meta := &bigquery.DatasetMetadata{
+		Location: db.location,
+	}
+	err := ds.Create(ctx, meta)
+	if err != nil {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
+			return nil
+		}
+		// Fallback to SQL DDL
+		sql := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", db.Quote(schema))
+		return db.ExecuteStatement(ctx, sql)
+	}
+	return nil
 }
 
-// SchemaExists checks if the dataset exists by querying INFORMATION_SCHEMA.TABLES.
+// SchemaExists checks if the dataset exists.
 func (db *BigQueryDatabase) SchemaExists(ctx context.Context, schema string) (bool, error) {
+	_, err := db.client.Dataset(schema).Metadata(ctx)
+	if err == nil {
+		return true, nil
+	}
+	errLower := strings.ToLower(err.Error())
+	if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+		return false, nil
+	}
+
+	// Fallback to INFORMATION_SCHEMA query
 	sql := fmt.Sprintf("SELECT COUNT(table_name) as count FROM %s.INFORMATION_SCHEMA.TABLES", db.Quote(schema))
 	q := db.client.Query(sql)
 	it, err := q.Read(ctx)
@@ -252,7 +293,29 @@ func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string) erro
 
 // EnsureHistoryTable creates the Flyway schema history table.
 func (db *BigQueryDatabase) EnsureHistoryTable(ctx context.Context, schema, table string) error {
-	sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+	tbl := db.client.Dataset(schema).Table(table)
+	historySchema := bigquery.Schema{
+		{Name: "installed_rank", Type: bigquery.IntegerFieldType, Required: true},
+		{Name: "version", Type: bigquery.StringFieldType},
+		{Name: "description", Type: bigquery.StringFieldType, Required: true},
+		{Name: "type", Type: bigquery.StringFieldType, Required: true},
+		{Name: "script", Type: bigquery.StringFieldType, Required: true},
+		{Name: "checksum", Type: bigquery.IntegerFieldType},
+		{Name: "installed_by", Type: bigquery.StringFieldType, Required: true},
+		{Name: "installed_on", Type: bigquery.TimestampFieldType},
+		{Name: "execution_time", Type: bigquery.IntegerFieldType, Required: true},
+		{Name: "success", Type: bigquery.BooleanFieldType, Required: true},
+	}
+	err := tbl.Create(ctx, &bigquery.TableMetadata{
+		Schema: historySchema,
+	})
+	if err != nil {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
+			return nil
+		}
+		// Fallback to SQL DDL
+		sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
     `+"`installed_rank`"+` INT64 NOT NULL,
     `+"`version`"+` STRING,
     `+"`description`"+` STRING NOT NULL,
@@ -264,12 +327,23 @@ func (db *BigQueryDatabase) EnsureHistoryTable(ctx context.Context, schema, tabl
     `+"`execution_time`"+` INT64 NOT NULL,
     `+"`success`"+` BOOL NOT NULL
 )`, db.Quote(schema, table))
-
-	return db.ExecuteStatement(ctx, sql)
+		return db.ExecuteStatement(ctx, sql)
+	}
+	return nil
 }
 
 // HistoryTableExists checks if the history table exists.
 func (db *BigQueryDatabase) HistoryTableExists(ctx context.Context, schema, table string) (bool, error) {
+	_, err := db.client.Dataset(schema).Table(table).Metadata(ctx)
+	if err == nil {
+		return true, nil
+	}
+	errLower := strings.ToLower(err.Error())
+	if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+		return false, nil
+	}
+
+	// Fallback to INFORMATION_SCHEMA query
 	sql := fmt.Sprintf("SELECT COUNT(table_name) as count FROM %s.INFORMATION_SCHEMA.TABLES WHERE table_name = @table_name", db.Quote(schema))
 	q := db.client.Query(sql)
 	q.Parameters = []bigquery.QueryParameter{

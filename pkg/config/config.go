@@ -67,6 +67,7 @@ type Configuration struct {
 	GCPLocation           string `json:"gcpLocation" yaml:"gcpLocation" toml:"gcpLocation"`
 	GCPCredentialsFile    string `json:"gcpCredentialsFile" yaml:"gcpCredentialsFile" toml:"gcpCredentialsFile"`
 	GCPCredentialsJSON    string `json:"gcpCredentialsJson" yaml:"gcpCredentialsJson" toml:"gcpCredentialsJson"`
+	GCPBigQueryEndpoint   string `json:"gcpBigQueryEndpoint" yaml:"gcpBigQueryEndpoint" toml:"gcpBigQueryEndpoint"`
 }
 
 // NewDefaultConfiguration returns standard Flyway defaults.
@@ -128,6 +129,11 @@ func (c *Configuration) Finalize() error {
 	if c.GCPCredentialsFile == "" {
 		if envKey := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); envKey != "" {
 			c.GCPCredentialsFile = envKey
+		}
+	}
+	if c.GCPBigQueryEndpoint == "" {
+		if envEndpoint := os.Getenv("BIGQUERY_EMULATOR_HOST"); envEndpoint != "" {
+			c.GCPBigQueryEndpoint = envEndpoint
 		}
 	}
 	if c.GCPProjectID == "" {

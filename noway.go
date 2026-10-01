@@ -114,6 +114,15 @@ func WithCredentialsJSON(jsonContent string) Option {
 	}
 }
 
+// WithEndpoint sets a custom BigQuery endpoint (e.g. for floci-gcp or local emulators).
+func WithEndpoint(endpoint string) Option {
+	return func(o *nowayOptions) {
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPBigQueryEndpoint = endpoint
+		})
+	}
+}
+
 // WithLocations sets migration directories or resources.
 func WithLocations(locations ...string) Option {
 	return func(o *nowayOptions) {
