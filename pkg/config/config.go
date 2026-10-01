@@ -80,7 +80,7 @@ func NewDefaultConfiguration() *Configuration {
 		UndoSQLMigrationPrefix:       "U",
 		BaselineSQLMigrationPrefix:   "B",
 		SQLMigrationSeparator:        "__",
-		SQLMigrationSuffixes:         []string{".sql"},
+		SQLMigrationSuffixes:         []string{".sql", ".sh", ".bash", ".cmd", ".ps1", ".bat", ".py"},
 		Encoding:                     "UTF-8",
 		PlaceholderReplacement:       true,
 		PlaceholderPrefix:            "${",

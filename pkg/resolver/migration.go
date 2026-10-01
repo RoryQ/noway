@@ -12,6 +12,7 @@ type MigrationType string
 
 const (
 	TypeSQL        MigrationType = "SQL"
+	TypeScript     MigrationType = "SCRIPT"
 	TypeBaseline   MigrationType = "BASELINE"
 	TypeSchema     MigrationType = "SCHEMA"
 	TypeDelete     MigrationType = "DELETE"
@@ -43,6 +44,15 @@ const (
 	StateDeleted         MigrationState = "Deleted"
 )
 
+// MigrationConfig contains per-migration configuration (loaded from .sql.conf / .conf file).
+type MigrationConfig struct {
+	ShouldExecute          string            `json:"shouldExecute"`
+	ExecuteInTransaction   *bool             `json:"executeInTransaction"`
+	PlaceholderReplacement *bool             `json:"placeholderReplacement"`
+	Encoding               string            `json:"encoding"`
+	CustomProperties       map[string]string `json:"customProperties"`
+}
+
 // ResolvedMigration is a migration found on disk or classpath.
 type ResolvedMigration struct {
 	Version          *version.Version
@@ -55,6 +65,8 @@ type ResolvedMigration struct {
 	IsRepeatable     bool
 	IsUndo           bool
 	IsBaseline       bool
+	IsScript         bool
+	Config           MigrationConfig
 }
 
 // AppliedMigration is a migration read from the schema history table.

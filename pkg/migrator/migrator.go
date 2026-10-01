@@ -3,6 +3,9 @@ package migrator
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,6 +53,22 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 		return nil, fmt.Errorf("configuration error: %w", err)
 	}
 
+	suffixes := cfg.SQLMigrationSuffixes
+	if len(suffixes) == 0 {
+		suffixes = []string{".sql", ".sh", ".bash", ".cmd", ".ps1", ".bat", ".py"}
+	} else {
+		hasScript := false
+		for _, s := range suffixes {
+			if isScriptFile("x" + s) {
+				hasScript = true
+				break
+			}
+		}
+		if !hasScript {
+			suffixes = append(suffixes, ".sh", ".bash", ".cmd", ".ps1", ".bat", ".py")
+		}
+	}
+
 	res := resolver.NewResolver(resolver.ResolverConfig{
 		Locations:        cfg.Locations,
 		FS:               cfg.FS,
@@ -58,7 +77,7 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 		UndoPrefix:       cfg.UndoSQLMigrationPrefix,
 		BaselinePrefix:   cfg.BaselineSQLMigrationPrefix,
 		Separator:        cfg.SQLMigrationSeparator,
-		Suffixes:         cfg.SQLMigrationSuffixes,
+		Suffixes:         suffixes,
 		Encoding:         cfg.Encoding,
 	})
 
@@ -313,6 +332,16 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 
 	// 10. Execute Versioned Migrations
 	for _, mig := range pendingVersioned {
+		if mig.Config.ShouldExecute != "" {
+			shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
+			if err != nil {
+				return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
+			}
+			if !shouldExec {
+				continue
+			}
+		}
+
 		execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, user)
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
@@ -327,6 +356,16 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 
 	// 11. Execute Repeatable Migrations
 	for _, mig := range pendingRepeatable {
+		if mig.Config.ShouldExecute != "" {
+			shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
+			if err != nil {
+				return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
+			}
+			if !shouldExec {
+				continue
+			}
+		}
+
 		execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, user)
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
@@ -360,15 +399,36 @@ func (m *Migrator) executeMigration(
 	rank int,
 	user string,
 ) (*ExecutedSummary, error) {
+	if mig.Type == resolver.TypeScript || mig.IsScript {
+		return m.executeScriptMigration(ctx, mig, schema, table, rank, user)
+	}
+	return m.executeSQLMigration(ctx, mig, schema, table, rank, user)
+}
+
+func (m *Migrator) executeSQLMigration(
+	ctx context.Context,
+	mig resolver.ResolvedMigration,
+	schema, table string,
+	rank int,
+	user string,
+) (*ExecutedSummary, error) {
 	// Fire beforeEachMigrate callback
 	if err := m.callbackRunner.Fire(ctx, "beforeEachMigrate"); err != nil {
 		return nil, err
 	}
 
 	// Perform placeholder replacement
-	sql, err := m.replacer.Replace(mig.Content, m.builtins)
-	if err != nil {
-		return nil, fmt.Errorf("error replacing placeholders in %s: %w", mig.Script, err)
+	sql := mig.Content
+	shouldReplace := m.config.PlaceholderReplacement
+	if mig.Config.PlaceholderReplacement != nil {
+		shouldReplace = *mig.Config.PlaceholderReplacement
+	}
+	if shouldReplace {
+		replaced, err := m.replacer.Replace(sql, m.builtins)
+		if err != nil {
+			return nil, fmt.Errorf("error replacing placeholders in %s: %w", mig.Script, err)
+		}
+		sql = replaced
 	}
 
 	// Split statements
@@ -433,6 +493,180 @@ func (m *Migrator) executeMigration(
 		Version:       verOutput,
 		Description:   mig.Description,
 		Type:          "SQL",
+		Script:        mig.Script,
+		ExecutionTime: execTime,
+	}, nil
+}
+
+func (m *Migrator) executeScriptMigration(
+	ctx context.Context,
+	mig resolver.ResolvedMigration,
+	schema, table string,
+	rank int,
+	user string,
+) (*ExecutedSummary, error) {
+	// Fire beforeEachMigrate callback
+	if err := m.callbackRunner.Fire(ctx, "beforeEachMigrate"); err != nil {
+		return nil, err
+	}
+
+	startTime := time.Now()
+	scriptContent := mig.Content
+
+	shouldReplace := m.config.PlaceholderReplacement
+	if mig.Config.PlaceholderReplacement != nil {
+		shouldReplace = *mig.Config.PlaceholderReplacement
+	}
+	if shouldReplace {
+		replaced, err := m.replacer.Replace(scriptContent, m.builtins)
+		if err == nil {
+			scriptContent = replaced
+		}
+	}
+
+	var scriptPath string
+	var cleanup func()
+
+	if mig.PhysicalLocation != "" && scriptContent == mig.Content {
+		if fi, err := os.Stat(mig.PhysicalLocation); err == nil && !fi.IsDir() {
+			scriptPath = mig.PhysicalLocation
+			_ = os.Chmod(scriptPath, 0755)
+		}
+	}
+
+	if scriptPath == "" {
+		ext := filepath.Ext(mig.Script)
+		if ext == "" {
+			ext = ".sh"
+		}
+		tmpFile, err := os.CreateTemp("", "noway-migration-*"+ext)
+		if err != nil {
+			return nil, fmt.Errorf("failed creating temp script for %s: %w", mig.Script, err)
+		}
+		if _, err := tmpFile.WriteString(scriptContent); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			return nil, fmt.Errorf("failed writing temp script for %s: %w", mig.Script, err)
+		}
+		tmpFile.Close()
+		_ = os.Chmod(tmpFile.Name(), 0755)
+		scriptPath = tmpFile.Name()
+		cleanup = func() { _ = os.Remove(tmpFile.Name()) }
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	var cmd *exec.Cmd
+	switch filepath.Ext(scriptPath) {
+	case ".cmd", ".bat":
+		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", scriptPath)
+	case ".ps1":
+		cmd = exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+	case ".py":
+		cmd = exec.CommandContext(ctx, "python3", scriptPath)
+	default:
+		cmd = exec.CommandContext(ctx, "/bin/bash", scriptPath)
+	}
+
+	if mig.PhysicalLocation != "" {
+		dir := filepath.Dir(mig.PhysicalLocation)
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			cmd.Dir = dir
+		}
+	}
+
+	env := os.Environ()
+	env = append(env,
+		"FLYWAY_DATABASE="+schema,
+		"NOWAY_DATABASE="+schema,
+		"FLYWAY_USER="+user,
+		"NOWAY_USER="+user,
+		"FLYWAY_DEFAULT_SCHEMA="+schema,
+		"NOWAY_DEFAULT_SCHEMA="+schema,
+		"FLYWAY_SCHEMAS="+strings.Join(m.config.Schemas, ","),
+		"NOWAY_SCHEMAS="+strings.Join(m.config.Schemas, ","),
+		"FLYWAY_TABLE="+table,
+		"NOWAY_TABLE="+table,
+		"FLYWAY_TYPE=SCRIPT",
+		"NOWAY_TYPE=SCRIPT",
+		"FLYWAY_SCRIPT="+mig.Script,
+		"NOWAY_SCRIPT="+mig.Script,
+		"FLYWAY_DESCRIPTION="+mig.Description,
+		"NOWAY_DESCRIPTION="+mig.Description,
+		"FLYWAY_GCP_PROJECT_ID="+m.config.GCPProjectID,
+		"NOWAY_GCP_PROJECT_ID="+m.config.GCPProjectID,
+		"FLYWAY_GCP_DATASET="+m.config.GCPDataset,
+		"NOWAY_GCP_DATASET="+m.config.GCPDataset,
+		"FLYWAY_GCP_LOCATION="+m.config.GCPLocation,
+		"NOWAY_GCP_LOCATION="+m.config.GCPLocation,
+		"FLYWAY_BIGQUERY_ENDPOINT="+m.config.GCPBigQueryEndpoint,
+		"NOWAY_BIGQUERY_ENDPOINT="+m.config.GCPBigQueryEndpoint,
+	)
+	if mig.Version != nil {
+		env = append(env,
+			"FLYWAY_VERSION="+mig.Version.String(),
+			"NOWAY_VERSION="+mig.Version.String(),
+		)
+	}
+	for k, v := range m.config.Placeholders {
+		env = append(env,
+			"FP__"+k+"="+v,
+			"FLYWAY_PLACEHOLDER_"+k+"="+v,
+			"NOWAY_PLACEHOLDER_"+k+"="+v,
+		)
+	}
+	cmd.Env = env
+
+	output, execErr := cmd.CombinedOutput()
+	execTime := time.Since(startTime).Milliseconds()
+
+	var verStr *string
+	if mig.Version != nil {
+		s := mig.Version.String()
+		verStr = &s
+	}
+	cs := mig.Checksum
+
+	historyRec := database.HistoryRecord{
+		InstalledRank: rank,
+		Version:       verStr,
+		Description:   mig.Description,
+		Type:          "SCRIPT",
+		Script:        mig.Script,
+		Checksum:      &cs,
+		InstalledBy:   user,
+		InstalledOn:   time.Now(),
+		ExecutionTime: execTime,
+		Success:       execErr == nil,
+	}
+
+	if recErr := m.db.InsertHistory(ctx, schema, table, historyRec); recErr != nil {
+		return nil, fmt.Errorf("script migration %s executed, but failed to insert history record: %w", mig.Script, recErr)
+	}
+
+	if execErr != nil {
+		_ = m.callbackRunner.Fire(ctx, "beforeEachMigrateError")
+		_ = m.callbackRunner.Fire(ctx, "afterEachMigrateError")
+		return nil, fmt.Errorf("script migration %s failed (exit %v): %w\nOutput:\n%s", mig.Script, execErr, execErr, string(output))
+	}
+
+	if err := m.callbackRunner.Fire(ctx, "afterEachMigrate"); err != nil {
+		return nil, err
+	}
+
+	verOutput := ""
+	cat := "Repeatable"
+	if mig.Version != nil {
+		verOutput = mig.Version.String()
+		cat = "Versioned"
+	}
+
+	return &ExecutedSummary{
+		Category:      cat,
+		Version:       verOutput,
+		Description:   mig.Description,
+		Type:          "SCRIPT",
 		Script:        mig.Script,
 		ExecutionTime: execTime,
 	}, nil

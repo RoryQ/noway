@@ -453,3 +453,176 @@ func TestInfoFutureAndMissingStates(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrateScriptMigrations(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__create_table.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE items (id INT64);"),
+		},
+		"sql/V2__seed_script.sh": &fstest.MapFile{
+			Data: []byte(`#!/bin/bash
+if [ "$FLYWAY_DATABASE" != "test_dataset" ]; then
+    echo "Expected FLYWAY_DATABASE=test_dataset, got $FLYWAY_DATABASE" >&2
+    exit 1
+fi
+if [ "$FLYWAY_TYPE" != "SCRIPT" ]; then
+    echo "Expected FLYWAY_TYPE=SCRIPT, got $FLYWAY_TYPE" >&2
+    exit 1
+fi
+echo "Bash script migration executed successfully"
+exit 0
+`),
+		},
+		"sql/R__repeatable_task.bash": &fstest.MapFile{
+			Data: []byte(`#!/bin/bash
+echo "Repeatable script migration run"
+exit 0
+`),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_dataset"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"sql"}
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create Migrator: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed for script migrations: %v", err)
+	}
+
+	if res.MigrationsExecuted != 3 {
+		t.Fatalf("expected 3 migrations executed, got %d", res.MigrationsExecuted)
+	}
+
+	// Verify history record for script migration
+	history, err := db.FetchHistory(ctx, "test_dataset", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory error: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("expected 3 history records, got %d", len(history))
+	}
+
+	if history[1].Type != "SCRIPT" || history[1].Script != "V2__seed_script.sh" {
+		t.Errorf("expected history record 1 to be SCRIPT, got %+v", history[1])
+	}
+	if history[2].Type != "SCRIPT" || history[2].Script != "R__repeatable_task.bash" {
+		t.Errorf("expected history record 2 to be SCRIPT, got %+v", history[2])
+	}
+}
+
+func TestMigrateShouldExecute(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__always.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t1 (id INT64);"),
+		},
+		"sql/V1__always.sql.conf": &fstest.MapFile{
+			Data: []byte("shouldExecute=true"),
+		},
+		"sql/V2__skip_me.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t2_skipped (id INT64);"),
+		},
+		"sql/V2__skip_me.sql.conf": &fstest.MapFile{
+			Data: []byte("shouldExecute=false"),
+		},
+		"sql/V3__env_conditional.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t3_prod (id INT64);"),
+		},
+		"sql/V3__env_conditional.sql.conf": &fstest.MapFile{
+			Data: []byte("shouldExecute=${env} == 'production'"),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_dataset"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"sql"}
+	cfg.Placeholders = map[string]string{
+		"env": "production",
+	}
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create Migrator: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	// V1 (true) and V3 (production == production) should execute, V2 (false) should be skipped
+	if res.MigrationsExecuted != 2 {
+		t.Fatalf("expected 2 migrations executed (V1 and V3), got %d", res.MigrationsExecuted)
+	}
+
+	history, _ := db.FetchHistory(ctx, "test_dataset", "flyway_schema_history")
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(history))
+	}
+
+	if history[0].Script != "V1__always.sql" || history[1].Script != "V3__env_conditional.sql" {
+		t.Errorf("unexpected history records applied: %+v", history)
+	}
+
+	// Verify Info marks V2 as Ignored
+	infoRes, err := m.Info(ctx)
+	if err != nil {
+		t.Fatalf("Info error: %v", err)
+	}
+
+	var v2State resolver.MigrationState
+	for _, item := range infoRes.Migrations {
+		if item.Script == "V2__skip_me.sql" {
+			v2State = item.State
+		}
+	}
+	if v2State != resolver.StateIgnored {
+		t.Errorf("expected V2 to be StateIgnored in Info, got %s", v2State)
+	}
+}
+
+func TestMigrateScriptFailure(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__failing_script.sh": &fstest.MapFile{
+			Data: []byte(`#!/bin/bash
+echo "Simulating failure" >&2
+exit 42
+`),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_dataset"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"sql"}
+
+	db := mock.NewMockDatabase()
+	m, _ := New(cfg, db)
+
+	ctx := context.Background()
+	_, err := m.Migrate(ctx)
+	if err == nil {
+		t.Fatalf("expected error from failing script migration, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "exit status 42") && !strings.Contains(err.Error(), "Simulating failure") {
+		t.Errorf("expected failure message containing exit code or output, got: %v", err)
+	}
+
+	// Verify failed history record inserted with success = false
+	history, _ := db.FetchHistory(ctx, "test_dataset", "flyway_schema_history")
+	if len(history) != 1 || history[0].Success != false {
+		t.Errorf("expected 1 failed history record, got %+v", history)
+	}
+}

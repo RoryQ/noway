@@ -9,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/RoryQ/noway/pkg/parser"
 	"github.com/RoryQ/noway/pkg/resolver"
 	"github.com/RoryQ/noway/pkg/version"
 )
@@ -81,7 +82,7 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 	}
 
 	// 3. Compute merged migration infos
-	infos := computeMigrationInfos(res, applied, effectiveTargetVersion, m.config.OutOfOrder)
+	infos := computeMigrationInfos(res, applied, effectiveTargetVersion, m.config.OutOfOrder, m.replacer, m.builtins)
 
 	result := &InfoResult{
 		Schema:     defaultSchema,
@@ -165,6 +166,8 @@ func computeMigrationInfos(
 	applied []resolver.AppliedMigration,
 	targetVer *version.Version,
 	outOfOrder bool,
+	replacer *parser.PlaceholderReplacer,
+	builtins parser.BuiltinPlaceholders,
 ) []resolver.MigrationInfo {
 	var infos []resolver.MigrationInfo
 
@@ -282,6 +285,11 @@ func computeMigrationInfos(
 			} else {
 				state = resolver.StatePending
 			}
+		} else if res.Config.ShouldExecute != "" {
+			shouldExec, err := resolver.EvaluateShouldExecute(res.Config.ShouldExecute, replacer, builtins)
+			if err == nil && !shouldExec {
+				state = resolver.StateIgnored
+			}
 		}
 
 		rCopy := res
@@ -304,13 +312,21 @@ func computeMigrationInfos(
 		cs := res.Checksum
 
 		if !wasApplied {
+			state := resolver.StatePending
+			if res.Config.ShouldExecute != "" {
+				shouldExec, err := resolver.EvaluateShouldExecute(res.Config.ShouldExecute, replacer, builtins)
+				if err == nil && !shouldExec {
+					state = resolver.StateIgnored
+				}
+			}
+
 			infos = append(infos, resolver.MigrationInfo{
 				Version:     nil,
 				Description: res.Description,
 				Type:        string(res.Type),
 				Script:      res.Script,
 				Checksum:    &cs,
-				State:       resolver.StatePending,
+				State:       state,
 				Resolved:    &rCopy,
 			})
 		} else {

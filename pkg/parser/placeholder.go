@@ -115,6 +115,12 @@ func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders
 			suffixIdx := strings.Index(input[i+len(prefix):], suffix)
 			if suffixIdx != -1 {
 				placeholderExpr := input[i+len(prefix) : i+len(prefix)+suffixIdx]
+				if val, ok := values[placeholderExpr]; ok {
+					sb.WriteString(val)
+					i += len(prefix) + suffixIdx + len(suffix)
+					continue
+				}
+
 				var key, defaultVal string
 				hasDefault := false
 

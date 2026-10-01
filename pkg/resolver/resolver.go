@@ -36,7 +36,7 @@ func DefaultResolverConfig() ResolverConfig {
 		UndoPrefix:       "U",
 		BaselinePrefix:   "B",
 		Separator:        "__",
-		Suffixes:         []string{".sql"},
+		Suffixes:         []string{".sql", ".sh", ".bash", ".cmd", ".ps1", ".bat", ".py"},
 		Encoding:         "UTF-8",
 	}
 }
@@ -64,7 +64,7 @@ func NewResolver(cfg ResolverConfig) *Resolver {
 		cfg.Separator = "__"
 	}
 	if len(cfg.Suffixes) == 0 {
-		cfg.Suffixes = []string{".sql"}
+		cfg.Suffixes = []string{".sql", ".sh", ".bash", ".cmd", ".ps1", ".bat", ".py"}
 	}
 	if len(cfg.Locations) == 0 && cfg.FS == nil {
 		cfg.Locations = []string{"filesystem:sql"}
@@ -187,6 +187,88 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 	return result, nil
 }
 
+func isScriptFile(filename string) bool {
+	lower := strings.ToLower(filename)
+	return strings.HasSuffix(lower, ".sh") ||
+		strings.HasSuffix(lower, ".bash") ||
+		strings.HasSuffix(lower, ".cmd") ||
+		strings.HasSuffix(lower, ".ps1") ||
+		strings.HasSuffix(lower, ".bat") ||
+		strings.HasSuffix(lower, ".py")
+}
+
+func (r *Resolver) loadMigrationConfig(dirPath, filename string, fileSys fs.FS) MigrationConfig {
+	cfg := MigrationConfig{
+		CustomProperties: make(map[string]string),
+	}
+
+	candidates := []string{
+		filename + ".conf", // e.g. V1__init.sql.conf or V1__init.sh.conf
+	}
+	for _, suffix := range r.config.Suffixes {
+		if strings.HasSuffix(filename, suffix) {
+			candidates = append(candidates, strings.TrimSuffix(filename, suffix)+".conf")
+			break
+		}
+	}
+
+	for _, candidate := range candidates {
+		var content []byte
+		var err error
+		if fileSys != nil {
+			candPath := candidate
+			if dirPath != "" && dirPath != "." {
+				candPath = filepath.Join(dirPath, candidate)
+			}
+			candPath = strings.TrimPrefix(candPath, "/")
+			content, err = fs.ReadFile(fileSys, candPath)
+		} else {
+			candPath := filepath.Join(dirPath, candidate)
+			content, err = os.ReadFile(candPath)
+		}
+		if err == nil {
+			parseMigrationConfigFile(string(content), &cfg)
+			return cfg
+		}
+	}
+
+	return cfg
+}
+
+func parseMigrationConfigFile(content string, cfg *MigrationConfig) {
+	if cfg.CustomProperties == nil {
+		cfg.CustomProperties = make(map[string]string)
+	}
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "--") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+
+		switch strings.ToLower(key) {
+		case "shouldexecute":
+			cfg.ShouldExecute = val
+		case "executeintransaction":
+			b := strings.EqualFold(val, "true") || val == "1"
+			cfg.ExecuteInTransaction = &b
+		case "placeholderreplacement":
+			b := strings.EqualFold(val, "true") || val == "1"
+			cfg.PlaceholderReplacement = &b
+		case "encoding":
+			cfg.Encoding = val
+		default:
+			cfg.CustomProperties[key] = val
+		}
+	}
+}
+
 func (r *Resolver) scanDir(dirPath string, result *ResolveResult, seenVersions map[string]string) error {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
@@ -195,7 +277,6 @@ func (r *Resolver) scanDir(dirPath string, result *ResolveResult, seenVersions m
 
 	for _, entry := range entries {
 		if entry.IsDir() {
-			// Subdirectories can be scanned recursively
 			subPath := filepath.Join(dirPath, entry.Name())
 			if err := r.scanDir(subPath, result, seenVersions); err != nil {
 				return err
@@ -227,16 +308,36 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 		}
 
 		filename := d.Name()
+		if strings.HasSuffix(filename, ".conf") {
+			return nil
+		}
+
+		hasValidSuffix := false
+		for _, suffix := range r.config.Suffixes {
+			if strings.HasSuffix(filename, suffix) {
+				hasValidSuffix = true
+				break
+			}
+		}
+		if !hasValidSuffix {
+			return nil
+		}
+
 		data, err := fs.ReadFile(fileSys, path)
 		if err != nil {
 			return fmt.Errorf("error reading file '%s': %w", path, err)
 		}
 
-		return r.parseAndAddMigration(filename, path, string(data), result, seenVersions)
+		dir := filepath.Dir(path)
+		return r.parseAndAddMigration(dir, filename, path, string(data), fileSys, result, seenVersions)
 	})
 }
 
 func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveResult, seenVersions map[string]string) error {
+	if strings.HasSuffix(filename, ".conf") {
+		return nil
+	}
+
 	hasValidSuffix := false
 	for _, suffix := range r.config.Suffixes {
 		if strings.HasSuffix(filename, suffix) {
@@ -253,11 +354,19 @@ func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveRe
 		return fmt.Errorf("error reading file '%s': %w", fullPath, err)
 	}
 
-	return r.parseAndAddMigration(filename, fullPath, string(data), result, seenVersions)
+	return r.parseAndAddMigration(dir, filename, fullPath, string(data), nil, result, seenVersions)
 }
 
-func (r *Resolver) parseAndAddMigration(filename, fullPath, content string, result *ResolveResult, seenVersions map[string]string) error {
-	// Check for standard callbacks first (e.g. beforeMigrate.sql, afterMigrate.sql)
+func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string, fileSys fs.FS, result *ResolveResult, seenVersions map[string]string) error {
+	migConfig := r.loadMigrationConfig(dir, filename, fileSys)
+	isScript := isScriptFile(filename)
+
+	defaultType := TypeSQL
+	if isScript {
+		defaultType = TypeScript
+	}
+
+	// Check for standard callbacks first (e.g. beforeMigrate.sql, afterMigrate.sh)
 	baseWithoutExt := filename
 	for _, suffix := range r.config.Suffixes {
 		if strings.HasSuffix(baseWithoutExt, suffix) {
@@ -278,7 +387,7 @@ func (r *Resolver) parseAndAddMigration(filename, fullPath, content string, resu
 		}
 	}
 
-	// Check for repeatable migration: R__description.sql
+	// Check for repeatable migration: R__description.sql / R__description.sh
 	if strings.HasPrefix(filename, r.config.RepeatablePrefix+r.config.Separator) {
 		desc := strings.TrimPrefix(filename, r.config.RepeatablePrefix+r.config.Separator)
 		for _, suffix := range r.config.Suffixes {
@@ -293,20 +402,27 @@ func (r *Resolver) parseAndAddMigration(filename, fullPath, content string, resu
 			return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 		}
 
+		repType := TypeRepeatable
+		if isScript {
+			repType = TypeScript
+		}
+
 		result.RepeatableMigrations = append(result.RepeatableMigrations, ResolvedMigration{
 			Version:          nil,
 			Description:      desc,
 			Script:           filename,
 			Checksum:         cs,
-			Type:             TypeRepeatable,
+			Type:             repType,
 			Content:          content,
 			PhysicalLocation: fullPath,
 			IsRepeatable:     true,
+			IsScript:         isScript,
+			Config:           migConfig,
 		})
 		return nil
 	}
 
-	// Check for undo migration: U1.2__description.sql
+	// Check for undo migration: U1.2__description.sql / U1.2__description.sh
 	if strings.HasPrefix(filename, r.config.UndoPrefix) {
 		verDesc := strings.TrimPrefix(filename, r.config.UndoPrefix)
 		for _, suffix := range r.config.Suffixes {
@@ -326,15 +442,21 @@ func (r *Resolver) parseAndAddMigration(filename, fullPath, content string, resu
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
+				undoType := TypeUndo
+				if isScript {
+					undoType = TypeScript
+				}
 				result.UndoMigrations = append(result.UndoMigrations, ResolvedMigration{
 					Version:          &ver,
 					Description:      desc,
 					Script:           filename,
 					Checksum:         cs,
-					Type:             TypeUndo,
+					Type:             undoType,
 					Content:          content,
 					PhysicalLocation: fullPath,
 					IsUndo:           true,
+					IsScript:         isScript,
+					Config:           migConfig,
 				})
 				return nil
 			}
@@ -370,13 +492,15 @@ func (r *Resolver) parseAndAddMigration(filename, fullPath, content string, resu
 					Content:          content,
 					PhysicalLocation: fullPath,
 					IsBaseline:       true,
+					IsScript:         isScript,
+					Config:           migConfig,
 				})
 				return nil
 			}
 		}
 	}
 
-	// Check for versioned migration: V1.2__description.sql or V1.2.sql
+	// Check for versioned migration: V1.2__description.sql / V1.2__description.sh or V1.2.sql
 	if strings.HasPrefix(filename, r.config.Prefix) {
 		verDesc := strings.TrimPrefix(filename, r.config.Prefix)
 		for _, suffix := range r.config.Suffixes {
@@ -418,9 +542,11 @@ func (r *Resolver) parseAndAddMigration(filename, fullPath, content string, resu
 				Description:      desc,
 				Script:           filename,
 				Checksum:         cs,
-				Type:             TypeSQL,
+				Type:             defaultType,
 				Content:          content,
 				PhysicalLocation: fullPath,
+				IsScript:         isScript,
+				Config:           migConfig,
 			})
 			return nil
 		}
