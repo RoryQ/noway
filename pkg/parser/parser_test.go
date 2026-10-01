@@ -24,6 +24,32 @@ INSERT INTO users (id, name) VALUES (2, "Jane; Smith");
 	}
 }
 
+func TestBigQueryParserDoubledQuotes(t *testing.T) {
+	sql := `
+INSERT INTO users (id, name) VALUES (1, 'O''Reilly; and Sons');
+INSERT INTO users (id, name) VALUES (2, "Said ""Hello; World""");
+`
+	p := NewBigQueryParser()
+	stmts := p.SplitStatements(sql)
+
+	if len(stmts) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(stmts))
+	}
+}
+
+func TestBigQueryParserCaseExpression(t *testing.T) {
+	sql := `
+SELECT CASE WHEN id = 1 THEN 'one;' ELSE 'other;' END FROM users;
+SELECT 2;
+`
+	p := NewBigQueryParser()
+	stmts := p.SplitStatements(sql)
+
+	if len(stmts) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(stmts))
+	}
+}
+
 func TestBigQueryParserTripleQuotes(t *testing.T) {
 	sql := `
 CREATE TABLE docs (
@@ -63,6 +89,65 @@ SELECT 2;
 
 	if len(stmts) != 2 {
 		t.Fatalf("expected 2 statements, got %d", len(stmts))
+	}
+}
+
+func TestBigQueryParserProceduralElseIf(t *testing.T) {
+	sql := `
+IF x = 1 THEN
+    SELECT 1;
+ELSEIF x = 2 THEN
+    SELECT 2;
+ELSE
+    SELECT 3;
+END IF;
+
+SELECT 4;
+`
+	p := NewBigQueryParser()
+	stmts := p.SplitStatements(sql)
+
+	if len(stmts) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(stmts))
+	}
+}
+
+func TestBigQueryParserCaseInCreateTableIfNotExists(t *testing.T) {
+	sql := `
+CREATE TABLE IF NOT EXISTS my_table AS
+SELECT 
+    id,
+    CASE 
+        WHEN status = 'A' THEN 'Active'
+        WHEN status = 'P' THEN 'Pending'
+        ELSE 'Unknown'
+    END AS status_desc
+FROM source_table;
+
+SELECT * FROM my_table;
+`
+	p := NewBigQueryParser()
+	stmts := p.SplitStatements(sql)
+
+	if len(stmts) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(stmts))
+	}
+}
+
+func TestBigQueryParserMultilineComments(t *testing.T) {
+	sql := `
+/*
+  This is a multiline comment
+  spanning multiple lines
+*/
+CREATE TABLE test (id INT64);
+/* Another comment at the end */
+`
+	p := NewBigQueryParser()
+	stmts := p.SplitStatements(sql)
+
+	if len(stmts) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(stmts))
 	}
 }
 

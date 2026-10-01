@@ -3,6 +3,7 @@ package migrator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/RoryQ/noway/pkg/config"
@@ -73,6 +74,7 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 	defaultSchema := cfg.GetDefaultSchema()
 	builtins := parser.BuiltinPlaceholders{
 		DefaultSchema: defaultSchema,
+		Table:         cfg.Table,
 		Database:      cfg.GCPProjectID,
 		Timestamp:     time.Now(),
 	}
@@ -140,7 +142,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	if len(applied) == 0 && m.config.BaselineOnMigrate {
 		isEmpty, err := m.db.SchemaEmpty(ctx, defaultSchema)
 		if err == nil && !isEmpty {
-			_, err = m.Baseline(ctx)
+			_, err = m.baselineInternal(ctx, defaultSchema, table)
 			if err != nil {
 				return nil, fmt.Errorf("baseline on migrate failed: %w", err)
 			}
@@ -156,6 +158,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve migrations: %w", err)
 	}
+	m.callbackRunner.callbacks = resolved.Callbacks
 
 	// 6. Validate on migrate
 	if m.config.ValidateOnMigrate {
@@ -202,6 +205,35 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		initialVersionStr = maxAppliedVersion.String()
 	}
 
+	// Determine effective target version (supports latest, current, next, or specific version)
+	var effectiveTargetVersion *version.Version
+	if m.config.TargetVersion != nil {
+		effectiveTargetVersion = m.config.TargetVersion
+	} else if strings.EqualFold(m.config.Target, "current") {
+		if maxAppliedVersion != nil {
+			effectiveTargetVersion = maxAppliedVersion
+		} else {
+			emptyVer := version.Empty
+			effectiveTargetVersion = &emptyVer
+		}
+	} else if strings.EqualFold(m.config.Target, "next") {
+		for _, res := range resolved.VersionedMigrations {
+			if res.Version == nil {
+				continue
+			}
+			verKey := res.Version.Normalized()
+			if _, wasApplied := appliedByVersion[verKey]; !wasApplied {
+				if baselineVersion == nil || !baselineVersion.IsAtLeast(*res.Version) {
+					effectiveTargetVersion = res.Version
+					break
+				}
+			}
+		}
+		if effectiveTargetVersion == nil {
+			effectiveTargetVersion = maxAppliedVersion
+		}
+	}
+
 	// 7. Find pending versioned migrations
 	var pendingVersioned []resolver.ResolvedMigration
 	for _, res := range resolved.VersionedMigrations {
@@ -220,7 +252,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		}
 
 		// Check target version
-		if m.config.TargetVersion != nil && res.Version.IsNewerThan(*m.config.TargetVersion) {
+		if effectiveTargetVersion != nil && res.Version.IsNewerThan(*effectiveTargetVersion) {
 			continue
 		}
 

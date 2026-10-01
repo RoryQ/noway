@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/RoryQ/noway/pkg/resolver"
@@ -58,8 +59,29 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 		}
 	}
 
+	// Determine effective target version
+	var effectiveTargetVersion *version.Version
+	if m.config.TargetVersion != nil {
+		effectiveTargetVersion = m.config.TargetVersion
+	} else if strings.EqualFold(m.config.Target, "current") {
+		var maxAppliedVersion *version.Version
+		for _, app := range applied {
+			if app.Version != nil && !app.Version.IsEmpty() {
+				if maxAppliedVersion == nil || app.Version.IsNewerThan(*maxAppliedVersion) {
+					maxAppliedVersion = app.Version
+				}
+			}
+		}
+		if maxAppliedVersion != nil {
+			effectiveTargetVersion = maxAppliedVersion
+		} else {
+			emptyVer := version.Empty
+			effectiveTargetVersion = &emptyVer
+		}
+	}
+
 	// 3. Compute merged migration infos
-	infos := computeMigrationInfos(res, applied, m.config.TargetVersion)
+	infos := computeMigrationInfos(res, applied, effectiveTargetVersion, m.config.OutOfOrder)
 
 	result := &InfoResult{
 		Schema:     defaultSchema,
@@ -142,10 +164,10 @@ func computeMigrationInfos(
 	resolved *resolver.ResolveResult,
 	applied []resolver.AppliedMigration,
 	targetVer *version.Version,
+	outOfOrder bool,
 ) []resolver.MigrationInfo {
 	var infos []resolver.MigrationInfo
 
-	appliedByVersion := make(map[string]resolver.AppliedMigration)
 	appliedRepeatables := make(map[string][]resolver.AppliedMigration) // script -> applied runs
 
 	var maxAppliedVersion *version.Version
@@ -156,7 +178,6 @@ func computeMigrationInfos(
 			baselineVersion = app.Version
 		}
 		if app.Version != nil && !app.Version.IsEmpty() {
-			appliedByVersion[app.Version.Normalized()] = app
 			if maxAppliedVersion == nil || app.Version.IsNewerThan(*maxAppliedVersion) {
 				maxAppliedVersion = app.Version
 			}
@@ -166,14 +187,20 @@ func computeMigrationInfos(
 	}
 
 	resolvedByVersion := make(map[string]resolver.ResolvedMigration)
+	var maxResolvedVersion *version.Version
 	for _, res := range resolved.VersionedMigrations {
 		if res.Version != nil {
 			resolvedByVersion[res.Version.Normalized()] = res
+			if maxResolvedVersion == nil || res.Version.IsNewerThan(*maxResolvedVersion) {
+				maxResolvedVersion = res.Version
+			}
 		}
 	}
 
 	// 1. Process all applied versioned migrations
 	seenResolved := make(map[string]bool)
+	var prevMaxVer *version.Version
+
 	for _, app := range applied {
 		if app.Version == nil || app.Version.IsEmpty() {
 			continue
@@ -185,11 +212,29 @@ func computeMigrationInfos(
 
 		state := resolver.StateSuccess
 		if !app.Success {
-			state = resolver.StateFailed
+			if !exists {
+				if maxResolvedVersion != nil && appVer.IsNewerThan(*maxResolvedVersion) {
+					state = resolver.StateFutureFailed
+				} else {
+					state = resolver.StateMissingFailed
+				}
+			} else {
+				state = resolver.StateFailed
+			}
 		} else if app.Type == "BASELINE" {
 			state = resolver.StateBaseline
 		} else if !exists {
-			state = resolver.StateMissingSuccess
+			if maxResolvedVersion != nil && appVer.IsNewerThan(*maxResolvedVersion) {
+				state = resolver.StateFutureSuccess
+			} else {
+				state = resolver.StateMissingSuccess
+			}
+		} else if prevMaxVer != nil && prevMaxVer.IsNewerThan(*appVer) {
+			state = resolver.StateOutOfOrder
+		}
+
+		if prevMaxVer == nil || appVer.IsNewerThan(*prevMaxVer) {
+			prevMaxVer = appVer
 		}
 
 		var cs *int64 = app.Checksum
@@ -232,7 +277,11 @@ func computeMigrationInfos(
 		} else if targetVer != nil && res.Version.IsNewerThan(*targetVer) {
 			state = resolver.StateAboveTarget
 		} else if maxAppliedVersion != nil && maxAppliedVersion.IsNewerThan(*res.Version) {
-			state = resolver.StateOutOfOrder
+			if !outOfOrder {
+				state = resolver.StateIgnored
+			} else {
+				state = resolver.StatePending
+			}
 		}
 
 		rCopy := res
@@ -265,6 +314,28 @@ func computeMigrationInfos(
 				Resolved:    &rCopy,
 			})
 		} else {
+			// Process previous runs (marked as Superseded)
+			for i := 0; i < len(runs)-1; i++ {
+				run := runs[i]
+				instOn := run.InstalledOn
+				execTime := run.ExecutionTime
+				appCopy := run
+				infos = append(infos, resolver.MigrationInfo{
+					Version:       nil,
+					Description:   res.Description,
+					Type:          string(res.Type),
+					Script:        res.Script,
+					Checksum:      run.Checksum,
+					InstalledBy:   run.InstalledBy,
+					InstalledOn:   &instOn,
+					ExecutionTime: &execTime,
+					State:         resolver.StateSuperseded,
+					Resolved:      &rCopy,
+					Applied:       &appCopy,
+				})
+			}
+
+			// Process latest run
 			lastRun := runs[len(runs)-1]
 			state := resolver.StateSuccess
 			if !lastRun.Success {

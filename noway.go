@@ -32,19 +32,20 @@ type (
 type Option func(*nowayOptions)
 
 type nowayOptions struct {
-	cfg        *config.Configuration
+	baseCfg    *config.Configuration
 	configFile string
 	db         database.Database
+	modifiers  []func(*config.Configuration)
 }
 
-// WithConfig uses the provided Configuration object.
+// WithConfig uses the provided Configuration object as the base.
 func WithConfig(cfg *config.Configuration) Option {
 	return func(o *nowayOptions) {
-		o.cfg = cfg
+		o.baseCfg = cfg
 	}
 }
 
-// WithConfigFile loads configuration from a file (.conf, .toml, .yaml, .json).
+// WithConfigFile loads base configuration from a file (.conf, .toml, .yaml, .json).
 func WithConfigFile(path string) Option {
 	return func(o *nowayOptions) {
 		o.configFile = path
@@ -61,141 +62,132 @@ func WithDatabase(db database.Database) Option {
 // WithJDBCURL sets the JDBC or custom BigQuery connection string.
 func WithJDBCURL(url string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.URL = url
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.URL = url
+		})
 	}
 }
 
 // WithProject sets the GCP Project ID.
 func WithProject(projectID string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.GCPProjectID = projectID
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPProjectID = projectID
+		})
 	}
 }
 
 // WithDataset sets the default BigQuery dataset (schema).
 func WithDataset(dataset string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.DefaultSchema = dataset
-		o.cfg.GCPDataset = dataset
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.DefaultSchema = dataset
+			c.GCPDataset = dataset
+		})
 	}
 }
 
 // WithLocation sets the BigQuery dataset location/region (e.g. "US", "EU").
 func WithLocation(location string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.GCPLocation = location
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPLocation = location
+		})
 	}
 }
 
 // WithCredentialsFile sets the path to GCP service account key file.
 func WithCredentialsFile(filePath string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.GCPCredentialsFile = filePath
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPCredentialsFile = filePath
+		})
 	}
 }
 
 // WithCredentialsJSON sets GCP service account key JSON content.
 func WithCredentialsJSON(jsonContent string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.GCPCredentialsJSON = jsonContent
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPCredentialsJSON = jsonContent
+		})
 	}
 }
 
 // WithLocations sets migration directories or resources.
 func WithLocations(locations ...string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.Locations = locations
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.Locations = locations
+		})
 	}
 }
 
 // WithFS sets an embedded filesystem (e.g. embed.FS) containing migrations.
 func WithFS(fileSys fs.FS) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.FS = fileSys
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.FS = fileSys
+		})
 	}
 }
 
 // WithTable sets the schema history table name (default: flyway_schema_history).
 func WithTable(table string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.Table = table
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.Table = table
+		})
 	}
 }
 
 // WithTarget sets the target version for migration.
 func WithTarget(target string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.Target = target
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.Target = target
+		})
 	}
 }
 
 // WithOutOfOrder enables or disables applying migrations out of order.
 func WithOutOfOrder(outOfOrder bool) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.OutOfOrder = outOfOrder
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.OutOfOrder = outOfOrder
+		})
 	}
 }
 
 // WithBaselineOnMigrate enables auto-baselining when migrating on non-empty schema.
 func WithBaselineOnMigrate(baseline bool) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.BaselineOnMigrate = baseline
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.BaselineOnMigrate = baseline
+		})
 	}
 }
 
 // WithCleanDisabled enables or disables schema clean operations.
 func WithCleanDisabled(disabled bool) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.CleanDisabled = disabled
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.CleanDisabled = disabled
+		})
 	}
 }
 
 // WithPlaceholders configures custom placeholders.
 func WithPlaceholders(placeholders map[string]string) Option {
 	return func(o *nowayOptions) {
-		if o.cfg == nil {
-			o.cfg = config.NewDefaultConfiguration()
-		}
-		o.cfg.Placeholders = placeholders
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			if c.Placeholders == nil {
+				c.Placeholders = make(map[string]string)
+			}
+			for k, v := range placeholders {
+				c.Placeholders[k] = v
+			}
+		})
 	}
 }
 
@@ -222,10 +214,9 @@ func New(opts ...Option) (*Noway, error) {
 		if err != nil {
 			return nil, err
 		}
-	} else if options.cfg != nil {
-		cfg = options.cfg
+	} else if options.baseCfg != nil {
+		cfg = options.baseCfg
 	} else {
-		// Try to find auto config file or defaults
 		if autoConf := config.FindConfigFile(); autoConf != "" {
 			cfg, err = config.LoadFromFile(autoConf)
 			if err != nil {
@@ -236,8 +227,18 @@ func New(opts ...Option) (*Noway, error) {
 		}
 	}
 
-	// Apply environment variables
+	// Apply environment variables first
 	config.LoadFromEnv(cfg)
+
+	// Apply functional modifiers on top of base config (so programmatic options take highest precedence)
+	for _, mod := range options.modifiers {
+		mod(cfg)
+	}
+
+	// If an embedded filesystem was provided and locations was not overridden from default, default to root "."
+	if cfg.FS != nil && len(cfg.Locations) == 1 && cfg.Locations[0] == "filesystem:sql" {
+		cfg.Locations = []string{"."}
+	}
 
 	// Finalize config
 	if err := cfg.Finalize(); err != nil {

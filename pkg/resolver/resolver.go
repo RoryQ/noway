@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/RoryQ/noway/pkg/checksum"
 	"github.com/RoryQ/noway/pkg/version"
@@ -375,7 +376,7 @@ func (r *Resolver) parseAndAddMigration(filename, fullPath, content string, resu
 		}
 	}
 
-	// Check for versioned migration: V1.2__description.sql
+	// Check for versioned migration: V1.2__description.sql or V1.2.sql
 	if strings.HasPrefix(filename, r.config.Prefix) {
 		verDesc := strings.TrimPrefix(filename, r.config.Prefix)
 		for _, suffix := range r.config.Suffixes {
@@ -385,10 +386,17 @@ func (r *Resolver) parseAndAddMigration(filename, fullPath, content string, resu
 			}
 		}
 
-		parts := strings.SplitN(verDesc, r.config.Separator, 2)
-		if len(parts) == 2 {
-			verStr := parts[0]
-			desc := strings.ReplaceAll(parts[1], "_", " ")
+		var verStr, desc string
+		sepIdx := strings.Index(verDesc, r.config.Separator)
+		if sepIdx >= 0 {
+			verStr = verDesc[:sepIdx]
+			desc = strings.ReplaceAll(verDesc[sepIdx+len(r.config.Separator):], "_", " ")
+		} else {
+			verStr = verDesc
+			desc = ""
+		}
+
+		if verStr != "" && unicode.IsDigit(rune(verStr[0])) {
 			ver, err := version.Parse(verStr)
 			if err != nil {
 				return fmt.Errorf("invalid version '%s' in migration file '%s': %w", verStr, filename, err)

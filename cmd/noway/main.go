@@ -78,21 +78,37 @@ func main() {
 func parseCLIArgs(args []string) (*config.Configuration, error) {
 	cfg := config.NewDefaultConfiguration()
 
-	// 1. Check for configFile in args first
-	var configFile string
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-configFile=") || strings.HasPrefix(arg, "--configFile=") || strings.HasPrefix(arg, "--config-file=") {
-			parts := strings.SplitN(arg, "=", 2)
-			configFile = parts[1]
+	// 1. Check for configFile/configFiles in args first
+	var configFiles []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		clean := strings.TrimLeft(arg, "-")
+		if idx := strings.Index(clean, "="); idx != -1 {
+			k := strings.ToLower(clean[:idx])
+			v := clean[idx+1:]
+			if k == "configfile" || k == "configfiles" || k == "config-file" || k == "config-files" {
+				configFiles = append(configFiles, splitAndTrimCLI(v, ",")...)
+			}
+		} else if clean == "configFile" || clean == "configFiles" || clean == "config-file" || clean == "config-files" {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				configFiles = append(configFiles, splitAndTrimCLI(args[i+1], ",")...)
+				i++
+			}
 		}
 	}
 
-	if configFile != "" {
-		loaded, err := config.LoadFromFile(configFile)
-		if err != nil {
-			return nil, err
+	if len(configFiles) > 0 {
+		for _, cf := range configFiles {
+			cf = strings.TrimSpace(cf)
+			if cf == "" {
+				continue
+			}
+			loaded, err := config.LoadFromFile(cf)
+			if err != nil {
+				return nil, err
+			}
+			cfg = loaded
 		}
-		cfg = loaded
 	} else if autoConf := config.FindConfigFile(); autoConf != "" {
 		loaded, err := config.LoadFromFile(autoConf)
 		if err == nil {
@@ -137,13 +153,13 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 		case "password":
 			cfg.Password = val
 		case "schemas":
-			cfg.Schemas = strings.Split(val, ",")
+			cfg.Schemas = splitAndTrimCLI(val, ",")
 		case "defaultschema":
 			cfg.DefaultSchema = val
 		case "table":
 			cfg.Table = val
 		case "locations":
-			cfg.Locations = strings.Split(val, ",")
+			cfg.Locations = splitAndTrimCLI(val, ",")
 		case "target":
 			cfg.Target = val
 		case "outoforder":
@@ -168,9 +184,12 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.GCPLocation = val
 		case "gcpcredentialsfile", "keyfile":
 			cfg.GCPCredentialsFile = val
+		case "configfile", "configfiles", "config-file", "config-files":
+			// Handled in step 1
 		default:
-			if strings.HasPrefix(key, "placeholders.") {
+			if strings.HasPrefix(key, "placeholders.") || strings.HasPrefix(key, "placeholder.") {
 				phKey := strings.TrimPrefix(key, "placeholders.")
+				phKey = strings.TrimPrefix(phKey, "placeholder.")
 				if cfg.Placeholders == nil {
 					cfg.Placeholders = make(map[string]string)
 				}
@@ -184,6 +203,18 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 	}
 
 	return cfg, nil
+}
+
+func splitAndTrimCLI(s, sep string) []string {
+	raw := strings.Split(s, sep)
+	res := make([]string, 0, len(raw))
+	for _, item := range raw {
+		trimmed := strings.TrimSpace(item)
+		if trimmed != "" {
+			res = append(res, trimmed)
+		}
+	}
+	return res
 }
 
 func parseBoolVal(v string) bool {

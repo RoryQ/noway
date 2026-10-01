@@ -108,7 +108,8 @@ func (db *BigQueryDatabase) SchemaExists(ctx context.Context, schema string) (bo
 	q := db.client.Query(sql)
 	it, err := q.Read(ctx)
 	if err != nil {
-		if strings.Contains(err.Error(), "NOT_FOUND") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "Not found") {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
 			return false, nil
 		}
 		return false, err
@@ -119,7 +120,8 @@ func (db *BigQueryDatabase) SchemaExists(ctx context.Context, schema string) (bo
 	}
 	err = it.Next(&row)
 	if err != nil && err != iterator.Done {
-		if strings.Contains(err.Error(), "NOT_FOUND") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "Not found") {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
 			return false, nil
 		}
 		return false, err
@@ -163,17 +165,17 @@ func (db *BigQueryDatabase) DropSchema(ctx context.Context, schema string) error
 
 // CleanSchema drops all tables, views, and routines from the dataset.
 func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string) error {
-	// 1. Drop tables, views, materialized views by type
+	// Drop views and materialized views before base tables to avoid dependency issues
 	types := []struct {
 		tableType string
 		dropType  string
 	}{
+		{"MATERIALIZED VIEW", "MATERIALIZED VIEW"},
+		{"VIEW", "VIEW"},
 		{"BASE TABLE", "TABLE"},
 		{"SNAPSHOT", "SNAPSHOT TABLE"},
 		{"CLONE", "TABLE"},
 		{"EXTERNAL", "EXTERNAL TABLE"},
-		{"VIEW", "VIEW"},
-		{"MATERIALIZED VIEW", "MATERIALIZED VIEW"},
 	}
 
 	for _, t := range types {
@@ -184,7 +186,8 @@ func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string) erro
 		}
 		it, err := q.Read(ctx)
 		if err != nil {
-			if strings.Contains(err.Error(), "NOT_FOUND") || strings.Contains(err.Error(), "Not found") {
+			errLower := strings.ToLower(err.Error())
+			if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
 				return nil
 			}
 			return err
@@ -209,8 +212,7 @@ func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string) erro
 		}
 	}
 
-	// 2. Drop routines (FUNCTION, PROCEDURE)
-	routineTypes := []string{"FUNCTION", "PROCEDURE"}
+	routineTypes := []string{"FUNCTION", "PROCEDURE", "TABLE FUNCTION"}
 	for _, rt := range routineTypes {
 		sql := fmt.Sprintf("SELECT routine_name FROM %s.INFORMATION_SCHEMA.ROUTINES WHERE routine_type = @routine_type", db.Quote(schema))
 		q := db.client.Query(sql)
@@ -219,7 +221,8 @@ func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string) erro
 		}
 		it, err := q.Read(ctx)
 		if err != nil {
-			if strings.Contains(err.Error(), "NOT_FOUND") || strings.Contains(err.Error(), "Not found") {
+			errLower := strings.ToLower(err.Error())
+			if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
 				return nil
 			}
 			return err
@@ -274,7 +277,8 @@ func (db *BigQueryDatabase) HistoryTableExists(ctx context.Context, schema, tabl
 	}
 	it, err := q.Read(ctx)
 	if err != nil {
-		if strings.Contains(err.Error(), "NOT_FOUND") || strings.Contains(err.Error(), "Not found") {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
 			return false, nil
 		}
 		return false, err
@@ -284,7 +288,8 @@ func (db *BigQueryDatabase) HistoryTableExists(ctx context.Context, schema, tabl
 		Count int64 `bigquery:"count"`
 	}
 	if err := it.Next(&row); err != nil {
-		if strings.Contains(err.Error(), "NOT_FOUND") || strings.Contains(err.Error(), "Not found") {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
 			return false, nil
 		}
 		return false, err
@@ -318,16 +323,16 @@ func (db *BigQueryDatabase) FetchHistory(ctx context.Context, schema, table stri
 	var records []resolver.AppliedMigration
 	for {
 		var row struct {
-			InstalledRank int64                 `bigquery:"installed_rank"`
-			Version       bigquery.NullString   `bigquery:"version"`
-			Description   string                `bigquery:"description"`
-			Type          string                `bigquery:"type"`
-			Script        string                `bigquery:"script"`
-			Checksum      bigquery.NullInt64    `bigquery:"checksum"`
-			InstalledBy   string                `bigquery:"installed_by"`
-			InstalledOn   bigquery.NullTimestamp `bigquery:"installed_on"`
-			ExecutionTime int64                 `bigquery:"execution_time"`
-			Success       bool                  `bigquery:"success"`
+			InstalledRank int64                   `bigquery:"installed_rank"`
+			Version       bigquery.NullString     `bigquery:"version"`
+			Description   string                  `bigquery:"description"`
+			Type          string                  `bigquery:"type"`
+			Script        string                  `bigquery:"script"`
+			Checksum      bigquery.NullInt64      `bigquery:"checksum"`
+			InstalledBy   string                  `bigquery:"installed_by"`
+			InstalledOn   bigquery.NullTimestamp  `bigquery:"installed_on"`
+			ExecutionTime int64                   `bigquery:"execution_time"`
+			Success       bool                    `bigquery:"success"`
 		}
 
 		err := it.Next(&row)
@@ -401,22 +406,26 @@ func (db *BigQueryDatabase) InsertHistory(ctx context.Context, schema, table str
 	)`, db.Quote(schema, table))
 
 	q := db.client.Query(sql)
-	var verVal interface{} = nil
+
+	verNull := bigquery.NullString{}
 	if rec.Version != nil {
-		verVal = *rec.Version
+		verNull.StringVal = *rec.Version
+		verNull.Valid = true
 	}
-	var csVal interface{} = nil
+
+	csNull := bigquery.NullInt64{}
 	if rec.Checksum != nil {
-		csVal = *rec.Checksum
+		csNull.Int64 = *rec.Checksum
+		csNull.Valid = true
 	}
 
 	q.Parameters = []bigquery.QueryParameter{
 		{Name: "installed_rank", Value: int64(rec.InstalledRank)},
-		{Name: "version", Value: verVal},
+		{Name: "version", Value: verNull},
 		{Name: "description", Value: rec.Description},
 		{Name: "type", Value: rec.Type},
 		{Name: "script", Value: rec.Script},
-		{Name: "checksum", Value: csVal},
+		{Name: "checksum", Value: csNull},
 		{Name: "installed_by", Value: rec.InstalledBy},
 		{Name: "execution_time", Value: rec.ExecutionTime},
 		{Name: "success", Value: rec.Success},
@@ -446,13 +455,14 @@ func (db *BigQueryDatabase) UpdateHistory(ctx context.Context, schema, table str
 	WHERE `+"`installed_rank`"+` = @installed_rank`, db.Quote(schema, table))
 
 	q := db.client.Query(sql)
-	var csVal interface{} = nil
+	csNull := bigquery.NullInt64{}
 	if rec.Checksum != nil {
-		csVal = *rec.Checksum
+		csNull.Int64 = *rec.Checksum
+		csNull.Valid = true
 	}
 
 	q.Parameters = []bigquery.QueryParameter{
-		{Name: "checksum", Value: csVal},
+		{Name: "checksum", Value: csNull},
 		{Name: "description", Value: rec.Description},
 		{Name: "type", Value: rec.Type},
 		{Name: "installed_rank", Value: int64(rec.InstalledRank)},
@@ -470,7 +480,7 @@ func (db *BigQueryDatabase) UpdateHistory(ctx context.Context, schema, table str
 	return status.Err()
 }
 
-// DeleteHistory deletes a migration record (e.g. during repair for failed migration).
+// DeleteHistory deletes a migration record.
 func (db *BigQueryDatabase) DeleteHistory(ctx context.Context, schema, table string, installedRank int) error {
 	sql := fmt.Sprintf("DELETE FROM %s WHERE `installed_rank` = @installed_rank", db.Quote(schema, table))
 	q := db.client.Query(sql)
@@ -514,6 +524,12 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		`+"`success`"+`
 	) VALUES (-100, @lock_id, 'flyway-lock', '', '', 0, '', CURRENT_TIMESTAMP(), 0, TRUE)`, tableName)
 
+	checkActiveLockSQL := fmt.Sprintf(`SELECT version FROM %s 
+	WHERE `+"`description`"+` = 'flyway-lock' 
+	ORDER BY `+"`installed_on`"+` ASC LIMIT 1`, tableName)
+
+	delSelfSQL := fmt.Sprintf("DELETE FROM %s WHERE `version` = @lock_id AND `description` = 'flyway-lock'", tableName)
+
 	maxRetries := db.config.LockRetryCount
 	if maxRetries <= 0 {
 		maxRetries = 50
@@ -527,6 +543,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		default:
 		}
 
+		// Try insert lock row
 		q := db.client.Query(insertLockSQL)
 		q.Parameters = []bigquery.QueryParameter{
 			{Name: "lock_id", Value: lockID},
@@ -535,8 +552,29 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		if err == nil {
 			status, err := job.Wait(ctx)
 			if err == nil && status.Err() == nil {
-				acquired = true
-				break
+				// Verify if our lock is the active lock holder
+				checkQ := db.client.Query(checkActiveLockSQL)
+				it, err := checkQ.Read(ctx)
+				if err == nil {
+					var row struct {
+						Version string `bigquery:"version"`
+					}
+					if it.Next(&row) == nil {
+						if row.Version == lockID {
+							acquired = true
+							break
+						} else {
+							// Another process holds the lock; delete our extra attempt row
+							selfQ := db.client.Query(delSelfSQL)
+							selfQ.Parameters = []bigquery.QueryParameter{
+								{Name: "lock_id", Value: lockID},
+							}
+							if delJob, err := selfQ.Run(ctx); err == nil {
+								_, _ = delJob.Wait(ctx)
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -544,6 +582,14 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 	}
 
 	if !acquired {
+		// Clean up any stray row for this lockID
+		cleanQ := db.client.Query(delSelfSQL)
+		cleanQ.Parameters = []bigquery.QueryParameter{
+			{Name: "lock_id", Value: lockID},
+		}
+		if cleanJob, err := cleanQ.Run(context.Background()); err == nil {
+			_, _ = cleanJob.Wait(context.Background())
+		}
 		return nil, fmt.Errorf("unable to obtain lock on Flyway schema history table %s.%s after %d retries", schema, table, maxRetries)
 	}
 
@@ -570,9 +616,9 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 				q.Parameters = []bigquery.QueryParameter{
 					{Name: "lock_id", Value: lockID},
 				}
-				job, err := q.Run(context.Background())
+				job, err := q.Run(heartbeatCtx)
 				if err == nil {
-					_, _ = job.Wait(context.Background())
+					_, _ = job.Wait(heartbeatCtx)
 				}
 			}
 		}

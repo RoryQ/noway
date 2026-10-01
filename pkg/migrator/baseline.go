@@ -42,7 +42,11 @@ func (m *Migrator) Baseline(ctx context.Context) (*BaselineResult, error) {
 		_ = unlock(context.Background())
 	}()
 
-	// 4. Check existing history
+	return m.baselineInternal(ctx, defaultSchema, table)
+}
+
+func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table string) (*BaselineResult, error) {
+	// 1. Check existing history
 	applied, err := m.db.FetchHistory(ctx, defaultSchema, table)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch schema history: %w", err)
@@ -58,12 +62,12 @@ func (m *Migrator) Baseline(ctx context.Context) (*BaselineResult, error) {
 		return nil, fmt.Errorf("unable to baseline database: schema history table is not empty and already contains %d applied migration(s)", len(applied))
 	}
 
-	// 5. Fire beforeBaseline callbacks
+	// 2. Fire beforeBaseline callbacks
 	if err := m.callbackRunner.Fire(ctx, "beforeBaseline"); err != nil {
 		return nil, err
 	}
 
-	// 6. Insert baseline record
+	// 3. Insert baseline record
 	user := m.config.InstalledBy
 	if user == "" {
 		currentUser, _ := m.db.GetCurrentUser(ctx)
@@ -107,7 +111,7 @@ func (m *Migrator) Baseline(ctx context.Context) (*BaselineResult, error) {
 		return nil, fmt.Errorf("failed to insert baseline record: %w", err)
 	}
 
-	// 7. Fire afterBaseline callbacks
+	// 4. Fire afterBaseline callbacks
 	if err := m.callbackRunner.Fire(ctx, "afterBaseline"); err != nil {
 		return nil, err
 	}

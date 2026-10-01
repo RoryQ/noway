@@ -51,6 +51,7 @@ func NewPlaceholderReplacer(cfg PlaceholderConfig) *PlaceholderReplacer {
 // BuiltinPlaceholders contains contextual values for built-in placeholders.
 type BuiltinPlaceholders struct {
 	DefaultSchema string
+	Table         string
 	User          string
 	Database      string
 	Timestamp     time.Time
@@ -77,6 +78,10 @@ func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders
 	if builtins.DefaultSchema != "" {
 		values["flyway:defaultSchema"] = builtins.DefaultSchema
 		values["noway:defaultSchema"] = builtins.DefaultSchema
+	}
+	if builtins.Table != "" {
+		values["flyway:table"] = builtins.Table
+		values["noway:table"] = builtins.Table
 	}
 	if builtins.User != "" {
 		values["flyway:user"] = builtins.User

@@ -2,6 +2,8 @@ package noway
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"testing/fstest"
 
@@ -75,5 +77,40 @@ func TestNowayEndToEnd(t *testing.T) {
 		if m.State != "Success" {
 			t.Errorf("expected migration %s to be Success, got %s", m.Script, m.State)
 		}
+	}
+}
+
+func TestOptionsOverrideWithConfigFile(t *testing.T) {
+	confContent := `
+flyway.url=jdbc:bigquery:;ProjectId=file-proj;DefaultDataset=file_ds;
+flyway.table=file_history
+`
+	tmpDir := t.TempDir()
+	confPath := filepath.Join(tmpDir, "flyway.conf")
+	if err := os.WriteFile(confPath, []byte(confContent), 0644); err != nil {
+		t.Fatalf("failed to write conf: %v", err)
+	}
+
+	db := mock.NewMockDatabase()
+
+	nw, err := New(
+		WithConfigFile(confPath),
+		WithProject("overridden-proj"), // Explicit modifier should override config file
+		WithTable("custom_table"),
+		WithDatabase(db),
+	)
+	if err != nil {
+		t.Fatalf("failed to create noway: %v", err)
+	}
+	defer nw.Close()
+
+	if nw.config.GCPProjectID != "overridden-proj" {
+		t.Errorf("expected GCPProjectID 'overridden-proj', got %s", nw.config.GCPProjectID)
+	}
+	if nw.config.Table != "custom_table" {
+		t.Errorf("expected Table 'custom_table', got %s", nw.config.Table)
+	}
+	if nw.config.DefaultSchema != "file_ds" {
+		t.Errorf("expected DefaultSchema 'file_ds' preserved from file, got %s", nw.config.DefaultSchema)
 	}
 }

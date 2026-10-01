@@ -31,6 +31,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 	stmtStartLine := 1
 
 	blockDepth := 0
+	caseDepth := 0
 	parensDepth := 0
 
 	// Helper to peek ahead
@@ -49,33 +50,50 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 		return ""
 	}
 
-	// Track recent keyword tokens for block depth
-	var lastKeyword string
+	// Track previous non-whitespace keyword tokens in current statement
 	var prevKeyword string
 
 	recordKeyword := func(kw string) {
-		prevKeyword = lastKeyword
-		lastKeyword = strings.ToUpper(kw)
+		upper := strings.ToUpper(kw)
 
-		switch lastKeyword {
+		switch upper {
 		case "BEGIN":
-			// If not BEGIN TRANSACTION, increase block depth
-			// We check next token or wait
 			blockDepth++
 		case "TRANSACTION":
-			if prevKeyword == "BEGIN" {
+			// If preceded by BEGIN in this statement, cancel block depth
+			if prevKeyword == "BEGIN" && blockDepth > 0 {
 				blockDepth--
 			}
-		case "THEN":
-			// In IF ... THEN
-			blockDepth++
 		case "CASE":
-			blockDepth++
+			caseDepth++
+		case "IF":
+			// Check if this is a procedural IF statement
+			// NOT procedural if preceded by TABLE, VIEW, SCHEMA, INDEX, DROP, CREATE, END, ELSE, etc.
+			isNotProcedural := prevKeyword == "TABLE" || prevKeyword == "VIEW" || prevKeyword == "SCHEMA" ||
+				prevKeyword == "INDEX" || prevKeyword == "DROP" || prevKeyword == "CREATE" ||
+				prevKeyword == "FUNCTION" || prevKeyword == "PROCEDURE" || prevKeyword == "OR" ||
+				prevKeyword == "END" || prevKeyword == "ELSE"
+			if !isNotProcedural {
+				blockDepth++
+			}
+		case "LOOP", "WHILE", "REPEAT":
+			if prevKeyword != "END" {
+				blockDepth++
+			}
+		case "FOR":
+			// Procedural FOR record IN (...) DO ... END FOR
+			if prevKeyword != "END" && prevKeyword != "CREATE" && prevKeyword != "REPLACE" {
+				blockDepth++
+			}
 		case "END":
-			if blockDepth > 0 {
+			if caseDepth > 0 {
+				caseDepth--
+			} else if blockDepth > 0 {
 				blockDepth--
 			}
 		}
+
+		prevKeyword = upper
 	}
 
 	for i < n {
@@ -87,7 +105,6 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 
 		// 1. Check for single line comments: -- or #
 		if (r == '-' && peek(1) == '-') || r == '#' {
-			// Consume comment until newline or EOF
 			for i < n && runes[i] != '\n' {
 				currentStmt.WriteRune(runes[i])
 				i++
@@ -121,7 +138,14 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			continue
 		}
 
-		// 3. Check for triple quotes: ''' or """
+		// 3. Check for raw/byte string prefix: r', r", b', b", rb', etc.
+		if (r == 'r' || r == 'R' || r == 'b' || r == 'B') && (peek(1) == '\'' || peek(1) == '"') {
+			currentStmt.WriteRune(r)
+			i++
+			r = runes[i]
+		}
+
+		// 4. Check for triple quotes: ''' or """
 		if (r == '\'' && peekStr(3) == "'''") || (r == '"' && peekStr(3) == `"""`) {
 			quoteStr := peekStr(3)
 			currentStmt.WriteString(quoteStr)
@@ -148,7 +172,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			continue
 		}
 
-		// 4. Check for standard string literals: '...' or "..."
+		// 5. Check for standard string literals: '...' or "..." (with \' and doubled '' escaping)
 		if r == '\'' || r == '"' {
 			quote := r
 			currentStmt.WriteRune(quote)
@@ -157,11 +181,19 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 				if runes[i] == '\n' {
 					currentLine++
 				}
+				// Escaped by backslash: \' or \"
 				if runes[i] == '\\' && i+1 < n {
 					currentStmt.WriteRune(runes[i])
 					i++
 					currentStmt.WriteRune(runes[i])
 					i++
+					continue
+				}
+				// Escaped by doubling: '' or ""
+				if runes[i] == quote && i+1 < n && runes[i+1] == quote {
+					currentStmt.WriteRune(quote)
+					currentStmt.WriteRune(quote)
+					i += 2
 					continue
 				}
 				if runes[i] == quote {
@@ -175,7 +207,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			continue
 		}
 
-		// 5. Check for backtick quoted identifier: `...`
+		// 6. Check for backtick quoted identifier: `...`
 		if r == '`' {
 			currentStmt.WriteRune('`')
 			i++
@@ -201,7 +233,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			continue
 		}
 
-		// 6. Check for parentheses
+		// 7. Check for parentheses
 		if r == '(' {
 			parensDepth++
 			currentStmt.WriteRune(r)
@@ -217,7 +249,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			continue
 		}
 
-		// 7. Check for keywords (letters and underscores)
+		// 8. Check for identifiers and keywords
 		if unicode.IsLetter(r) || r == '_' {
 			start := i
 			for i < n && (unicode.IsLetter(runes[i]) || unicode.IsDigit(runes[i]) || runes[i] == '_') {
@@ -229,9 +261,9 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			continue
 		}
 
-		// 8. Check for semicolon statement delimiter
+		// 9. Check for semicolon statement delimiter
 		if r == ';' {
-			if parensDepth == 0 && blockDepth == 0 {
+			if parensDepth == 0 && blockDepth == 0 && caseDepth == 0 {
 				stmtStr := strings.TrimSpace(currentStmt.String())
 				if isNonEmptyStatement(stmtStr) {
 					statements = append(statements, Statement{
@@ -241,7 +273,6 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 				}
 				currentStmt.Reset()
 				stmtStartLine = currentLine
-				lastKeyword = ""
 				prevKeyword = ""
 				i++
 				continue
@@ -271,23 +302,41 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 }
 
 func isNonEmptyStatement(sql string) bool {
-	if sql == "" {
+	trimmed := strings.TrimSpace(sql)
+	if trimmed == "" {
 		return false
 	}
-	// Check if it's not just comments or whitespace
-	lines := strings.Split(sql, "\n")
-	for _, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if trimmed == "" {
+
+	// Strip single-line comments (-- and #) and multi-line comments (/* ... */)
+	runes := []rune(trimmed)
+	n := len(runes)
+	var sb strings.Builder
+	i := 0
+
+	for i < n {
+		r := runes[i]
+		if (r == '-' && i+1 < n && runes[i+1] == '-') || r == '#' {
+			for i < n && runes[i] != '\n' {
+				i++
+			}
 			continue
 		}
-		if strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "#") {
+		if r == '/' && i+1 < n && runes[i+1] == '*' {
+			i += 2
+			for i < n {
+				if runes[i] == '*' && i+1 < n && runes[i+1] == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
 			continue
 		}
-		if strings.HasPrefix(trimmed, "/*") && strings.HasSuffix(trimmed, "*/") {
-			continue
+		if !unicode.IsSpace(r) {
+			sb.WriteRune(r)
 		}
-		return true
+		i++
 	}
-	return false
+
+	return sb.Len() > 0
 }

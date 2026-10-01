@@ -7,7 +7,9 @@ import (
 	"testing/fstest"
 
 	"github.com/RoryQ/noway/pkg/config"
+	"github.com/RoryQ/noway/pkg/database"
 	"github.com/RoryQ/noway/pkg/database/mock"
+	"github.com/RoryQ/noway/pkg/resolver"
 )
 
 func TestMigrateBasic(t *testing.T) {
@@ -272,5 +274,182 @@ func TestClean(t *testing.T) {
 	}
 	if len(cleanRes.SchemasCleaned) != 1 {
 		t.Errorf("expected 1 schema cleaned, got %d", len(cleanRes.SchemasCleaned))
+	}
+}
+
+func TestBaselineOnMigrateNonEmptySchema(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__initial.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t1 (id INT64);"),
+		},
+		"sql/V2__new_feature.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t2 (id INT64);"),
+		},
+	}
+
+	db := mock.NewMockDatabase()
+	ctx := context.Background()
+	_ = db.EnsureSchema(ctx, "existing_ds")
+	_ = db.EnsureHistoryTable(ctx, "existing_ds", "some_existing_table") // simulates non-empty DB
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "existing_ds"
+	cfg.FS = mockFS
+	cfg.BaselineOnMigrate = true
+	cfg.BaselineVersion = "1"
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate with BaselineOnMigrate error: %v", err)
+	}
+
+	// Only V2 should have been executed because baseline was version 1
+	if res.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+	if len(res.ExecutedMigrations) != 1 || res.ExecutedMigrations[0].Version != "2" {
+		t.Errorf("expected V2 executed, got %+v", res.ExecutedMigrations)
+	}
+
+	// Verify history table contains baseline + V2
+	history, err := db.FetchHistory(ctx, "existing_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory error: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history records (baseline + V2), got %d", len(history))
+	}
+	if history[0].Type != "BASELINE" || history[0].Version.String() != "1" {
+		t.Errorf("expected record 0 to be BASELINE v1, got %+v", history[0])
+	}
+	if history[1].Version.String() != "2" {
+		t.Errorf("expected record 1 to be V2, got %+v", history[1])
+	}
+}
+
+func TestMigrateTargetNextAndCurrent(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__first.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t1 (id INT64);"),
+		},
+		"sql/V2__second.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t2 (id INT64);"),
+		},
+		"sql/V3__third.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t3 (id INT64);"),
+		},
+	}
+
+	db := mock.NewMockDatabase()
+	ctx := context.Background()
+
+	// 1. Test target="next" -> should only apply V1
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+	cfg.Target = "next"
+
+	m1, _ := New(cfg, db)
+	res1, err := m1.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate target=next error: %v", err)
+	}
+	if res1.MigrationsExecuted != 1 || res1.ExecutedMigrations[0].Version != "1" {
+		t.Errorf("expected only V1 executed with target=next, got %d migrations", res1.MigrationsExecuted)
+	}
+
+	// 2. Test target="current" -> should apply 0 versioned migrations
+	cfg.Target = "current"
+	m2, _ := New(cfg, db)
+	res2, err := m2.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate target=current error: %v", err)
+	}
+	if res2.MigrationsExecuted != 0 {
+		t.Errorf("expected 0 migrations executed with target=current, got %d", res2.MigrationsExecuted)
+	}
+
+	// 3. Test target="next" again -> should apply V2
+	cfg.Target = "next"
+	m3, _ := New(cfg, db)
+	res3, err := m3.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate target=next second run error: %v", err)
+	}
+	if res3.MigrationsExecuted != 1 || res3.ExecutedMigrations[0].Version != "2" {
+		t.Errorf("expected V2 executed with target=next, got %+v", res3.ExecutedMigrations)
+	}
+}
+
+func TestInfoFutureAndMissingStates(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V2__resolved.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t2 (id INT64);"),
+		},
+	}
+
+	db := mock.NewMockDatabase()
+	ctx := context.Background()
+	_ = db.EnsureSchema(ctx, "test_ds")
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+
+	// Insert V1 (Missing, since resolved max is V2) and V3 (Future, since resolved max is V2)
+	v1Str := "1"
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       &v1Str,
+		Description:   "missing v1",
+		Type:          "SQL",
+		Script:        "V1__missing.sql",
+		Success:       true,
+	})
+	v3Str := "3"
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 2,
+		Version:       &v3Str,
+		Description:   "future v3",
+		Type:          "SQL",
+		Script:        "V3__future.sql",
+		Success:       true,
+	})
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+
+	m, _ := New(cfg, db)
+	infoRes, err := m.Info(ctx)
+	if err != nil {
+		t.Fatalf("Info error: %v", err)
+	}
+
+	stateMap := make(map[string]resolver.MigrationState)
+	for _, item := range infoRes.Migrations {
+		stateMap[item.Script] = item.State
+	}
+
+	if stateMap["V1__missing.sql"] != resolver.StateMissingSuccess {
+		t.Errorf("expected V1 to be Missing, got %s", stateMap["V1__missing.sql"])
+	}
+	if stateMap["V3__future.sql"] != resolver.StateFutureSuccess {
+		t.Errorf("expected V3 to be Future, got %s", stateMap["V3__future.sql"])
+	}
+	if stateMap["V2__resolved.sql"] != resolver.StateIgnored {
+		t.Errorf("expected V2 to be Ignored when outOfOrder=false, got %s", stateMap["V2__resolved.sql"])
+	}
+
+	// When outOfOrder is enabled, V2 becomes Pending
+	cfg.OutOfOrder = true
+	mOutOfOrder, _ := New(cfg, db)
+	infoRes2, _ := mOutOfOrder.Info(ctx)
+	for _, item := range infoRes2.Migrations {
+		if item.Script == "V2__resolved.sql" && item.State != resolver.StatePending {
+			t.Errorf("expected V2 to be Pending when outOfOrder=true, got %s", item.State)
+		}
 	}
 }
