@@ -1,0 +1,122 @@
+package migrator
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/RoryQ/noway/pkg/database"
+	"github.com/RoryQ/noway/pkg/version"
+)
+
+// BaselineResult contains the baseline operation outcome.
+type BaselineResult struct {
+	Schema              string `json:"schema"`
+	Table               string `json:"table"`
+	BaselineVersion     string `json:"baselineVersion"`
+	BaselineDescription string `json:"baselineDescription"`
+	Success             bool   `json:"success"`
+}
+
+// Baseline baselines an existing database, setting the baseline version marker.
+func (m *Migrator) Baseline(ctx context.Context) (*BaselineResult, error) {
+	defaultSchema := m.config.GetDefaultSchema()
+	table := m.config.Table
+
+	// 1. Ensure schema exists
+	if err := m.db.EnsureSchema(ctx, defaultSchema); err != nil {
+		return nil, fmt.Errorf("failed to ensure schema exists: %w", err)
+	}
+
+	// 2. Ensure history table exists
+	if err := m.db.EnsureHistoryTable(ctx, defaultSchema, table); err != nil {
+		return nil, fmt.Errorf("failed to create schema history table: %w", err)
+	}
+
+	// 3. Acquire lock
+	unlock, err := m.db.Lock(ctx, defaultSchema, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire lock for baseline: %w", err)
+	}
+	defer func() {
+		_ = unlock(context.Background())
+	}()
+
+	// 4. Check existing history
+	applied, err := m.db.FetchHistory(ctx, defaultSchema, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch schema history: %w", err)
+	}
+
+	for _, app := range applied {
+		if app.Type == "BASELINE" {
+			return nil, fmt.Errorf("unable to baseline database: schema history table already baselined at version %s", app.Version.String())
+		}
+	}
+
+	if len(applied) > 0 {
+		return nil, fmt.Errorf("unable to baseline database: schema history table is not empty and already contains %d applied migration(s)", len(applied))
+	}
+
+	// 5. Fire beforeBaseline callbacks
+	if err := m.callbackRunner.Fire(ctx, "beforeBaseline"); err != nil {
+		return nil, err
+	}
+
+	// 6. Insert baseline record
+	user := m.config.InstalledBy
+	if user == "" {
+		currentUser, _ := m.db.GetCurrentUser(ctx)
+		if currentUser != "" {
+			user = currentUser
+		} else {
+			user = "flyway"
+		}
+	}
+
+	bVer := m.config.BaselineVersion
+	if bVer == "" {
+		bVer = "1"
+	}
+	bDesc := m.config.BaselineDescription
+	if bDesc == "" {
+		bDesc = "<< Flyway Baseline >>"
+	}
+
+	// Validate baseline version
+	_, err = version.Parse(bVer)
+	if err != nil {
+		return nil, fmt.Errorf("invalid baseline version '%s': %w", bVer, err)
+	}
+
+	rec := database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       &bVer,
+		Description:   bDesc,
+		Type:          "BASELINE",
+		Script:        bDesc,
+		Checksum:      nil,
+		InstalledBy:   user,
+		InstalledOn:   time.Now(),
+		ExecutionTime: 0,
+		Success:       true,
+	}
+
+	if err := m.db.InsertHistory(ctx, defaultSchema, table, rec); err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterBaselineError")
+		return nil, fmt.Errorf("failed to insert baseline record: %w", err)
+	}
+
+	// 7. Fire afterBaseline callbacks
+	if err := m.callbackRunner.Fire(ctx, "afterBaseline"); err != nil {
+		return nil, err
+	}
+
+	return &BaselineResult{
+		Schema:              defaultSchema,
+		Table:               table,
+		BaselineVersion:     bVer,
+		BaselineDescription: bDesc,
+		Success:             true,
+	}, nil
+}
