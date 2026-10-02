@@ -94,10 +94,11 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 		UndoPrefix:       cfg.UndoSQLMigrationPrefix,
 		BaselinePrefix:   cfg.BaselineSQLMigrationPrefix,
 		Separator:        cfg.SQLMigrationSeparator,
-		Suffixes:         suffixes,
-		Encoding:         cfg.Encoding,
-		Replacer:         replacer,
-		Builtins:         builtins,
+		Suffixes:               suffixes,
+		Encoding:               cfg.Encoding,
+		PlaceholderReplacement: &cfg.PlaceholderReplacement,
+		Replacer:               replacer,
+		Builtins:               builtins,
 	})
 
 	// Discover callbacks
@@ -107,6 +108,7 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 	}
 
 	cbRunner := NewCallbackRunner(db, resolvedCallbacks, bqParser, replacer, builtins)
+	cbRunner.SetConfig(cfg)
 
 	return &Migrator{
 		config:         cfg,
@@ -117,6 +119,75 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 		callbackRunner: cbRunner,
 		builtins:       builtins,
 	}, nil
+}
+
+// determineEffectiveTarget unifies target version resolution across Migrate() and Info().
+// Handles:
+// - "latest": returns nil (no cutoff)
+// - "current": returns maxAppliedVersion, or version.Empty if none applied
+// - "next": returns first eligible unapplied versioned migration (skipping < maxAppliedVersion if !OutOfOrder)
+// - concrete numeric version strings (e.g. "2.0", with optional "?" trimmed) or cfg.TargetVersion
+func (m *Migrator) determineEffectiveTarget(
+	maxAppliedVersion *version.Version,
+	baselineVersion *version.Version,
+	appliedByVersion map[string]resolver.AppliedMigration,
+	resolvedVersioned []resolver.ResolvedMigration,
+) *version.Version {
+	targetStr := strings.TrimSpace(m.config.Target)
+	targetVer := m.config.TargetVersion
+
+	isCurrent := strings.EqualFold(targetStr, "current") || (targetVer != nil && targetVer.IsCurrent())
+	if isCurrent {
+		if maxAppliedVersion != nil {
+			return maxAppliedVersion
+		}
+		empty := version.Empty
+		return &empty
+	}
+
+	isNext := strings.EqualFold(targetStr, "next") || (targetVer != nil && targetVer.IsNext())
+	if isNext {
+		for _, res := range resolvedVersioned {
+			if res.Version == nil {
+				continue
+			}
+			verKey := res.Version.Normalized()
+			if _, wasApplied := appliedByVersion[verKey]; wasApplied {
+				continue
+			}
+			if baselineVersion != nil && baselineVersion.IsAtLeast(*res.Version) {
+				continue
+			}
+			if maxAppliedVersion != nil && maxAppliedVersion.IsNewerThan(*res.Version) && !m.config.OutOfOrder {
+				continue
+			}
+			return res.Version
+		}
+		if maxAppliedVersion != nil {
+			return maxAppliedVersion
+		}
+		empty := version.Empty
+		return &empty
+	}
+
+	isLatest := strings.EqualFold(targetStr, "latest") || (targetVer != nil && targetVer.IsLatest())
+	if isLatest {
+		return nil
+	}
+
+	if targetVer != nil && !targetVer.IsPredefined() {
+		return targetVer
+	}
+
+	if targetStr != "" {
+		cleanTarget := strings.TrimSuffix(targetStr, "?")
+		v, err := version.Parse(cleanTarget)
+		if err == nil && !v.IsPredefined() {
+			return &v
+		}
+	}
+
+	return nil
 }
 
 // Migrate executes pending migrations.
@@ -239,36 +310,35 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	}
 
 	// Determine effective target version (supports latest, current, next, or specific version)
-	var effectiveTargetVersion *version.Version
-	if m.config.TargetVersion != nil {
-		effectiveTargetVersion = m.config.TargetVersion
-	} else if strings.EqualFold(m.config.Target, "current") {
-		if maxAppliedVersion != nil {
-			effectiveTargetVersion = maxAppliedVersion
-		} else {
-			emptyVer := version.Empty
-			effectiveTargetVersion = &emptyVer
-		}
-	} else if strings.EqualFold(m.config.Target, "next") {
-		for _, res := range resolved.VersionedMigrations {
-			if res.Version == nil {
+	effectiveTargetVersion := m.determineEffectiveTarget(
+		maxAppliedVersion,
+		baselineVersion,
+		appliedByVersion,
+		resolved.VersionedMigrations,
+	)
+
+	// Check for Cumulative Baseline Migrations on Fresh Database
+	var selectedBaseline *resolver.ResolvedMigration
+	if len(applied) == 0 && len(resolved.BaselineMigrations) > 0 {
+		for i := len(resolved.BaselineMigrations) - 1; i >= 0; i-- {
+			b := resolved.BaselineMigrations[i]
+			if b.Version == nil {
 				continue
 			}
-			verKey := res.Version.Normalized()
-			if _, wasApplied := appliedByVersion[verKey]; !wasApplied {
-				if baselineVersion == nil || !baselineVersion.IsAtLeast(*res.Version) {
-					effectiveTargetVersion = res.Version
-					break
-				}
+			if effectiveTargetVersion == nil || !b.Version.IsNewerThan(*effectiveTargetVersion) {
+				selectedBaseline = &resolved.BaselineMigrations[i]
+				break
 			}
-		}
-		if effectiveTargetVersion == nil {
-			effectiveTargetVersion = maxAppliedVersion
 		}
 	}
 
 	// 7. Find pending versioned migrations
 	var pendingVersioned []resolver.ResolvedMigration
+	if selectedBaseline != nil {
+		baselineVersion = selectedBaseline.Version
+		pendingVersioned = append(pendingVersioned, *selectedBaseline)
+	}
+
 	for _, res := range resolved.VersionedMigrations {
 		if res.Version == nil {
 			continue
@@ -309,18 +379,12 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	}
 
 	totalToApply := len(pendingVersioned) + len(pendingRepeatable)
-	if totalToApply == 0 {
-		return &MigrateResult{
-			InitialVersion:     initialVersionStr,
-			TargetVersion:      initialVersionStr,
-			MigrationsExecuted: 0,
-			Success:            true,
-			TotalExecutionTime: time.Since(overallStart).Milliseconds(),
-		}, nil
-	}
+
+	m.callbackRunner.SetOperation("MIGRATE")
 
 	// 9. Fire beforeMigrate callback
 	if err := m.callbackRunner.Fire(ctx, "beforeMigrate"); err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 		return nil, err
 	}
 
@@ -344,55 +408,88 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 
 	currentVersion := maxAppliedVersion
 
-	// 10. Execute Versioned Migrations
-	for _, mig := range pendingVersioned {
-		if mig.Config.ShouldExecute != "" {
-			shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
-			if err != nil {
-				return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
+	// Only execute migration loops if totalToApply > 0
+	if totalToApply > 0 {
+		// 10. Execute Versioned Migrations
+		for _, mig := range pendingVersioned {
+			if mig.Config.ShouldExecute != "" {
+				shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
+				if err != nil {
+					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+					result.Success = false
+					return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
+				}
+				if !shouldExec {
+					continue
+				}
 			}
-			if !shouldExec {
-				continue
+
+			execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, user)
+			if err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				result.Success = false
+				return result, err
+			}
+			result.ExecutedMigrations = append(result.ExecutedMigrations, *execSummary)
+			result.MigrationsExecuted++
+			nextInstalledRank++
+			if currentVersion == nil || mig.Version.IsNewerThan(*currentVersion) {
+				currentVersion = mig.Version
 			}
 		}
 
-		execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, user)
-		if err != nil {
+		// Fire afterVersioned callback
+		if err := m.callbackRunner.Fire(ctx, "afterVersioned"); err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			result.Success = false
 			return result, err
 		}
-		result.ExecutedMigrations = append(result.ExecutedMigrations, *execSummary)
-		result.MigrationsExecuted++
-		nextInstalledRank++
-		currentVersion = mig.Version
-	}
 
-	// 11. Execute Repeatable Migrations
-	for _, mig := range pendingRepeatable {
-		if mig.Config.ShouldExecute != "" {
-			shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
-			if err != nil {
-				return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
-			}
-			if !shouldExec {
-				continue
-			}
-		}
-
-		execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, user)
-		if err != nil {
+		// Fire beforeRepeatables callback
+		if err := m.callbackRunner.Fire(ctx, "beforeRepeatables"); err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			result.Success = false
 			return result, err
 		}
-		result.ExecutedMigrations = append(result.ExecutedMigrations, *execSummary)
-		result.MigrationsExecuted++
-		nextInstalledRank++
+
+		// 11. Execute Repeatable Migrations
+		for _, mig := range pendingRepeatable {
+			if mig.Config.ShouldExecute != "" {
+				shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
+				if err != nil {
+					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+					result.Success = false
+					return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
+				}
+				if !shouldExec {
+					continue
+				}
+			}
+
+			execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, user)
+			if err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				result.Success = false
+				return result, err
+			}
+			result.ExecutedMigrations = append(result.ExecutedMigrations, *execSummary)
+			result.MigrationsExecuted++
+			nextInstalledRank++
+		}
+
+		// Fire afterMigrateApplied callback if len(appliedMigrations) > 0
+		if len(result.ExecutedMigrations) > 0 {
+			if err := m.callbackRunner.Fire(ctx, "afterMigrateApplied"); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				result.Success = false
+				return result, err
+			}
+		}
 	}
 
 	// 12. Fire afterMigrate callback
 	if err := m.callbackRunner.Fire(ctx, "afterMigrate"); err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 		return nil, err
 	}
 
@@ -438,7 +535,7 @@ func (m *Migrator) executeSQLMigration(
 		shouldReplace = *mig.Config.PlaceholderReplacement
 	}
 	if shouldReplace {
-		replaced, err := m.replacer.Replace(sql, m.builtins)
+		replaced, err := m.replacer.ReplaceContent(sql, m.builtins)
 		if err != nil {
 			return nil, fmt.Errorf("error replacing placeholders in %s: %w", mig.Script, err)
 		}
@@ -451,8 +548,17 @@ func (m *Migrator) executeSQLMigration(
 
 	var execErr error
 	for _, stmt := range stmts {
+		if err := m.callbackRunner.Fire(ctx, "beforeEachMigrateStatement"); err != nil {
+			execErr = err
+			break
+		}
 		if err := m.db.ExecuteStatement(ctx, stmt.SQL); err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterEachMigrateStatementError")
 			execErr = fmt.Errorf("error executing statement at line %d in %s: %w", stmt.LineNumber, mig.Script, err)
+			break
+		}
+		if err := m.callbackRunner.Fire(ctx, "afterEachMigrateStatement"); err != nil {
+			execErr = err
 			break
 		}
 	}
@@ -466,11 +572,16 @@ func (m *Migrator) executeSQLMigration(
 	}
 	cs := mig.Checksum
 
+	recType := string(mig.Type)
+	if recType == "" {
+		recType = "SQL"
+	}
+
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,
 		Version:       verStr,
 		Description:   mig.Description,
-		Type:          "SQL",
+		Type:          recType,
 		Script:        mig.Script,
 		Checksum:      &cs,
 		InstalledBy:   user,
@@ -497,7 +608,12 @@ func (m *Migrator) executeSQLMigration(
 
 	verOutput := ""
 	cat := "Repeatable"
-	if mig.Version != nil {
+	if mig.Type == resolver.TypeBaseline {
+		cat = "Baseline"
+		if mig.Version != nil {
+			verOutput = mig.Version.String()
+		}
+	} else if mig.Version != nil {
 		verOutput = mig.Version.String()
 		cat = "Versioned"
 	}
@@ -506,7 +622,7 @@ func (m *Migrator) executeSQLMigration(
 		Category:      cat,
 		Version:       verOutput,
 		Description:   mig.Description,
-		Type:          "SQL",
+		Type:          recType,
 		Script:        mig.Script,
 		ExecutionTime: execTime,
 	}, nil
@@ -532,7 +648,7 @@ func (m *Migrator) executeScriptMigration(
 		shouldReplace = *mig.Config.PlaceholderReplacement
 	}
 	if shouldReplace {
-		replaced, err := m.replacer.Replace(scriptContent, m.builtins)
+		replaced, err := m.replacer.ReplaceContent(scriptContent, m.builtins)
 		if err == nil {
 			scriptContent = replaced
 		}

@@ -25,9 +25,10 @@ type ResolverConfig struct {
 	Separator          string   // default "__"
 	Suffixes           []string // default [".sql"]
 	Encoding           string   // default "UTF-8"
-	IgnoreMissingFiles bool
-	Replacer           *parser.PlaceholderReplacer
-	Builtins           parser.BuiltinPlaceholders
+	IgnoreMissingFiles     bool
+	PlaceholderReplacement *bool
+	Replacer               *parser.PlaceholderReplacer
+	Builtins               parser.BuiltinPlaceholders
 }
 
 // DefaultResolverConfig returns standard defaults.
@@ -86,10 +87,14 @@ type ResolveResult struct {
 
 // ResolvedCallback represents a discovered callback script.
 type ResolvedCallback struct {
-	Event            string // e.g. "beforeMigrate", "afterMigrate"
-	Filename         string
-	Content          string
-	PhysicalLocation string
+	Event            string          // e.g. "beforeMigrate", "afterMigrate"
+	Description      string          // e.g. "first step", or "" for plain callbacks
+	Filename         string          // e.g. "beforeMigrate__first_step.sql"
+	Content          string          // SQL or script contents
+	PhysicalLocation string          // Full filesystem or FS path
+	Type             MigrationType   // TypeSQL or TypeScript
+	IsScript         bool            // true for .sh, .bash, .cmd, .ps1, .bat, .py
+	Config           MigrationConfig // Configuration from .conf file if present
 }
 
 // Standard Flyway callback event names
@@ -101,6 +106,12 @@ var StandardCallbackEvents = []string{
 	"beforeEachMigrateError",
 	"afterEachMigrateError",
 	"afterMigrateError",
+	"afterVersioned",
+	"beforeRepeatables",
+	"afterMigrateApplied",
+	"beforeEachMigrateStatement",
+	"afterEachMigrateStatement",
+	"afterEachMigrateStatementError",
 	"beforeClean",
 	"afterClean",
 	"beforeEachClean",
@@ -123,7 +134,16 @@ var StandardCallbackEvents = []string{
 	"beforeEachUndo",
 	"afterEachUndo",
 	"afterUndoError",
+	"beforeEachUndoStatement",
+	"afterEachUndoStatement",
+	"afterEachUndoStatementError",
 	"createSchema",
+}
+
+type seenTracking struct {
+	versions         map[string]string // normalized version string -> fullPath
+	repeatables      map[string]string // description -> fullPath
+	baselineVersions map[string]string // normalized version string -> fullPath
 }
 
 // Resolve scans configured locations and returns all resolved migrations and callbacks.
@@ -132,7 +152,11 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 		Callbacks: make(map[string][]ResolvedCallback),
 	}
 
-	seenVersions := make(map[string]string) // version string -> filename
+	seen := &seenTracking{
+		versions:         make(map[string]string),
+		repeatables:      make(map[string]string),
+		baselineVersions: make(map[string]string),
+	}
 
 	for _, loc := range r.config.Locations {
 		cleanLoc := strings.TrimPrefix(loc, "filesystem:")
@@ -140,7 +164,7 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 
 		// Check if scanning from provided fs.FS
 		if r.config.FS != nil {
-			err := r.scanFS(r.config.FS, cleanLoc, result, seenVersions)
+			err := r.scanFS(r.config.FS, cleanLoc, result, seen)
 			if err != nil && !r.config.IgnoreMissingFiles {
 				return nil, fmt.Errorf("error reading location '%s': %w", loc, err)
 			}
@@ -161,13 +185,13 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 		}
 
 		if info.IsDir() {
-			err := r.scanDir(cleanLoc, result, seenVersions)
+			err := r.scanDir(cleanLoc, result, seen)
 			if err != nil {
 				return nil, err
 			}
 		} else {
 			// Single file
-			err := r.processFile(filepath.Dir(cleanLoc), info.Name(), cleanLoc, result, seenVersions)
+			err := r.processFile(filepath.Dir(cleanLoc), info.Name(), cleanLoc, result, seen)
 			if err != nil {
 				return nil, err
 			}
@@ -179,13 +203,30 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 		return result.VersionedMigrations[i].Version.Compare(*result.VersionedMigrations[j].Version) < 0
 	})
 
-	// Sort repeatable migrations by description, then script name
+	// Sort repeatable migrations strictly by description
 	sort.Slice(result.RepeatableMigrations, func(i, j int) bool {
-		if result.RepeatableMigrations[i].Description == result.RepeatableMigrations[j].Description {
-			return result.RepeatableMigrations[i].Script < result.RepeatableMigrations[j].Script
-		}
 		return result.RepeatableMigrations[i].Description < result.RepeatableMigrations[j].Description
 	})
+
+	// Sort baseline migrations by version
+	sort.Slice(result.BaselineMigrations, func(i, j int) bool {
+		return result.BaselineMigrations[i].Version.Compare(*result.BaselineMigrations[j].Version) < 0
+	})
+
+	// Sort callbacks for each event alphabetically by description (with deterministic fallback)
+	for event := range result.Callbacks {
+		sort.SliceStable(result.Callbacks[event], func(i, j int) bool {
+			cbI := result.Callbacks[event][i]
+			cbJ := result.Callbacks[event][j]
+			if cbI.Description != cbJ.Description {
+				return cbI.Description < cbJ.Description
+			}
+			if cbI.PhysicalLocation != cbJ.PhysicalLocation {
+				return cbI.PhysicalLocation < cbJ.PhysicalLocation
+			}
+			return cbI.Filename < cbJ.Filename
+		})
+	}
 
 	return result, nil
 }
@@ -272,7 +313,7 @@ func parseMigrationConfigFile(content string, cfg *MigrationConfig) {
 	}
 }
 
-func (r *Resolver) scanDir(dirPath string, result *ResolveResult, seenVersions map[string]string) error {
+func (r *Resolver) scanDir(dirPath string, result *ResolveResult, seen *seenTracking) error {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return fmt.Errorf("error reading directory '%s': %w", dirPath, err)
@@ -281,14 +322,14 @@ func (r *Resolver) scanDir(dirPath string, result *ResolveResult, seenVersions m
 	for _, entry := range entries {
 		if entry.IsDir() {
 			subPath := filepath.Join(dirPath, entry.Name())
-			if err := r.scanDir(subPath, result, seenVersions); err != nil {
+			if err := r.scanDir(subPath, result, seen); err != nil {
 				return err
 			}
 			continue
 		}
 
 		fullPath := filepath.Join(dirPath, entry.Name())
-		if err := r.processFile(dirPath, entry.Name(), fullPath, result, seenVersions); err != nil {
+		if err := r.processFile(dirPath, entry.Name(), fullPath, result, seen); err != nil {
 			return err
 		}
 	}
@@ -296,7 +337,7 @@ func (r *Resolver) scanDir(dirPath string, result *ResolveResult, seenVersions m
 	return nil
 }
 
-func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, seenVersions map[string]string) error {
+func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, seen *seenTracking) error {
 	cleanDir := strings.TrimPrefix(dirPath, "/")
 	if cleanDir == "" {
 		cleanDir = "."
@@ -332,11 +373,11 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 		}
 
 		dir := filepath.Dir(path)
-		return r.parseAndAddMigration(dir, filename, path, string(data), fileSys, result, seenVersions)
+		return r.parseAndAddMigration(dir, filename, path, string(data), fileSys, result, seen)
 	})
 }
 
-func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveResult, seenVersions map[string]string) error {
+func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveResult, seen *seenTracking) error {
 	if strings.HasSuffix(filename, ".conf") {
 		return nil
 	}
@@ -357,26 +398,31 @@ func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveRe
 		return fmt.Errorf("error reading file '%s': %w", fullPath, err)
 	}
 
-	return r.parseAndAddMigration(dir, filename, fullPath, string(data), nil, result, seenVersions)
+	return r.parseAndAddMigration(dir, filename, fullPath, string(data), nil, result, seen)
 }
 
 func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool) (int64, error) {
 	calcContent := content
 	if isRepeatable && r.config.Replacer != nil {
-		shouldReplace := true
+		shouldReplace := r.config.Replacer.IsEnabled()
+		if r.config.PlaceholderReplacement != nil {
+			shouldReplace = *r.config.PlaceholderReplacement
+		}
 		if migConfig.PlaceholderReplacement != nil {
 			shouldReplace = *migConfig.PlaceholderReplacement
 		}
 		if shouldReplace {
-			if replaced, err := r.config.Replacer.Replace(content, r.config.Builtins); err == nil {
-				calcContent = replaced
+			replaced, err := r.config.Replacer.ReplaceContent(content, r.config.Builtins)
+			if err != nil {
+				return 0, fmt.Errorf("failed to replace placeholders in repeatable migration: %w", err)
 			}
+			calcContent = replaced
 		}
 	}
 	return checksum.CalculateString(calcContent)
 }
 
-func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string, fileSys fs.FS, result *ResolveResult, seenVersions map[string]string) error {
+func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string, fileSys fs.FS, result *ResolveResult, seen *seenTracking) error {
 	migConfig := r.loadMigrationConfig(dir, filename, fileSys)
 	isScript := isScriptFile(filename)
 
@@ -385,7 +431,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 		defaultType = TypeScript
 	}
 
-	// Check for standard callbacks first (e.g. beforeMigrate.sql, afterMigrate.sh)
+	// Check for standard callbacks (e.g. beforeMigrate.sql, beforeMigrate__desc.sql, afterMigrate.sh)
 	baseWithoutExt := filename
 	for _, suffix := range r.config.Suffixes {
 		if strings.HasSuffix(baseWithoutExt, suffix) {
@@ -394,13 +440,33 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 		}
 	}
 
+	var eventCandidate string
+	var desc string
+	sep := r.config.Separator
+	if sep == "" {
+		sep = "__"
+	}
+	sepIdx := strings.Index(baseWithoutExt, sep)
+	if sepIdx >= 0 {
+		eventCandidate = baseWithoutExt[:sepIdx]
+		desc = baseWithoutExt[sepIdx+len(sep):]
+		desc = strings.ReplaceAll(desc, "_", " ")
+	} else {
+		eventCandidate = baseWithoutExt
+		desc = ""
+	}
+
 	for _, event := range StandardCallbackEvents {
-		if baseWithoutExt == event {
+		if eventCandidate == event {
 			result.Callbacks[event] = append(result.Callbacks[event], ResolvedCallback{
 				Event:            event,
+				Description:      desc,
 				Filename:         filename,
 				Content:          content,
 				PhysicalLocation: fullPath,
+				Type:             defaultType,
+				IsScript:         isScript,
+				Config:           migConfig,
 			})
 			return nil
 		}
@@ -416,6 +482,12 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			}
 		}
 		desc = strings.ReplaceAll(desc, "_", " ")
+
+		if prevPath, exists := seen.repeatables[desc]; exists {
+			return fmt.Errorf("found more than one repeatable migration with description '%s'\nOffenders:\n-> %s\n-> %s", desc, prevPath, fullPath)
+		}
+		seen.repeatables[desc] = fullPath
+
 		cs, err := r.calculateChecksum(content, migConfig, true)
 		if err != nil {
 			return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
@@ -482,9 +554,10 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 		}
 	}
 
-	// Check for baseline migration: B1.2__description.sql
+	// Check for baseline migration: B1.2__description.sql or B__1.2__description.sql
 	if strings.HasPrefix(filename, r.config.BaselinePrefix) {
 		verDesc := strings.TrimPrefix(filename, r.config.BaselinePrefix)
+		verDesc = strings.TrimPrefix(verDesc, r.config.Separator)
 		for _, suffix := range r.config.Suffixes {
 			if strings.HasSuffix(verDesc, suffix) {
 				verDesc = strings.TrimSuffix(verDesc, suffix)
@@ -498,6 +571,12 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			desc := strings.ReplaceAll(parts[1], "_", " ")
 			ver, err := version.Parse(verStr)
 			if err == nil {
+				canonicalVer := ver.Normalized()
+				if prevPath, exists := seen.baselineVersions[canonicalVer]; exists {
+					return fmt.Errorf("found more than one baseline migration with version %s\nOffenders:\n-> %s\n-> %s", canonicalVer, prevPath, fullPath)
+				}
+				seen.baselineVersions[canonicalVer] = fullPath
+
 				cs, err := r.calculateChecksum(content, migConfig, false)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
@@ -546,10 +625,10 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			}
 
 			canonicalVer := ver.Normalized()
-			if prevFile, exists := seenVersions[canonicalVer]; exists {
+			if prevFile, exists := seen.versions[canonicalVer]; exists {
 				return fmt.Errorf("found more than one migration with version %s\nOffenders:\n-> %s\n-> %s", canonicalVer, prevFile, fullPath)
 			}
-			seenVersions[canonicalVer] = fullPath
+			seen.versions[canonicalVer] = fullPath
 
 			cs, err := r.calculateChecksum(content, migConfig, false)
 			if err != nil {

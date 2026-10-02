@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/RoryQ/noway/pkg/config"
 	"github.com/RoryQ/noway/pkg/database"
 	"github.com/RoryQ/noway/pkg/parser"
 	"github.com/RoryQ/noway/pkg/resolver"
@@ -20,6 +21,8 @@ type CallbackRunner struct {
 	parser    *parser.BigQueryParser
 	replacer  *parser.PlaceholderReplacer
 	builtins  parser.BuiltinPlaceholders
+	config    config.Configuration
+	operation string
 }
 
 // NewCallbackRunner creates a CallbackRunner.
@@ -36,6 +39,23 @@ func NewCallbackRunner(
 		parser:    parser,
 		replacer:  replacer,
 		builtins:  builtins,
+	}
+}
+
+// SetCallbacks updates the resolved callbacks map.
+func (c *CallbackRunner) SetCallbacks(callbacks map[string][]resolver.ResolvedCallback) {
+	c.callbacks = callbacks
+}
+
+// SetOperation sets the active operation name (e.g. MIGRATE, VALIDATE, INFO).
+func (c *CallbackRunner) SetOperation(op string) {
+	c.operation = op
+}
+
+// SetConfig sets the configuration for environment variable and placeholder injection.
+func (c *CallbackRunner) SetConfig(cfg *config.Configuration) {
+	if cfg != nil {
+		c.config = *cfg
 	}
 }
 
@@ -110,11 +130,16 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		defer cleanup()
 	}
 
-	cmd := exec.CommandContext(ctx, "/bin/bash", scriptPath)
-	if filepath.Ext(scriptPath) == ".cmd" || filepath.Ext(scriptPath) == ".bat" {
+	var cmd *exec.Cmd
+	switch filepath.Ext(scriptPath) {
+	case ".cmd", ".bat":
 		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", scriptPath)
-	} else if filepath.Ext(scriptPath) == ".ps1" {
+	case ".ps1":
 		cmd = exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+	case ".py":
+		cmd = exec.CommandContext(ctx, "python3", scriptPath)
+	default:
+		cmd = exec.CommandContext(ctx, "/bin/bash", scriptPath)
 	}
 
 	if cb.PhysicalLocation != "" {
@@ -124,19 +149,70 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		}
 	}
 
+	op := c.operation
+	if op == "" {
+		op = determineOperation(event)
+	}
+
+	dbName := c.builtins.Database
+	if dbName == "" {
+		if c.config.GCPDataset != "" {
+			dbName = c.config.GCPDataset
+		} else if c.builtins.DefaultSchema != "" {
+			dbName = c.builtins.DefaultSchema
+		} else {
+			dbName = "flyway"
+		}
+	}
+
+	schemasStr := strings.Join(c.config.Schemas, ",")
+	if schemasStr == "" {
+		if c.builtins.DefaultSchema != "" {
+			schemasStr = c.builtins.DefaultSchema
+		} else {
+			schemasStr = "flyway"
+		}
+	}
+
 	env := os.Environ()
 	env = append(env,
+		"FLYWAY_OPERATION="+op,
+		"NOWAY_OPERATION="+op,
 		"FLYWAY_EVENT="+event,
 		"NOWAY_EVENT="+event,
 		"FLYWAY_CALLBACK="+cb.Filename,
 		"NOWAY_CALLBACK="+cb.Filename,
 		"FLYWAY_USER="+c.builtins.User,
 		"NOWAY_USER="+c.builtins.User,
+		"FLYWAY_DATABASE="+dbName,
+		"NOWAY_DATABASE="+dbName,
 		"FLYWAY_DEFAULT_SCHEMA="+c.builtins.DefaultSchema,
 		"NOWAY_DEFAULT_SCHEMA="+c.builtins.DefaultSchema,
+		"FLYWAY_SCHEMAS="+schemasStr,
+		"NOWAY_SCHEMAS="+schemasStr,
 		"FLYWAY_TABLE="+c.builtins.Table,
 		"NOWAY_TABLE="+c.builtins.Table,
+		"FLYWAY_GCP_PROJECT_ID="+c.config.GCPProjectID,
+		"NOWAY_GCP_PROJECT_ID="+c.config.GCPProjectID,
+		"FLYWAY_GCP_DATASET="+c.config.GCPDataset,
+		"NOWAY_GCP_DATASET="+c.config.GCPDataset,
+		"FLYWAY_GCP_LOCATION="+c.config.GCPLocation,
+		"NOWAY_GCP_LOCATION="+c.config.GCPLocation,
+		"FLYWAY_BIGQUERY_ENDPOINT="+c.config.GCPBigQueryEndpoint,
+		"NOWAY_BIGQUERY_ENDPOINT="+c.config.GCPBigQueryEndpoint,
+		"FP__flyway_defaultSchema="+c.builtins.DefaultSchema,
+		"FP__flyway_table="+c.builtins.Table,
+		"FP__flyway_user="+c.builtins.User,
+		"FP__flyway_database="+dbName,
 	)
+
+	for k, v := range c.config.Placeholders {
+		env = append(env,
+			"FP__"+k+"="+v,
+			"FLYWAY_PLACEHOLDER_"+k+"="+v,
+			"NOWAY_PLACEHOLDER_"+k+"="+v,
+		)
+	}
 	cmd.Env = env
 
 	output, err := cmd.CombinedOutput()
@@ -144,6 +220,28 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		return fmt.Errorf("callback script %s (%s) failed: %w\nOutput:\n%s", cb.Filename, event, err, string(output))
 	}
 	return nil
+}
+
+func determineOperation(event string) string {
+	lower := strings.ToLower(event)
+	switch {
+	case strings.Contains(lower, "migrate"):
+		return "MIGRATE"
+	case strings.Contains(lower, "validate"):
+		return "VALIDATE"
+	case strings.Contains(lower, "info"):
+		return "INFO"
+	case strings.Contains(lower, "clean"):
+		return "CLEAN"
+	case strings.Contains(lower, "undo"):
+		return "UNDO"
+	case strings.Contains(lower, "baseline"):
+		return "BASELINE"
+	case strings.Contains(lower, "repair"):
+		return "REPAIR"
+	default:
+		return "COMMAND"
+	}
 }
 
 func isScriptFile(filename string) bool {

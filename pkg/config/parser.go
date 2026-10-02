@@ -55,8 +55,11 @@ func LoadFromEnv(cfg *Configuration) {
 		v := parts[1]
 
 		kUpper := strings.ToUpper(k)
-		if strings.HasPrefix(kUpper, "FLYWAY_") || strings.HasPrefix(kUpper, "NOWAY_") {
-			key := k[7:]
+		if strings.HasPrefix(kUpper, "FLYWAY_") {
+			key := k[len("FLYWAY_"):]
+			applyEnvKey(cfg, key, v)
+		} else if strings.HasPrefix(kUpper, "NOWAY_") {
+			key := k[len("NOWAY_"):]
 			applyEnvKey(cfg, key, v)
 		}
 	}
@@ -148,6 +151,12 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 				cfg.Placeholders = make(map[string]string)
 			}
 			cfg.Placeholders[phKey] = val
+		} else if strings.HasPrefix(keyUpper, "PLACEHOLDER_") {
+			phKey := key[len("PLACEHOLDER_"):]
+			if cfg.Placeholders == nil {
+				cfg.Placeholders = make(map[string]string)
+			}
+			cfg.Placeholders[phKey] = val
 		}
 	}
 }
@@ -175,10 +184,14 @@ func parseProperties(content string, cfg *Configuration) error {
 			val = val[1 : len(val)-1]
 		}
 
-		// Strip flyway. or noway. prefix
+		// Strip flyway. or noway. prefix case-insensitively
 		cleanKey := key
-		cleanKey = strings.TrimPrefix(cleanKey, "flyway.")
-		cleanKey = strings.TrimPrefix(cleanKey, "noway.")
+		lowerKey := strings.ToLower(cleanKey)
+		if strings.HasPrefix(lowerKey, "flyway.") {
+			cleanKey = cleanKey[len("flyway."):]
+		} else if strings.HasPrefix(lowerKey, "noway.") {
+			cleanKey = cleanKey[len("noway."):]
+		}
 
 		applyProperty(cfg, cleanKey, val)
 	}
@@ -269,8 +282,15 @@ func applyProperty(cfg *Configuration, key, val string) {
 	case "gcpcredentialsjson":
 		cfg.GCPCredentialsJSON = val
 	default:
-		if strings.HasPrefix(key, "placeholders.") {
-			phKey := strings.TrimPrefix(key, "placeholders.")
+		keyLower := strings.ToLower(key)
+		if strings.HasPrefix(keyLower, "placeholders.") {
+			phKey := key[len("placeholders."):]
+			if cfg.Placeholders == nil {
+				cfg.Placeholders = make(map[string]string)
+			}
+			cfg.Placeholders[phKey] = val
+		} else if strings.HasPrefix(keyLower, "placeholder.") {
+			phKey := key[len("placeholder."):]
 			if cfg.Placeholders == nil {
 				cfg.Placeholders = make(map[string]string)
 			}

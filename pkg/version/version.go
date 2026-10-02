@@ -90,9 +90,19 @@ func MustParse(versionStr string) Version {
 	return v
 }
 
+// New parses a version string into a Version object.
+func New(versionStr string) (Version, error) {
+	return Parse(versionStr)
+}
+
+// Compare compares two versions.
+func Compare(v1, v2 Version) int {
+	return v1.Compare(v2)
+}
+
 // String returns the normalized display text.
 func (v Version) String() string {
-	if v.empty {
+	if v.IsEmpty() {
 		return ""
 	}
 	return v.displayText
@@ -100,7 +110,7 @@ func (v Version) String() string {
 
 // Normalized returns the canonical string with trailing zeros stripped for equivalence lookup.
 func (v Version) Normalized() string {
-	if v.empty {
+	if v.IsEmpty() {
 		return ""
 	}
 	if v.predefined {
@@ -131,36 +141,62 @@ func (v Version) IsPredefined() bool {
 	return v.predefined
 }
 
+// IsCurrent returns true if this is the Current sentinel.
+func (v Version) IsCurrent() bool {
+	return v.current
+}
+
+// IsNext returns true if this is the Next sentinel.
+func (v Version) IsNext() bool {
+	return v.next
+}
+
+// IsLatest returns true if this is the Latest sentinel.
+func (v Version) IsLatest() bool {
+	return v.latest
+}
+
+// rank returns the comparison tier of the version:
+// Tier 1: Empty
+// Tier 2: Current
+// Tier 3: Next
+// Tier 4: Numeric versions
+// Tier 5: Latest
+func (v Version) rank() int {
+	if v.IsEmpty() {
+		return 1
+	}
+	if v.current {
+		return 2
+	}
+	if v.next {
+		return 3
+	}
+	if v.latest {
+		return 5
+	}
+	return 4
+}
+
 // Compare compares this version to another version.
+// 5-tier rank ordering:
+// Empty (rank 1) < Current (rank 2) < Next (rank 3) < Numeric Versions (rank 4) < Latest (rank 5)
 // Returns:
 // -1 if v < other
 //  0 if v == other
 //  1 if v > other
 func (v Version) Compare(other Version) int {
-	if v.empty && other.empty {
-		return 0
-	}
-	if v.empty {
-		return -1
-	}
-	if other.empty {
+	r1 := v.rank()
+	r2 := other.rank()
+	if r1 != r2 {
+		if r1 < r2 {
+			return -1
+		}
 		return 1
 	}
 
-	if v.latest && other.latest {
-		return 0
-	}
-	if v.latest {
-		return 1
-	}
-	if other.latest {
-		return -1
-	}
-
-	if v.current && other.current {
-		return 0
-	}
-	if v.next && other.next {
+	// Both have the same rank. If not rank 4 (numeric), they are both the same sentinel.
+	if r1 != 4 {
 		return 0
 	}
 

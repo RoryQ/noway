@@ -54,6 +54,9 @@ func TestVersionParsingAndComparison(t *testing.T) {
 
 func TestVersionSpecialMarkers(t *testing.T) {
 	v1, _ := Parse("1.0")
+	v0, _ := Parse("0")
+	current, _ := Parse("current")
+	next, _ := Parse("next")
 	latest, _ := Parse("latest")
 	empty, _ := Parse("")
 
@@ -65,6 +68,39 @@ func TestVersionSpecialMarkers(t *testing.T) {
 	}
 	if !empty.IsEmpty() {
 		t.Errorf("expected empty.IsEmpty() == true")
+	}
+
+	// 5-tier rank ordering tests:
+	// Empty (1) < Current (2) < Next (3) < Numeric Versions (4) < Latest (5)
+	if v0.Compare(current) != 1 {
+		t.Errorf("expected v0 > current, got cmp=%d", v0.Compare(current))
+	}
+	if current.Compare(v0) != -1 {
+		t.Errorf("expected current < v0, got cmp=%d", current.Compare(v0))
+	}
+	if v0.Compare(next) != 1 {
+		t.Errorf("expected v0 > next, got cmp=%d", v0.Compare(next))
+	}
+	if next.Compare(v0) != -1 {
+		t.Errorf("expected next < v0, got cmp=%d", next.Compare(v0))
+	}
+	if current.Compare(next) != -1 {
+		t.Errorf("expected current < next, got cmp=%d", current.Compare(next))
+	}
+	if next.Compare(current) != 1 {
+		t.Errorf("expected next > current, got cmp=%d", next.Compare(current))
+	}
+	if current.Compare(current) != 0 {
+		t.Errorf("expected current == current, got cmp=%d", current.Compare(current))
+	}
+	if next.Compare(next) != 0 {
+		t.Errorf("expected next == next, got cmp=%d", next.Compare(next))
+	}
+	if empty.Compare(current) != -1 {
+		t.Errorf("expected empty < current, got cmp=%d", empty.Compare(current))
+	}
+	if latest.Compare(v0) != 1 {
+		t.Errorf("expected latest > v0, got cmp=%d", latest.Compare(v0))
 	}
 }
 

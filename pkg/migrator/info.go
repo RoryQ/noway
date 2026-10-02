@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/RoryQ/noway/pkg/parser"
@@ -47,39 +46,52 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 		return nil, fmt.Errorf("failed to resolve migrations: %w", err)
 	}
 
+	m.callbackRunner.callbacks = res.Callbacks
+	m.callbackRunner.SetOperation("INFO")
+
+	if err := m.callbackRunner.Fire(ctx, "beforeInfo"); err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterInfoError")
+		return nil, err
+	}
+
 	// 2. Fetch applied migrations
 	var applied []resolver.AppliedMigration
 	exists, err := m.db.HistoryTableExists(ctx, defaultSchema, table)
 	if err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterInfoError")
 		return nil, fmt.Errorf("failed to check history table existence: %w", err)
 	}
 	if exists {
 		applied, err = m.db.FetchHistory(ctx, defaultSchema, table)
 		if err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterInfoError")
 			return nil, fmt.Errorf("failed to fetch schema history: %w", err)
 		}
 	}
 
 	// Determine effective target version
-	var effectiveTargetVersion *version.Version
-	if m.config.TargetVersion != nil {
-		effectiveTargetVersion = m.config.TargetVersion
-	} else if strings.EqualFold(m.config.Target, "current") {
-		var maxAppliedVersion *version.Version
-		for _, app := range applied {
-			if app.Version != nil && !app.Version.IsEmpty() {
-				if maxAppliedVersion == nil || app.Version.IsNewerThan(*maxAppliedVersion) {
-					maxAppliedVersion = app.Version
-				}
+	var maxAppliedVersion *version.Version
+	var baselineVersion *version.Version
+	appliedByVersion := make(map[string]resolver.AppliedMigration)
+
+	for _, app := range applied {
+		if app.Type == "BASELINE" && app.Version != nil {
+			baselineVersion = app.Version
+		}
+		if app.Version != nil && !app.Version.IsEmpty() {
+			appliedByVersion[app.Version.Normalized()] = app
+			if maxAppliedVersion == nil || app.Version.IsNewerThan(*maxAppliedVersion) {
+				maxAppliedVersion = app.Version
 			}
 		}
-		if maxAppliedVersion != nil {
-			effectiveTargetVersion = maxAppliedVersion
-		} else {
-			emptyVer := version.Empty
-			effectiveTargetVersion = &emptyVer
-		}
 	}
+
+	effectiveTargetVersion := m.determineEffectiveTarget(
+		maxAppliedVersion,
+		baselineVersion,
+		appliedByVersion,
+		res.VersionedMigrations,
+	)
 
 	// 3. Compute merged migration infos
 	infos := computeMigrationInfos(res, applied, effectiveTargetVersion, m.config.OutOfOrder, m.replacer, m.builtins)
@@ -119,6 +131,11 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 			InstalledBy:   info.InstalledBy,
 			ExecutionTime: execTime,
 		})
+	}
+
+	if err := m.callbackRunner.Fire(ctx, "afterInfo"); err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterInfoError")
+		return nil, err
 	}
 
 	return result, nil
@@ -306,7 +323,9 @@ func computeMigrationInfos(
 	}
 
 	// 3. Process Repeatable migrations
+	seenRepeatables := make(map[string]bool)
 	for _, res := range resolved.RepeatableMigrations {
+		seenRepeatables[res.Script] = true
 		runs, wasApplied := appliedRepeatables[res.Script]
 		rCopy := res
 		cs := res.Checksum
@@ -375,6 +394,39 @@ func computeMigrationInfos(
 				ExecutionTime: &execTime,
 				State:         state,
 				Resolved:      &rCopy,
+				Applied:       &appCopy,
+			})
+		}
+	}
+
+	// 4. Process applied repeatable migrations that are missing locally
+	for script, runs := range appliedRepeatables {
+		if seenRepeatables[script] {
+			continue
+		}
+		for i, run := range runs {
+			instOn := run.InstalledOn
+			execTime := run.ExecutionTime
+			appCopy := run
+
+			state := resolver.StateMissingSuccess
+			if !run.Success {
+				state = resolver.StateMissingFailed
+			} else if i < len(runs)-1 {
+				state = resolver.StateSuperseded
+			}
+
+			infos = append(infos, resolver.MigrationInfo{
+				Version:       nil,
+				Description:   run.Description,
+				Type:          run.Type,
+				Script:        run.Script,
+				Checksum:      run.Checksum,
+				InstalledBy:   run.InstalledBy,
+				InstalledOn:   &instOn,
+				ExecutionTime: &execTime,
+				State:         state,
+				Resolved:      nil,
 				Applied:       &appCopy,
 			})
 		}

@@ -419,6 +419,16 @@ func TestInfoFutureAndMissingStates(t *testing.T) {
 		Success:       true,
 	})
 
+	// Insert R__missing (applied in DB, but not present locally)
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 3,
+		Version:       nil,
+		Description:   "missing repeatable view",
+		Type:          "SQL",
+		Script:        "R__missing_view.sql",
+		Success:       true,
+	})
+
 	cfg := config.NewDefaultConfiguration()
 	cfg.DefaultSchema = "test_ds"
 	cfg.FS = mockFS
@@ -442,6 +452,9 @@ func TestInfoFutureAndMissingStates(t *testing.T) {
 	}
 	if stateMap["V2__resolved.sql"] != resolver.StateIgnored {
 		t.Errorf("expected V2 to be Ignored when outOfOrder=false, got %s", stateMap["V2__resolved.sql"])
+	}
+	if stateMap["R__missing_view.sql"] != resolver.StateMissingSuccess {
+		t.Errorf("expected R__missing_view to be Missing, got %s", stateMap["R__missing_view.sql"])
 	}
 
 	// When outOfOrder is enabled, V2 becomes Pending
@@ -852,6 +865,326 @@ func TestMigrateEnvPlaceholderCaseInsensitive(t *testing.T) {
 	expectedSQL := "CREATE TABLE prod_analytics.users (id INT64)"
 	if stmts[0] != expectedSQL {
 		t.Errorf("expected SQL %q, got %q", expectedSQL, stmts[0])
+	}
+}
+
+func TestOutOfOrderTargetVersionPreserved(t *testing.T) {
+	// Pre-populate history with V1 and V3
+	db := mock.NewMockDatabase()
+	ctx := context.Background()
+	_ = db.EnsureSchema(ctx, "test_ds")
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+
+	v1Str := "1"
+	v3Str := "3"
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       &v1Str,
+		Description:   "first",
+		Type:          "SQL",
+		Script:        "V1__first.sql",
+		Success:       true,
+	})
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 2,
+		Version:       &v3Str,
+		Description:   "third",
+		Type:          "SQL",
+		Script:        "V3__third.sql",
+		Success:       true,
+	})
+
+	mockFS := fstest.MapFS{
+		"sql/V1__first.sql":  &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"sql/V2__second.sql": &fstest.MapFile{Data: []byte("SELECT 2;")},
+		"sql/V3__third.sql":  &fstest.MapFile{Data: []byte("SELECT 3;")},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+	cfg.OutOfOrder = true
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	if res.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+	if res.ExecutedMigrations[0].Version != "2" {
+		t.Errorf("expected V2 executed, got %s", res.ExecutedMigrations[0].Version)
+	}
+	// TargetVersion must NOT downgrade to "2", it should remain at "3"
+	if res.TargetVersion != "3" {
+		t.Errorf("expected TargetVersion '3', got %s", res.TargetVersion)
+	}
+}
+
+func TestTargetNextWithOutOfOrderDisabledNoStarvation(t *testing.T) {
+	// Pre-populate history with V1 and V3
+	db := mock.NewMockDatabase()
+	ctx := context.Background()
+	_ = db.EnsureSchema(ctx, "test_ds")
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+
+	v1Str := "1"
+	v3Str := "3"
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       &v1Str,
+		Description:   "first",
+		Type:          "SQL",
+		Script:        "V1__first.sql",
+		Success:       true,
+	})
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 2,
+		Version:       &v3Str,
+		Description:   "third",
+		Type:          "SQL",
+		Script:        "V3__third.sql",
+		Success:       true,
+	})
+
+	// Local has V1, V2, V3, V4. With outOfOrder=false and target=next:
+	// V2 is out-of-order and skipped. The eligible "next" migration is V4!
+	mockFS := fstest.MapFS{
+		"sql/V1__first.sql":  &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"sql/V2__second.sql": &fstest.MapFile{Data: []byte("SELECT 2;")},
+		"sql/V3__third.sql":  &fstest.MapFile{Data: []byte("SELECT 3;")},
+		"sql/V4__fourth.sql": &fstest.MapFile{Data: []byte("SELECT 4;")},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+	cfg.OutOfOrder = false
+	cfg.Target = "next"
+	cfg.ValidateOnMigrate = false
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	if res.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+	if res.ExecutedMigrations[0].Version != "4" {
+		t.Errorf("expected V4 executed as next, got %s", res.ExecutedMigrations[0].Version)
+	}
+	if res.TargetVersion != "4" {
+		t.Errorf("expected TargetVersion '4', got %s", res.TargetVersion)
+	}
+}
+
+func TestCumulativeBaselineFreshDatabaseExecution(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__init.sql":     &fstest.MapFile{Data: []byte("CREATE TABLE v1 (id INT64);")},
+		"sql/V2__old.sql":      &fstest.MapFile{Data: []byte("CREATE TABLE v2 (id INT64);")},
+		"sql/B__2__base.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE base_v2 (id INT64);")},
+		"sql/V3__feature.sql":  &fstest.MapFile{Data: []byte("CREATE TABLE v3 (id INT64);")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	// B2 and V3 should execute (V1 and V2 superseded)
+	if res.MigrationsExecuted != 2 {
+		t.Fatalf("expected 2 migrations executed, got %d", res.MigrationsExecuted)
+	}
+	if res.ExecutedMigrations[0].Version != "2" || res.ExecutedMigrations[0].Type != "BASELINE" {
+		t.Errorf("expected executed[0] to be BASELINE v2, got %+v", res.ExecutedMigrations[0])
+	}
+	if res.ExecutedMigrations[1].Version != "3" || res.ExecutedMigrations[1].Type != "SQL" {
+		t.Errorf("expected executed[1] to be SQL v3, got %+v", res.ExecutedMigrations[1])
+	}
+	if res.TargetVersion != "3" {
+		t.Errorf("expected TargetVersion '3', got %s", res.TargetVersion)
+	}
+
+	// Verify history table
+	history, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory error: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(history))
+	}
+	if history[0].Type != "BASELINE" || history[0].Version.String() != "2" {
+		t.Errorf("expected history record 0 to be BASELINE v2, got %+v", history[0])
+	}
+	if history[1].Type != "SQL" || history[1].Version.String() != "3" {
+		t.Errorf("expected history record 1 to be SQL v3, got %+v", history[1])
+	}
+
+	// Re-run migrate -> 0 migrations
+	res2, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("second Migrate failed: %v", err)
+	}
+	if res2.MigrationsExecuted != 0 {
+		t.Errorf("expected 0 migrations on second run, got %d", res2.MigrationsExecuted)
+	}
+}
+
+func TestCumulativeBaselineIgnoredOnExistingDatabase(t *testing.T) {
+	// Database already has V1 and V2 applied
+	db := mock.NewMockDatabase()
+	ctx := context.Background()
+	_ = db.EnsureSchema(ctx, "test_ds")
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+
+	v1Str := "1"
+	v2Str := "2"
+	cs1, _ := checksum.CalculateString("SELECT 1;")
+	cs2, _ := checksum.CalculateString("SELECT 2;")
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       &v1Str,
+		Description:   "init",
+		Type:          "SQL",
+		Script:        "V1__init.sql",
+		Checksum:      &cs1,
+		Success:       true,
+	})
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 2,
+		Version:       &v2Str,
+		Description:   "old",
+		Type:          "SQL",
+		Script:        "V2__old.sql",
+		Checksum:      &cs2,
+		Success:       true,
+	})
+
+	mockFS := fstest.MapFS{
+		"sql/V1__init.sql":    &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"sql/V2__old.sql":     &fstest.MapFile{Data: []byte("SELECT 2;")},
+		"sql/B2__base.sql":    &fstest.MapFile{Data: []byte("SELECT 'base';")},
+		"sql/V3__new.sql":     &fstest.MapFile{Data: []byte("SELECT 3;")},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	// Only V3 should run; B2 is ignored on existing DB
+	if res.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+	if res.ExecutedMigrations[0].Version != "3" {
+		t.Errorf("expected V3 executed, got %s", res.ExecutedMigrations[0].Version)
+	}
+}
+
+func TestCumulativeBaselineWithTarget(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/B1__v1.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE b1 (id INT64);")},
+		"sql/B3__v3.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE b3 (id INT64);")},
+		"sql/V4__v4.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE v4 (id INT64);")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+	cfg.Target = "2"
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	// B1 is <= target (2), B3 is > target. V4 is > target. So only B1 should run!
+	if res.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+	if res.ExecutedMigrations[0].Version != "1" || res.ExecutedMigrations[0].Type != "BASELINE" {
+		t.Errorf("expected B1 executed as BASELINE, got %+v", res.ExecutedMigrations[0])
+	}
+}
+
+func TestInfoWithTargetNext(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__first.sql":  &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"sql/V2__second.sql": &fstest.MapFile{Data: []byte("SELECT 2;")},
+		"sql/V3__third.sql":  &fstest.MapFile{Data: []byte("SELECT 3;")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+	cfg.Target = "next"
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	ctx := context.Background()
+	infoRes, err := m.Info(ctx)
+	if err != nil {
+		t.Fatalf("Info failed: %v", err)
+	}
+
+	stateByScript := make(map[string]resolver.MigrationState)
+	for _, item := range infoRes.Migrations {
+		stateByScript[item.Script] = item.State
+	}
+
+	// V1 is the "next" migration -> Pending
+	if stateByScript["V1__first.sql"] != resolver.StatePending {
+		t.Errorf("expected V1 to be StatePending, got %s", stateByScript["V1__first.sql"])
+	}
+	// V2 and V3 are above target ("next") -> Above Target
+	if stateByScript["V2__second.sql"] != resolver.StateAboveTarget {
+		t.Errorf("expected V2 to be StateAboveTarget, got %s", stateByScript["V2__second.sql"])
+	}
+	if stateByScript["V3__third.sql"] != resolver.StateAboveTarget {
+		t.Errorf("expected V3 to be StateAboveTarget, got %s", stateByScript["V3__third.sql"])
 	}
 }
 

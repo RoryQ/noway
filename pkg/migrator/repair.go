@@ -10,10 +10,11 @@ import (
 
 // RepairResult contains the repaired migrations outcome.
 type RepairResult struct {
-	Schema           string   `json:"schema"`
-	Table            string   `json:"table"`
-	RemovedFailed    []string `json:"removedFailed"`
-	AlignedChecksums []string `json:"alignedChecksums"`
+	Schema            string   `json:"schema"`
+	Table             string   `json:"table"`
+	RemovedFailed     []string `json:"removedFailed"`
+	AlignedChecksums  []string `json:"alignedChecksums"`
+	DeletedMigrations []string `json:"deletedMigrations,omitempty"`
 }
 
 // Repair repairs the schema history table by removing failed migrations and aligning checksums/descriptions.
@@ -68,9 +69,11 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 			resolvedByVersion[res.Version.Normalized()] = res
 		}
 	}
-	resolvedRepeatable := make(map[string]resolver.ResolvedMigration)
+	resolvedRepeatableByDesc := make(map[string]resolver.ResolvedMigration)
+	resolvedRepeatableByScript := make(map[string]resolver.ResolvedMigration)
 	for _, res := range resolved.RepeatableMigrations {
-		resolvedRepeatable[res.Script] = res
+		resolvedRepeatableByDesc[res.Description] = res
+		resolvedRepeatableByScript[res.Script] = res
 	}
 
 	for _, app := range applied {
@@ -121,24 +124,67 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 					}
 					result.AlignedChecksums = append(result.AlignedChecksums, fmt.Sprintf("%s (checksum -> %d)", res.Script, cs))
 				}
+			} else {
+				// Feature 18: Missing versioned migration on disk -> Mark as DELETE
+				if app.Type != "DELETE" {
+					var verStr *string
+					if app.Version != nil {
+						s := app.Version.String()
+						verStr = &s
+					}
+					rec := database.HistoryRecord{
+						InstalledRank: app.InstalledRank,
+						Version:       verStr,
+						Description:   app.Description,
+						Type:          "DELETE",
+						Script:        app.Script,
+						Checksum:      app.Checksum,
+					}
+					if err := m.db.UpdateHistory(ctx, defaultSchema, table, rec); err != nil {
+						_ = m.callbackRunner.Fire(ctx, "afterRepairError")
+						return nil, fmt.Errorf("failed to mark deleted migration %s: %w", app.Script, err)
+					}
+					result.DeletedMigrations = append(result.DeletedMigrations, app.Script)
+				}
 			}
 		} else {
 			// Repeatable migration alignment
-			if res, found := resolvedRepeatable[app.Script]; found {
-				if app.Description != res.Description || app.Type != string(res.Type) {
+			res, found := resolvedRepeatableByDesc[app.Description]
+			if !found {
+				res, found = resolvedRepeatableByScript[app.Script]
+			}
+			if found {
+				if app.Checksum == nil || *app.Checksum != res.Checksum || app.Description != res.Description || app.Type != string(res.Type) {
 					rec := database.HistoryRecord{
 						InstalledRank: app.InstalledRank,
 						Version:       nil,
 						Description:   res.Description,
 						Type:          string(res.Type),
 						Script:        res.Script,
-						Checksum:      app.Checksum,
+						Checksum:      &res.Checksum,
 					}
 					if err := m.db.UpdateHistory(ctx, defaultSchema, table, rec); err != nil {
 						_ = m.callbackRunner.Fire(ctx, "afterRepairError")
 						return nil, fmt.Errorf("failed to align metadata for %s: %w", app.Script, err)
 					}
 					result.AlignedChecksums = append(result.AlignedChecksums, res.Script)
+				}
+			} else {
+				// Feature 18: Missing repeatable migration on disk -> Mark as DELETE
+				if app.Type != "DELETE" {
+					rec := database.HistoryRecord{
+						InstalledRank: app.InstalledRank,
+						Version:       nil,
+						Description:   app.Description,
+						Type:          "DELETE",
+						Script:        app.Script,
+						Checksum:      app.Checksum,
+					}
+					if err := m.db.UpdateHistory(ctx, defaultSchema, table, rec); err != nil {
+						_ = m.callbackRunner.Fire(ctx, "afterRepairError")
+						return nil, fmt.Errorf("failed to mark deleted migration %s: %w", app.Script, err)
+					}
+					result.DeletedMigrations = append(result.DeletedMigrations, app.Script)
 				}
 			}
 		}

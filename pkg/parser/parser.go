@@ -30,9 +30,39 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 	currentLine := 1
 	stmtStartLine := 1
 
-	blockDepth := 0
-	caseDepth := 0
 	parensDepth := 0
+	var blockStack []string
+
+	pushBlock := func(kind string) {
+		blockStack = append(blockStack, kind)
+	}
+
+	popBlock := func(kind string) {
+		for idx := len(blockStack) - 1; idx >= 0; idx-- {
+			if blockStack[idx] == kind {
+				blockStack = blockStack[:idx]
+				return
+			}
+		}
+	}
+
+	popTopBlock := func() {
+		if len(blockStack) == 0 {
+			return
+		}
+		top := blockStack[len(blockStack)-1]
+		if top == "BEGIN" || top == "CASE" {
+			blockStack = blockStack[:len(blockStack)-1]
+		} else {
+			for idx := len(blockStack) - 1; idx >= 0; idx-- {
+				if blockStack[idx] == "BEGIN" || blockStack[idx] == "CASE" {
+					blockStack = blockStack[:idx]
+					return
+				}
+			}
+			blockStack = blockStack[:len(blockStack)-1]
+		}
+	}
 
 	// Helper to peek ahead
 	peek := func(offset int) rune {
@@ -53,43 +83,258 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 	// Track previous non-whitespace keyword tokens in current statement
 	var prevKeyword string
 
-	recordKeyword := func(kw string) {
+	skipWhitespaceAndComments := func(pos int) int {
+		k := pos
+		for k < n {
+			if unicode.IsSpace(runes[k]) {
+				k++
+				continue
+			}
+			// Single-line comment: -- or #
+			if (runes[k] == '-' && k+1 < n && runes[k+1] == '-') || runes[k] == '#' {
+				k++
+				for k < n && runes[k] != '\n' {
+					k++
+				}
+				continue
+			}
+			// Multi-line comment: /* ... */
+			if runes[k] == '/' && k+1 < n && runes[k+1] == '*' {
+				k += 2
+				for k < n {
+					if runes[k] == '*' && k+1 < n && runes[k+1] == '/' {
+						k += 2
+						break
+					}
+					k++
+				}
+				continue
+			}
+			break
+		}
+		return k
+	}
+
+	isNextTokenParen := func(pos int) bool {
+		k := skipWhitespaceAndComments(pos)
+		return k < n && runes[k] == '('
+	}
+
+	getNextWord := func(pos int) string {
+		k := skipWhitespaceAndComments(pos)
+		start := k
+		for k < n && (unicode.IsLetter(runes[k]) || unicode.IsDigit(runes[k]) || runes[k] == '_') {
+			k++
+		}
+		if k > start {
+			return string(runes[start:k])
+		}
+		return ""
+	}
+
+	isNextWordSystemTime := func(pos int) bool {
+		return strings.EqualFold(getNextWord(pos), "SYSTEM_TIME")
+	}
+
+	isScalarIF := func(pos int) bool {
+		k := skipWhitespaceAndComments(pos)
+		if k >= n || runes[k] != '(' {
+			return false
+		}
+
+		pDepth := 0
+		hasTopLevelComma := false
+		matchClosePos := -1
+
+		scanPos := k
+		for scanPos < n {
+			r := runes[scanPos]
+
+			// Single-line comment: -- or #
+			if (r == '-' && scanPos+1 < n && runes[scanPos+1] == '-') || r == '#' {
+				scanPos++
+				for scanPos < n && runes[scanPos] != '\n' {
+					scanPos++
+				}
+				continue
+			}
+
+			// Multi-line comment: /* ... */
+			if r == '/' && scanPos+1 < n && runes[scanPos+1] == '*' {
+				scanPos += 2
+				for scanPos < n {
+					if runes[scanPos] == '*' && scanPos+1 < n && runes[scanPos+1] == '/' {
+						scanPos += 2
+						break
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Triple quotes: ''' or """
+			if (r == '\'' && scanPos+2 < n && runes[scanPos+1] == '\'' && runes[scanPos+2] == '\'') ||
+				(r == '"' && scanPos+2 < n && runes[scanPos+1] == '"' && runes[scanPos+2] == '"') {
+				q := runes[scanPos]
+				scanPos += 3
+				for scanPos < n {
+					if runes[scanPos] == q && scanPos+2 < n && runes[scanPos+1] == q && runes[scanPos+2] == q {
+						scanPos += 3
+						break
+					}
+					if runes[scanPos] == '\\' && scanPos+1 < n {
+						scanPos += 2
+						continue
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Standard string literals or backticks: '...', "...", `...`
+			if r == '\'' || r == '"' || r == '`' {
+				quote := r
+				scanPos++
+				for scanPos < n {
+					if runes[scanPos] == '\\' && scanPos+1 < n {
+						scanPos += 2
+						continue
+					}
+					if runes[scanPos] == quote {
+						if scanPos+1 < n && runes[scanPos+1] == quote {
+							scanPos += 2
+							continue
+						}
+						scanPos++
+						break
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Parentheses tracking
+			if r == '(' {
+				pDepth++
+			} else if r == ')' {
+				pDepth--
+				if pDepth == 0 {
+					matchClosePos = scanPos + 1
+					break
+				}
+			} else if r == ',' && pDepth == 1 {
+				hasTopLevelComma = true
+			} else if r == ';' && pDepth == 0 {
+				break
+			}
+			scanPos++
+		}
+
+		if hasTopLevelComma {
+			return true
+		}
+
+		// If no top-level comma, check if THEN appears after closing ')' before ';'
+		if matchClosePos != -1 {
+			afterPos := matchClosePos
+			for afterPos < n {
+				afterPos = skipWhitespaceAndComments(afterPos)
+				if afterPos >= n || runes[afterPos] == ';' {
+					break
+				}
+				r := runes[afterPos]
+				if r == '\'' || r == '"' || r == '`' {
+					quote := r
+					afterPos++
+					for afterPos < n {
+						if runes[afterPos] == '\\' && afterPos+1 < n {
+							afterPos += 2
+							continue
+						}
+						if runes[afterPos] == quote {
+							if afterPos+1 < n && runes[afterPos+1] == quote {
+								afterPos += 2
+								continue
+							}
+							afterPos++
+							break
+						}
+						afterPos++
+					}
+					continue
+				}
+				if unicode.IsLetter(r) || r == '_' {
+					wStart := afterPos
+					for afterPos < n && (unicode.IsLetter(runes[afterPos]) || unicode.IsDigit(runes[afterPos]) || runes[afterPos] == '_') {
+						afterPos++
+					}
+					w := string(runes[wStart:afterPos])
+					if strings.EqualFold(w, "THEN") {
+						return false
+					}
+					continue
+				}
+				afterPos++
+			}
+		}
+
+		return true
+	}
+
+	recordKeyword := func(kw string, pos int) {
 		upper := strings.ToUpper(kw)
 
 		switch upper {
 		case "BEGIN":
-			blockDepth++
+			if parensDepth == 0 {
+				pushBlock("BEGIN")
+			}
 		case "TRANSACTION":
 			// If preceded by BEGIN in this statement, cancel block depth
-			if prevKeyword == "BEGIN" && blockDepth > 0 {
-				blockDepth--
+			if prevKeyword == "BEGIN" && len(blockStack) > 0 && blockStack[len(blockStack)-1] == "BEGIN" {
+				blockStack = blockStack[:len(blockStack)-1]
 			}
 		case "CASE":
-			caseDepth++
-		case "IF":
-			// Check if this is a procedural IF statement
-			// NOT procedural if preceded by TABLE, VIEW, SCHEMA, INDEX, DROP, CREATE, END, ELSE, etc.
-			isNotProcedural := prevKeyword == "TABLE" || prevKeyword == "VIEW" || prevKeyword == "SCHEMA" ||
-				prevKeyword == "INDEX" || prevKeyword == "DROP" || prevKeyword == "CREATE" ||
-				prevKeyword == "FUNCTION" || prevKeyword == "PROCEDURE" || prevKeyword == "OR" ||
-				prevKeyword == "END" || prevKeyword == "ELSE"
-			if !isNotProcedural {
-				blockDepth++
-			}
-		case "LOOP", "WHILE", "REPEAT":
 			if prevKeyword != "END" {
-				blockDepth++
+				pushBlock("CASE")
+			}
+		case "IF":
+			// Procedural IF vs DDL IF [NOT] EXISTS vs scalar IF(...)
+			isDDLOrClosing := prevKeyword == "TABLE" || prevKeyword == "VIEW" || prevKeyword == "SCHEMA" ||
+				prevKeyword == "DATASET" || prevKeyword == "INDEX" || prevKeyword == "DROP" ||
+				prevKeyword == "CREATE" || prevKeyword == "FUNCTION" || prevKeyword == "PROCEDURE" ||
+				prevKeyword == "COLUMN" || prevKeyword == "POLICY" || prevKeyword == "CONSTRAINT" ||
+				prevKeyword == "KEY" || prevKeyword == "OR" || prevKeyword == "END"
+
+			isScalarOrExpr := parensDepth > 0 || isScalarIF(pos)
+
+			if !isDDLOrClosing && !isScalarOrExpr {
+				pushBlock("IF")
+			}
+		case "LOOP", "WHILE":
+			if prevKeyword != "END" && parensDepth == 0 {
+				pushBlock(upper)
+			}
+		case "REPEAT":
+			// Scalar REPEAT(str, n) vs procedural REPEAT ... UNTIL ... END REPEAT
+			if prevKeyword != "END" && parensDepth == 0 && !isNextTokenParen(pos) {
+				pushBlock("REPEAT")
 			}
 		case "FOR":
-			// Procedural FOR record IN (...) DO ... END FOR
-			if prevKeyword != "END" && prevKeyword != "CREATE" && prevKeyword != "REPLACE" {
-				blockDepth++
+			// Procedural FOR record IN (...) DO ... END FOR vs FOR SYSTEM_TIME AS OF ...
+			if prevKeyword != "END" && prevKeyword != "CREATE" && prevKeyword != "REPLACE" &&
+				parensDepth == 0 && !isNextWordSystemTime(pos) {
+				pushBlock("FOR")
 			}
 		case "END":
-			if caseDepth > 0 {
-				caseDepth--
-			} else if blockDepth > 0 {
-				blockDepth--
+			nextWord := strings.ToUpper(getNextWord(pos))
+			switch nextWord {
+			case "CASE":
+				popBlock("CASE")
+			case "IF", "LOOP", "WHILE", "REPEAT", "FOR":
+				popBlock(nextWord)
+			default:
+				popTopBlock()
 			}
 		}
 
@@ -101,6 +346,15 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 
 		if r == '\n' {
 			currentLine++
+		}
+
+		if currentStmt.Len() == 0 && unicode.IsSpace(r) {
+			i++
+			continue
+		}
+
+		if currentStmt.Len() == 0 {
+			stmtStartLine = currentLine
 		}
 
 		// 1. Check for single line comments: -- or #
@@ -138,11 +392,23 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			continue
 		}
 
-		// 3. Check for raw/byte string prefix: r', r", b', b", rb', etc.
-		if (r == 'r' || r == 'R' || r == 'b' || r == 'B') && (peek(1) == '\'' || peek(1) == '"') {
-			currentStmt.WriteRune(r)
-			i++
-			r = runes[i]
+		// 3. Check for raw/byte string prefix: r', r", b', b", rb', br', etc.
+		if r == 'r' || r == 'R' || r == 'b' || r == 'B' {
+			next := peek(1)
+			if next == '\'' || next == '"' {
+				currentStmt.WriteRune(r)
+				i++
+				r = runes[i]
+			} else if ((r == 'r' || r == 'R') && (next == 'b' || next == 'B')) ||
+				((r == 'b' || r == 'B') && (next == 'r' || next == 'R')) {
+				next2 := peek(2)
+				if next2 == '\'' || next2 == '"' {
+					currentStmt.WriteRune(r)
+					currentStmt.WriteRune(next)
+					i += 2
+					r = runes[i]
+				}
+			}
 		}
 
 		// 4. Check for triple quotes: ''' or """
@@ -236,6 +502,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 		// 7. Check for parentheses
 		if r == '(' {
 			parensDepth++
+			prevKeyword = ""
 			currentStmt.WriteRune(r)
 			i++
 			continue
@@ -244,6 +511,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			if parensDepth > 0 {
 				parensDepth--
 			}
+			prevKeyword = ""
 			currentStmt.WriteRune(r)
 			i++
 			continue
@@ -257,13 +525,14 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 				i++
 			}
 			word := string(runes[start:i])
-			recordKeyword(word)
+			recordKeyword(word, i)
 			continue
 		}
 
 		// 9. Check for semicolon statement delimiter
 		if r == ';' {
-			if parensDepth == 0 && blockDepth == 0 && caseDepth == 0 {
+			prevKeyword = ""
+			if parensDepth == 0 && len(blockStack) == 0 {
 				stmtStr := strings.TrimSpace(currentStmt.String())
 				if isNonEmptyStatement(stmtStr) {
 					statements = append(statements, Statement{
@@ -274,6 +543,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 				currentStmt.Reset()
 				stmtStartLine = currentLine
 				prevKeyword = ""
+				blockStack = blockStack[:0]
 				i++
 				continue
 			} else {
@@ -283,8 +553,8 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 			}
 		}
 
-		if currentStmt.Len() == 0 && !unicode.IsSpace(r) {
-			stmtStartLine = currentLine
+		if !unicode.IsSpace(r) {
+			prevKeyword = ""
 		}
 		currentStmt.WriteRune(r)
 		i++

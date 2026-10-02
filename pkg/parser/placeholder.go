@@ -57,16 +57,29 @@ type BuiltinPlaceholders struct {
 	Timestamp     time.Time
 }
 
-// Replace substitutes all placeholders in the input SQL.
+// IsEnabled returns whether placeholder replacement is enabled.
+func (p *PlaceholderReplacer) IsEnabled() bool {
+	return p.config.Enabled
+}
+
+// Replace substitutes all placeholders in the input SQL if replacement is enabled.
 func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders) (string, error) {
 	if !p.config.Enabled {
 		return input, nil
 	}
+	return p.ReplaceContent(input, builtins)
+}
 
+// ReplaceContent substitutes placeholders in the input SQL unconditionally.
+func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlaceholders) (string, error) {
 	prefix := p.config.Prefix
 	suffix := p.config.Suffix
 	sep := p.config.Separator
-	escapedPrefix := "$" + prefix // e.g. $${
+	escapedPrefix1 := "$" + prefix // e.g. $${ or $@[
+	var escapedPrefix2 string
+	if len(prefix) > 0 {
+		escapedPrefix2 = string(prefix[0]) + prefix // e.g. @@[ or $${
+	}
 
 	// Build combined placeholder map and case-insensitive index (Flyway placeholder matching is case-insensitive)
 	values := make(map[string]string)
@@ -115,10 +128,15 @@ func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders
 	sb.Grow(len(input))
 	i := 0
 	for i < len(input) {
-		// Check for escaped prefix: $${...} -> ${...}
-		if strings.HasPrefix(input[i:], escapedPrefix) {
+		// Check for doubled prefix escaping or $ escaping: e.g. $${...} -> ${...}, @@[...] -> @[...]
+		if escapedPrefix2 != "" && escapedPrefix2 != escapedPrefix1 && strings.HasPrefix(input[i:], escapedPrefix2) {
 			sb.WriteString(prefix)
-			i += len(escapedPrefix)
+			i += len(escapedPrefix2)
+			continue
+		}
+		if strings.HasPrefix(input[i:], escapedPrefix1) {
+			sb.WriteString(prefix)
+			i += len(escapedPrefix1)
 			continue
 		}
 
