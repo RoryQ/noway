@@ -360,9 +360,9 @@ func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveRe
 	return r.parseAndAddMigration(dir, filename, fullPath, string(data), nil, result, seenVersions)
 }
 
-func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig) (int64, error) {
+func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool) (int64, error) {
 	calcContent := content
-	if r.config.Replacer != nil {
+	if isRepeatable && r.config.Replacer != nil {
 		shouldReplace := true
 		if migConfig.PlaceholderReplacement != nil {
 			shouldReplace = *migConfig.PlaceholderReplacement
@@ -416,7 +416,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			}
 		}
 		desc = strings.ReplaceAll(desc, "_", " ")
-		cs, err := r.calculateChecksum(content, migConfig)
+		cs, err := r.calculateChecksum(content, migConfig, true)
 		if err != nil {
 			return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 		}
@@ -457,7 +457,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			desc := strings.ReplaceAll(parts[1], "_", " ")
 			ver, err := version.Parse(verStr)
 			if err == nil {
-				cs, err := r.calculateChecksum(content, migConfig)
+				cs, err := r.calculateChecksum(content, migConfig, false)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
@@ -498,7 +498,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			desc := strings.ReplaceAll(parts[1], "_", " ")
 			ver, err := version.Parse(verStr)
 			if err == nil {
-				cs, err := r.calculateChecksum(content, migConfig)
+				cs, err := r.calculateChecksum(content, migConfig, false)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
@@ -551,7 +551,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			}
 			seenVersions[canonicalVer] = fullPath
 
-			cs, err := r.calculateChecksum(content, migConfig)
+			cs, err := r.calculateChecksum(content, migConfig, false)
 			if err != nil {
 				return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 			}

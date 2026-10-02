@@ -746,22 +746,32 @@ func TestMigratePlaceholderChecksumming(t *testing.T) {
 		t.Fatalf("expected 2 migrations executed, got %d", res.MigrationsExecuted)
 	}
 
-	// 1. Verify history checksum matches post-replacement SQL
+	// 1. Verify history checksum matches Flyway SqlMigrationResolver:
+	// - Versioned migration V1 uses raw checksum (stable across environments)
+	// - Repeatable migration R__ uses placeholder-replaced checksum
 	history, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
 	if len(history) != 2 {
 		t.Fatalf("expected 2 history records, got %d", len(history))
 	}
 
-	expectedReplacedSQL := "CREATE TABLE real_users_table (id INT64, env STRING);"
-	expectedChecksum, _ := checksum.CalculateString(expectedReplacedSQL)
 	rawChecksum, _ := checksum.CalculateString(rawSQL)
+	expectedRepeatableReplacedSQL := "CREATE VIEW user_view AS SELECT * FROM real_users_table;"
+	expectedRepeatableChecksum, _ := checksum.CalculateString(expectedRepeatableReplacedSQL)
 
 	v1History := history[0]
 	if v1History.Checksum == nil {
-		t.Fatalf("expected non-nil checksum")
+		t.Fatalf("expected non-nil checksum for V1")
 	}
-	if *v1History.Checksum != expectedChecksum {
-		t.Errorf("expected checksum %d (from replaced sql), got %d (raw was %d)", expectedChecksum, *v1History.Checksum, rawChecksum)
+	if *v1History.Checksum != rawChecksum {
+		t.Errorf("expected V1 checksum %d (from raw sql), got %d", rawChecksum, *v1History.Checksum)
+	}
+
+	rHistory := history[1]
+	if rHistory.Checksum == nil {
+		t.Fatalf("expected non-nil checksum for R__")
+	}
+	if *rHistory.Checksum != expectedRepeatableChecksum {
+		t.Errorf("expected R__ checksum %d (from replaced sql), got %d", expectedRepeatableChecksum, *rHistory.Checksum)
 	}
 
 	// 2. Validate passes
@@ -773,7 +783,7 @@ func TestMigratePlaceholderChecksumming(t *testing.T) {
 		t.Errorf("expected validation to pass, errors: %v", valRes.Error())
 	}
 
-	// 3. Changing placeholder value causes validation mismatch for V1 and triggers re-execution of R__
+	// 3. Changing placeholder value keeps V1 valid (raw checksum unchanged) and causes repeatable R__ to re-execute
 	cfgChanged := config.NewDefaultConfiguration()
 	cfgChanged.DefaultSchema = "test_ds"
 	cfgChanged.FS = mockFS
@@ -786,41 +796,22 @@ func TestMigratePlaceholderChecksumming(t *testing.T) {
 		t.Fatalf("failed to create changed migrator: %v", err)
 	}
 
+	// V1 still validates because versioned checksum is raw
 	valResChanged, err := mChanged.Validate(ctx)
 	if err != nil {
 		t.Fatalf("Validate error on changed config: %v", err)
 	}
-	if valResChanged.Valid {
-		t.Errorf("expected validation failure due to checksum mismatch after placeholder value changed")
+	if !valResChanged.Valid {
+		t.Errorf("expected validation to pass for V1 when placeholder changed, got errors: %v", valResChanged.Error())
 	}
 
-	// 4. Migrate with ignorePendingMigrations / or running Repeatable
-	// Changing placeholder on repeatable migration causes it to re-run
-	cfgRepeatableOnly := config.NewDefaultConfiguration()
-	cfgRepeatableOnly.DefaultSchema = "test_ds"
-	cfgRepeatableOnly.FS = fstest.MapFS{
-		"sql/V1__create_table.sql": &fstest.MapFile{
-			Data: []byte("CREATE TABLE real_users_table (id INT64, env STRING);"), // matches V1 history checksum
-		},
-		"sql/R__view.sql": &fstest.MapFile{
-			Data: []byte("CREATE VIEW user_view AS SELECT * FROM ${table_name};"),
-		},
-	}
-	cfgRepeatableOnly.Placeholders = map[string]string{
-		"table_name": "changed_users_table",
-	}
-
-	mRepeatableOnly, err := New(cfgRepeatableOnly, db)
-	if err != nil {
-		t.Fatalf("failed to create migrator: %v", err)
-	}
-
-	resRepeatable, err := mRepeatableOnly.Migrate(ctx)
+	// Migrate re-runs repeatable migration R__view because its replaced checksum changed
+	resChanged, err := mChanged.Migrate(ctx)
 	if err != nil {
 		t.Fatalf("Migrate failed: %v", err)
 	}
-	if resRepeatable.MigrationsExecuted != 1 {
-		t.Errorf("expected 1 repeatable migration re-executed due to checksum change, got %d", resRepeatable.MigrationsExecuted)
+	if resChanged.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 repeatable migration re-executed due to placeholder checksum change, got %d", resChanged.MigrationsExecuted)
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RoryQ/noway/pkg/checksum"
 	"github.com/RoryQ/noway/pkg/config"
 	"github.com/RoryQ/noway/pkg/database"
 	"github.com/RoryQ/noway/pkg/parser"
@@ -466,9 +465,6 @@ func (m *Migrator) executeSQLMigration(
 		verStr = &s
 	}
 	cs := mig.Checksum
-	if newCs, err := checksum.CalculateString(sql); err == nil {
-		cs = newCs
-	}
 
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,
@@ -645,9 +641,6 @@ func (m *Migrator) executeScriptMigration(
 		verStr = &s
 	}
 	cs := mig.Checksum
-	if newCs, err := checksum.CalculateString(scriptContent); err == nil {
-		cs = newCs
-	}
 
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,
