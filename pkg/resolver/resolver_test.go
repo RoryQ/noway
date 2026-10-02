@@ -3,6 +3,9 @@ package resolver
 import (
 	"testing"
 	"testing/fstest"
+
+	"github.com/RoryQ/noway/pkg/checksum"
+	"github.com/RoryQ/noway/pkg/parser"
 )
 
 func TestResolverFS(t *testing.T) {
@@ -176,5 +179,55 @@ func TestResolverScriptMigrationsAndSqlConf(t *testing.T) {
 	r1 := resolved.RepeatableMigrations[0]
 	if r1.Type != TypeScript || !r1.IsScript {
 		t.Errorf("expected repeatable to be TypeScript, got %s", r1.Type)
+	}
+}
+
+func TestResolverPlaceholderChecksum(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"migrations/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE ${tbl} (id INT64);"),
+		},
+		"migrations/V2__raw.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE ${tbl} (id INT64);"),
+		},
+		"migrations/V2__raw.sql.conf": &fstest.MapFile{
+			Data: []byte("placeholderReplacement=false"),
+		},
+	}
+
+	replacer := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values: map[string]string{
+			"tbl": "users",
+		},
+	})
+
+	res := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"migrations"},
+		Replacer:  replacer,
+	})
+
+	resolved, err := res.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+
+	if len(resolved.VersionedMigrations) != 2 {
+		t.Fatalf("expected 2 versioned migrations, got %d", len(resolved.VersionedMigrations))
+	}
+
+	// V1 should have checksum calculated after replacement
+	expectedV1Checksum, _ := checksum.CalculateString("CREATE TABLE users (id INT64);")
+	if resolved.VersionedMigrations[0].Checksum != expectedV1Checksum {
+		t.Errorf("expected V1 checksum %d, got %d", expectedV1Checksum, resolved.VersionedMigrations[0].Checksum)
+	}
+
+	// V2 has placeholderReplacement=false, so checksum is calculated from raw content
+	expectedV2Checksum, _ := checksum.CalculateString("CREATE TABLE ${tbl} (id INT64);")
+	if resolved.VersionedMigrations[1].Checksum != expectedV2Checksum {
+		t.Errorf("expected V2 checksum %d, got %d", expectedV2Checksum, resolved.VersionedMigrations[1].Checksum)
 	}
 }

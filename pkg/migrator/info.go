@@ -9,7 +9,6 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/RoryQ/noway/pkg/checksum"
 	"github.com/RoryQ/noway/pkg/parser"
 	"github.com/RoryQ/noway/pkg/resolver"
 	"github.com/RoryQ/noway/pkg/version"
@@ -295,19 +294,6 @@ func computeMigrationInfos(
 
 		rCopy := res
 		cs := res.Checksum
-		if replacer != nil {
-			shouldReplace := true
-			if res.Config.PlaceholderReplacement != nil {
-				shouldReplace = *res.Config.PlaceholderReplacement
-			}
-			if shouldReplace {
-				if replaced, err := replacer.Replace(res.Content, builtins); err == nil {
-					if newCs, err := checksum.CalculateString(replaced); err == nil {
-						cs = newCs
-					}
-				}
-			}
-		}
 		infos = append(infos, resolver.MigrationInfo{
 			Version:     res.Version,
 			Description: res.Description,
@@ -324,19 +310,6 @@ func computeMigrationInfos(
 		runs, wasApplied := appliedRepeatables[res.Script]
 		rCopy := res
 		cs := res.Checksum
-		if replacer != nil {
-			shouldReplace := true
-			if res.Config.PlaceholderReplacement != nil {
-				shouldReplace = *res.Config.PlaceholderReplacement
-			}
-			if shouldReplace {
-				if replaced, err := replacer.Replace(res.Content, builtins); err == nil {
-					if newCs, err := checksum.CalculateString(replaced); err == nil {
-						cs = newCs
-					}
-				}
-			}
-		}
 
 		if !wasApplied {
 			state := resolver.StatePending
@@ -383,7 +356,7 @@ func computeMigrationInfos(
 			state := resolver.StateSuccess
 			if !lastRun.Success {
 				state = resolver.StateFailed
-			} else if lastRun.Checksum != nil && *lastRun.Checksum != cs && *lastRun.Checksum != res.Checksum {
+			} else if lastRun.Checksum != nil && *lastRun.Checksum != res.Checksum {
 				state = resolver.StateOutdated
 			}
 

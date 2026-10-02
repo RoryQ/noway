@@ -195,3 +195,30 @@ func TestPlaceholderMissingError(t *testing.T) {
 		t.Errorf("expected error for missing placeholder, got nil")
 	}
 }
+
+func TestPlaceholderCaseInsensitive(t *testing.T) {
+	cfg := PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values: map[string]string{
+			"DATASET": "my_dataset",
+			"myTable": "users",
+		},
+	}
+	replacer := NewPlaceholderReplacer(cfg)
+	sql := "SELECT * FROM ${dataset}.${MYTABLE} WHERE ds = '${DATASET}' AND schema = '${flyway:defaultschema}' AND ts = '${MISSING:fallback}';"
+	builtins := BuiltinPlaceholders{
+		DefaultSchema: "analytics",
+	}
+
+	res, err := replacer.Replace(sql, builtins)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := "SELECT * FROM my_dataset.users WHERE ds = 'my_dataset' AND schema = 'analytics' AND ts = 'fallback';"
+	if res != expected {
+		t.Errorf("got %q, want %q", res, expected)
+	}
+}

@@ -772,5 +772,95 @@ func TestMigratePlaceholderChecksumming(t *testing.T) {
 	if !valRes.Valid {
 		t.Errorf("expected validation to pass, errors: %v", valRes.Error())
 	}
+
+	// 3. Changing placeholder value causes validation mismatch for V1 and triggers re-execution of R__
+	cfgChanged := config.NewDefaultConfiguration()
+	cfgChanged.DefaultSchema = "test_ds"
+	cfgChanged.FS = mockFS
+	cfgChanged.Placeholders = map[string]string{
+		"table_name": "changed_users_table",
+	}
+
+	mChanged, err := New(cfgChanged, db)
+	if err != nil {
+		t.Fatalf("failed to create changed migrator: %v", err)
+	}
+
+	valResChanged, err := mChanged.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate error on changed config: %v", err)
+	}
+	if valResChanged.Valid {
+		t.Errorf("expected validation failure due to checksum mismatch after placeholder value changed")
+	}
+
+	// 4. Migrate with ignorePendingMigrations / or running Repeatable
+	// Changing placeholder on repeatable migration causes it to re-run
+	cfgRepeatableOnly := config.NewDefaultConfiguration()
+	cfgRepeatableOnly.DefaultSchema = "test_ds"
+	cfgRepeatableOnly.FS = fstest.MapFS{
+		"sql/V1__create_table.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE real_users_table (id INT64, env STRING);"), // matches V1 history checksum
+		},
+		"sql/R__view.sql": &fstest.MapFile{
+			Data: []byte("CREATE VIEW user_view AS SELECT * FROM ${table_name};"),
+		},
+	}
+	cfgRepeatableOnly.Placeholders = map[string]string{
+		"table_name": "changed_users_table",
+	}
+
+	mRepeatableOnly, err := New(cfgRepeatableOnly, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	resRepeatable, err := mRepeatableOnly.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if resRepeatable.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 repeatable migration re-executed due to checksum change, got %d", resRepeatable.MigrationsExecuted)
+	}
+}
+
+func TestMigrateEnvPlaceholderCaseInsensitive(t *testing.T) {
+	t.Setenv("FLYWAY_PLACEHOLDERS_DATASET", "prod_analytics")
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	config.LoadFromEnv(cfg)
+
+	mockFS := fstest.MapFS{
+		"sql/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE ${dataset}.users (id INT64);"),
+		},
+	}
+	cfg.FS = mockFS
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if res.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+
+	// Verify executed statement in mock database
+	stmts := db.ExecutedStatements()
+	if len(stmts) != 1 {
+		t.Fatalf("expected 1 executed statement, got %d", len(stmts))
+	}
+	expectedSQL := "CREATE TABLE prod_analytics.users (id INT64)"
+	if stmts[0] != expectedSQL {
+		t.Errorf("expected SQL %q, got %q", expectedSQL, stmts[0])
+	}
 }
 

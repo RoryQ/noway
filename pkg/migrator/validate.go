@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/RoryQ/noway/pkg/checksum"
 	"github.com/RoryQ/noway/pkg/resolver"
 	"github.com/RoryQ/noway/pkg/version"
 )
@@ -126,29 +125,15 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 				continue
 			}
 
-			// Calculate effective checksum (after placeholder replacement if applicable)
-			effectiveCs := res.Checksum
-			shouldReplace := m.config.PlaceholderReplacement
-			if res.Config.PlaceholderReplacement != nil {
-				shouldReplace = *res.Config.PlaceholderReplacement
-			}
-			if shouldReplace {
-				if replaced, err := m.replacer.Replace(res.Content, m.builtins); err == nil {
-					if newCs, err := checksum.CalculateString(replaced); err == nil {
-						effectiveCs = newCs
-					}
-				}
-			}
-
 			// Check checksum
-			if app.Checksum != nil && *app.Checksum != effectiveCs && *app.Checksum != res.Checksum {
+			if app.Checksum != nil && *app.Checksum != res.Checksum {
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
 					Version:     app.Version,
 					Description: app.Description,
 					File:        res.Script,
 					Message: fmt.Sprintf("Migration checksum mismatch for migration version %s\n-> Applied to database : %d\n-> Resolved locally    : %d\nEither revert the changes to the file, or run repair to update the schema history.",
-						app.Version.String(), *app.Checksum, effectiveCs),
+						app.Version.String(), *app.Checksum, res.Checksum),
 				})
 			}
 

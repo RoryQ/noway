@@ -68,36 +68,48 @@ func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders
 	sep := p.config.Separator
 	escapedPrefix := "$" + prefix // e.g. $${
 
-	// Build combined placeholder map
+	// Build combined placeholder map and case-insensitive index (Flyway placeholder matching is case-insensitive)
 	values := make(map[string]string)
+	lowerValues := make(map[string]string)
 	for k, v := range p.config.Values {
 		values[k] = v
+		lowerValues[strings.ToLower(k)] = v
 	}
 
-	// Add builtins
-	if builtins.DefaultSchema != "" {
-		values["flyway:defaultSchema"] = builtins.DefaultSchema
-		values["noway:defaultSchema"] = builtins.DefaultSchema
+	// Helper to add builtins
+	addBuiltin := func(k, v string) {
+		if v != "" {
+			values[k] = v
+			lowerValues[strings.ToLower(k)] = v
+		}
 	}
-	if builtins.Table != "" {
-		values["flyway:table"] = builtins.Table
-		values["noway:table"] = builtins.Table
-	}
-	if builtins.User != "" {
-		values["flyway:user"] = builtins.User
-		values["noway:user"] = builtins.User
-	}
-	if builtins.Database != "" {
-		values["flyway:database"] = builtins.Database
-		values["noway:database"] = builtins.Database
-	}
+
+	addBuiltin("flyway:defaultSchema", builtins.DefaultSchema)
+	addBuiltin("noway:defaultSchema", builtins.DefaultSchema)
+	addBuiltin("flyway:table", builtins.Table)
+	addBuiltin("noway:table", builtins.Table)
+	addBuiltin("flyway:user", builtins.User)
+	addBuiltin("noway:user", builtins.User)
+	addBuiltin("flyway:database", builtins.Database)
+	addBuiltin("noway:database", builtins.Database)
+
 	ts := builtins.Timestamp
 	if ts.IsZero() {
 		ts = time.Now()
 	}
 	formattedTs := ts.Format("2006-01-02 15:04:05")
-	values["flyway:timestamp"] = formattedTs
-	values["noway:timestamp"] = formattedTs
+	addBuiltin("flyway:timestamp", formattedTs)
+	addBuiltin("noway:timestamp", formattedTs)
+
+	lookupValue := func(key string) (string, bool) {
+		if val, ok := values[key]; ok {
+			return val, true
+		}
+		if val, ok := lowerValues[strings.ToLower(key)]; ok {
+			return val, true
+		}
+		return "", false
+	}
 
 	var sb strings.Builder
 	sb.Grow(len(input))
@@ -115,7 +127,7 @@ func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders
 			suffixIdx := strings.Index(input[i+len(prefix):], suffix)
 			if suffixIdx != -1 {
 				placeholderExpr := input[i+len(prefix) : i+len(prefix)+suffixIdx]
-				if val, ok := values[placeholderExpr]; ok {
+				if val, ok := lookupValue(placeholderExpr); ok {
 					sb.WriteString(val)
 					i += len(prefix) + suffixIdx + len(suffix)
 					continue
@@ -133,7 +145,7 @@ func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders
 					key = placeholderExpr
 				}
 
-				if val, ok := values[key]; ok {
+				if val, ok := lookupValue(key); ok {
 					sb.WriteString(val)
 					i += len(prefix) + suffixIdx + len(suffix)
 					continue

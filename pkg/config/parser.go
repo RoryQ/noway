@@ -54,17 +54,17 @@ func LoadFromEnv(cfg *Configuration) {
 		k := parts[0]
 		v := parts[1]
 
-		if strings.HasPrefix(k, "FLYWAY_") || strings.HasPrefix(k, "NOWAY_") {
-			key := strings.TrimPrefix(k, "FLYWAY_")
-			key = strings.TrimPrefix(key, "NOWAY_")
-
+		kUpper := strings.ToUpper(k)
+		if strings.HasPrefix(kUpper, "FLYWAY_") || strings.HasPrefix(kUpper, "NOWAY_") {
+			key := k[7:]
 			applyEnvKey(cfg, key, v)
 		}
 	}
 }
 
 func applyEnvKey(cfg *Configuration, key, val string) {
-	switch key {
+	keyUpper := strings.ToUpper(key)
+	switch keyUpper {
 	case "URL":
 		cfg.URL = val
 	case "USER":
@@ -142,8 +142,8 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 	case "GCP_CREDENTIALS_JSON", "GCPCREDENTIALSJSON":
 		cfg.GCPCredentialsJSON = val
 	default:
-		if strings.HasPrefix(key, "PLACEHOLDERS_") {
-			phKey := strings.TrimPrefix(key, "PLACEHOLDERS_")
+		if strings.HasPrefix(keyUpper, "PLACEHOLDERS_") {
+			phKey := key[len("PLACEHOLDERS_"):]
 			if cfg.Placeholders == nil {
 				cfg.Placeholders = make(map[string]string)
 			}

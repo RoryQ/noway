@@ -70,18 +70,6 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 		}
 	}
 
-	res := resolver.NewResolver(resolver.ResolverConfig{
-		Locations:        cfg.Locations,
-		FS:               cfg.FS,
-		Prefix:           cfg.SQLMigrationPrefix,
-		RepeatablePrefix: cfg.RepeatableSQLMigrationPrefix,
-		UndoPrefix:       cfg.UndoSQLMigrationPrefix,
-		BaselinePrefix:   cfg.BaselineSQLMigrationPrefix,
-		Separator:        cfg.SQLMigrationSeparator,
-		Suffixes:         suffixes,
-		Encoding:         cfg.Encoding,
-	})
-
 	bqParser := parser.NewBigQueryParser()
 	replacer := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
 		Enabled:   cfg.PlaceholderReplacement,
@@ -98,6 +86,20 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 		Database:      cfg.GCPProjectID,
 		Timestamp:     time.Now(),
 	}
+
+	res := resolver.NewResolver(resolver.ResolverConfig{
+		Locations:        cfg.Locations,
+		FS:               cfg.FS,
+		Prefix:           cfg.SQLMigrationPrefix,
+		RepeatablePrefix: cfg.RepeatableSQLMigrationPrefix,
+		UndoPrefix:       cfg.UndoSQLMigrationPrefix,
+		BaselinePrefix:   cfg.BaselineSQLMigrationPrefix,
+		Separator:        cfg.SQLMigrationSeparator,
+		Suffixes:         suffixes,
+		Encoding:         cfg.Encoding,
+		Replacer:         replacer,
+		Builtins:         builtins,
+	})
 
 	// Discover callbacks
 	resolvedCallbacks := make(map[string][]resolver.ResolvedCallback)
@@ -300,21 +302,9 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	var pendingRepeatable []resolver.ResolvedMigration
 	for _, res := range resolved.RepeatableMigrations {
 		lastRun, wasApplied := appliedRepeatables[res.Script]
-		expectedCs := res.Checksum
-		shouldReplace := m.config.PlaceholderReplacement
-		if res.Config.PlaceholderReplacement != nil {
-			shouldReplace = *res.Config.PlaceholderReplacement
-		}
-		if shouldReplace {
-			if replaced, err := m.replacer.Replace(res.Content, m.builtins); err == nil {
-				if newCs, err := checksum.CalculateString(replaced); err == nil {
-					expectedCs = newCs
-				}
-			}
-		}
 		if !wasApplied {
 			pendingRepeatable = append(pendingRepeatable, res)
-		} else if lastRun.Checksum == nil || (*lastRun.Checksum != expectedCs && *lastRun.Checksum != res.Checksum) || !lastRun.Success {
+		} else if lastRun.Checksum == nil || *lastRun.Checksum != res.Checksum || !lastRun.Success {
 			pendingRepeatable = append(pendingRepeatable, res)
 		}
 	}
@@ -558,7 +548,7 @@ func (m *Migrator) executeScriptMigration(
 	if mig.PhysicalLocation != "" && scriptContent == mig.Content {
 		if fi, err := os.Stat(mig.PhysicalLocation); err == nil && !fi.IsDir() {
 			scriptPath = mig.PhysicalLocation
-			_ = os.Chmod(scriptPath, 0755)
+			_ = os.Chmod(scriptPath, 0644)
 		}
 	}
 
@@ -577,7 +567,7 @@ func (m *Migrator) executeScriptMigration(
 			return nil, fmt.Errorf("failed writing temp script for %s: %w", mig.Script, err)
 		}
 		tmpFile.Close()
-		_ = os.Chmod(tmpFile.Name(), 0755)
+		_ = os.Chmod(tmpFile.Name(), 0644)
 		scriptPath = tmpFile.Name()
 		cleanup = func() { _ = os.Remove(tmpFile.Name()) }
 	}

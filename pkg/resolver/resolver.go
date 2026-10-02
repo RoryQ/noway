@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/RoryQ/noway/pkg/checksum"
+	"github.com/RoryQ/noway/pkg/parser"
 	"github.com/RoryQ/noway/pkg/version"
 )
 
@@ -25,6 +26,8 @@ type ResolverConfig struct {
 	Suffixes           []string // default [".sql"]
 	Encoding           string   // default "UTF-8"
 	IgnoreMissingFiles bool
+	Replacer           *parser.PlaceholderReplacer
+	Builtins           parser.BuiltinPlaceholders
 }
 
 // DefaultResolverConfig returns standard defaults.
@@ -357,6 +360,22 @@ func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveRe
 	return r.parseAndAddMigration(dir, filename, fullPath, string(data), nil, result, seenVersions)
 }
 
+func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig) (int64, error) {
+	calcContent := content
+	if r.config.Replacer != nil {
+		shouldReplace := true
+		if migConfig.PlaceholderReplacement != nil {
+			shouldReplace = *migConfig.PlaceholderReplacement
+		}
+		if shouldReplace {
+			if replaced, err := r.config.Replacer.Replace(content, r.config.Builtins); err == nil {
+				calcContent = replaced
+			}
+		}
+	}
+	return checksum.CalculateString(calcContent)
+}
+
 func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string, fileSys fs.FS, result *ResolveResult, seenVersions map[string]string) error {
 	migConfig := r.loadMigrationConfig(dir, filename, fileSys)
 	isScript := isScriptFile(filename)
@@ -397,7 +416,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			}
 		}
 		desc = strings.ReplaceAll(desc, "_", " ")
-		cs, err := checksum.CalculateString(content)
+		cs, err := r.calculateChecksum(content, migConfig)
 		if err != nil {
 			return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 		}
@@ -438,7 +457,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			desc := strings.ReplaceAll(parts[1], "_", " ")
 			ver, err := version.Parse(verStr)
 			if err == nil {
-				cs, err := checksum.CalculateString(content)
+				cs, err := r.calculateChecksum(content, migConfig)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
@@ -479,7 +498,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			desc := strings.ReplaceAll(parts[1], "_", " ")
 			ver, err := version.Parse(verStr)
 			if err == nil {
-				cs, err := checksum.CalculateString(content)
+				cs, err := r.calculateChecksum(content, migConfig)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
@@ -532,7 +551,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			}
 			seenVersions[canonicalVer] = fullPath
 
-			cs, err := checksum.CalculateString(content)
+			cs, err := r.calculateChecksum(content, migConfig)
 			if err != nil {
 				return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 			}

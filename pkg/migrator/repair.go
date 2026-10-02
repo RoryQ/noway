@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/RoryQ/noway/pkg/checksum"
 	"github.com/RoryQ/noway/pkg/database"
 	"github.com/RoryQ/noway/pkg/resolver"
 )
@@ -93,21 +92,8 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 		if app.Version != nil && !app.Version.IsEmpty() {
 			verKey := app.Version.Normalized()
 			if res, found := resolvedByVersion[verKey]; found {
-				effectiveCs := res.Checksum
-				shouldReplace := m.config.PlaceholderReplacement
-				if res.Config.PlaceholderReplacement != nil {
-					shouldReplace = *res.Config.PlaceholderReplacement
-				}
-				if shouldReplace {
-					if replaced, err := m.replacer.Replace(res.Content, m.builtins); err == nil {
-						if newCs, err := checksum.CalculateString(replaced); err == nil {
-							effectiveCs = newCs
-						}
-					}
-				}
-
 				needsUpdate := false
-				if app.Checksum == nil || *app.Checksum != effectiveCs {
+				if app.Checksum == nil || *app.Checksum != res.Checksum {
 					needsUpdate = true
 				}
 				if app.Description != res.Description || app.Type != string(res.Type) {
@@ -115,7 +101,7 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 				}
 
 				if needsUpdate {
-					cs := effectiveCs
+					cs := res.Checksum
 					var verStr *string
 					if app.Version != nil {
 						s := app.Version.String()

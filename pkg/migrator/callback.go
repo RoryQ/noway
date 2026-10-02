@@ -83,7 +83,7 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 	if cb.PhysicalLocation != "" {
 		if fi, err := os.Stat(cb.PhysicalLocation); err == nil && !fi.IsDir() {
 			scriptPath = cb.PhysicalLocation
-			_ = os.Chmod(scriptPath, 0755)
+			_ = os.Chmod(scriptPath, 0644)
 		}
 	}
 
@@ -102,7 +102,7 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 			return fmt.Errorf("failed writing temp callback script for %s: %w", cb.Filename, err)
 		}
 		tmpFile.Close()
-		_ = os.Chmod(tmpFile.Name(), 0755)
+		_ = os.Chmod(tmpFile.Name(), 0644)
 		scriptPath = tmpFile.Name()
 		cleanup = func() { _ = os.Remove(tmpFile.Name()) }
 	}

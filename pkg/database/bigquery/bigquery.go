@@ -116,11 +116,16 @@ func (db *BigQueryDatabase) GetCurrentUser(ctx context.Context) (string, error) 
 
 // EnsureSchema creates the dataset if it does not exist.
 func (db *BigQueryDatabase) EnsureSchema(ctx context.Context, schema string) error {
+	exists, err := db.SchemaExists(ctx, schema)
+	if err == nil && exists {
+		return nil
+	}
+
 	ds := db.client.Dataset(schema)
 	meta := &bigquery.DatasetMetadata{
 		Location: db.location,
 	}
-	err := ds.Create(ctx, meta)
+	err = ds.Create(ctx, meta)
 	if err != nil {
 		errLower := strings.ToLower(err.Error())
 		if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
