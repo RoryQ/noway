@@ -102,3 +102,35 @@ func TestEnvOverride(t *testing.T) {
 		t.Errorf("expected placeholder TIER=premium, got %v", cfg.Placeholders)
 	}
 }
+
+func TestCreateSchemasConfig(t *testing.T) {
+	// 1. Default should be true
+	cfg := NewDefaultConfiguration()
+	if !cfg.CreateSchemas {
+		t.Errorf("expected default CreateSchemas to be true")
+	}
+
+	// 2. Load from .conf
+	confContent := "flyway.createSchemas=false\n"
+	tmpDir := t.TempDir()
+	confPath := filepath.Join(tmpDir, "flyway.conf")
+	if err := os.WriteFile(confPath, []byte(confContent), 0644); err != nil {
+		t.Fatalf("failed to write conf: %v", err)
+	}
+	loaded, err := LoadFromFile(confPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+	if loaded.CreateSchemas {
+		t.Errorf("expected CreateSchemas false from conf file")
+	}
+
+	// 3. Env override
+	t.Setenv("FLYWAY_CREATE_SCHEMAS", "false")
+	cfgEnv := NewDefaultConfiguration()
+	LoadFromEnv(cfgEnv)
+	if cfgEnv.CreateSchemas {
+		t.Errorf("expected CreateSchemas false from env variable")
+	}
+}
+

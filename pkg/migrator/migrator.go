@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RoryQ/noway/pkg/checksum"
 	"github.com/RoryQ/noway/pkg/config"
 	"github.com/RoryQ/noway/pkg/database"
 	"github.com/RoryQ/noway/pkg/parser"
@@ -124,9 +125,21 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	overallStart := time.Now()
 
 	// 1. Ensure schemas exist
-	for _, schema := range m.config.Schemas {
-		if err := m.db.EnsureSchema(ctx, schema); err != nil {
-			return nil, fmt.Errorf("failed to ensure schema '%s' exists: %w", schema, err)
+	if m.config.CreateSchemas {
+		for _, schema := range m.config.Schemas {
+			if err := m.db.EnsureSchema(ctx, schema); err != nil {
+				return nil, fmt.Errorf("failed to ensure schema '%s' exists: %w", schema, err)
+			}
+		}
+	} else {
+		for _, schema := range m.config.Schemas {
+			exists, err := m.db.SchemaExists(ctx, schema)
+			if err != nil {
+				return nil, fmt.Errorf("failed to check schema '%s' existence: %w", schema, err)
+			}
+			if !exists {
+				return nil, fmt.Errorf("schema '%s' does not exist and createSchemas is false", schema)
+			}
 		}
 	}
 
@@ -287,9 +300,21 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	var pendingRepeatable []resolver.ResolvedMigration
 	for _, res := range resolved.RepeatableMigrations {
 		lastRun, wasApplied := appliedRepeatables[res.Script]
+		expectedCs := res.Checksum
+		shouldReplace := m.config.PlaceholderReplacement
+		if res.Config.PlaceholderReplacement != nil {
+			shouldReplace = *res.Config.PlaceholderReplacement
+		}
+		if shouldReplace {
+			if replaced, err := m.replacer.Replace(res.Content, m.builtins); err == nil {
+				if newCs, err := checksum.CalculateString(replaced); err == nil {
+					expectedCs = newCs
+				}
+			}
+		}
 		if !wasApplied {
 			pendingRepeatable = append(pendingRepeatable, res)
-		} else if lastRun.Checksum == nil || *lastRun.Checksum != res.Checksum || !lastRun.Success {
+		} else if lastRun.Checksum == nil || (*lastRun.Checksum != expectedCs && *lastRun.Checksum != res.Checksum) || !lastRun.Success {
 			pendingRepeatable = append(pendingRepeatable, res)
 		}
 	}
@@ -451,6 +476,9 @@ func (m *Migrator) executeSQLMigration(
 		verStr = &s
 	}
 	cs := mig.Checksum
+	if newCs, err := checksum.CalculateString(sql); err == nil {
+		cs = newCs
+	}
 
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,
@@ -627,6 +655,9 @@ func (m *Migrator) executeScriptMigration(
 		verStr = &s
 	}
 	cs := mig.Checksum
+	if newCs, err := checksum.CalculateString(scriptContent); err == nil {
+		cs = newCs
+	}
 
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,

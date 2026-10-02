@@ -24,8 +24,18 @@ func (m *Migrator) Baseline(ctx context.Context) (*BaselineResult, error) {
 	table := m.config.Table
 
 	// 1. Ensure schema exists
-	if err := m.db.EnsureSchema(ctx, defaultSchema); err != nil {
-		return nil, fmt.Errorf("failed to ensure schema exists: %w", err)
+	if m.config.CreateSchemas {
+		if err := m.db.EnsureSchema(ctx, defaultSchema); err != nil {
+			return nil, fmt.Errorf("failed to ensure schema exists: %w", err)
+		}
+	} else {
+		exists, err := m.db.SchemaExists(ctx, defaultSchema)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check schema '%s' existence: %w", defaultSchema, err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("schema '%s' does not exist and createSchemas is false", defaultSchema)
+		}
 	}
 
 	// 2. Ensure history table exists

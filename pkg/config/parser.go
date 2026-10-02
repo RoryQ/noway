@@ -75,6 +75,8 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 		cfg.Driver = val
 	case "SCHEMAS":
 		cfg.Schemas = splitAndTrim(val, ",")
+	case "CREATE_SCHEMAS", "CREATESCHEMAS":
+		cfg.CreateSchemas = parseBool(val, true)
 	case "DEFAULT_SCHEMA", "DEFAULTSCHEMA":
 		cfg.DefaultSchema = val
 	case "TABLE":
@@ -196,6 +198,8 @@ func applyProperty(cfg *Configuration, key, val string) {
 		cfg.Driver = val
 	case "schemas":
 		cfg.Schemas = splitAndTrim(val, ",")
+	case "createschemas", "create_schemas":
+		cfg.CreateSchemas = parseBool(val, true)
 	case "defaultschema":
 		cfg.DefaultSchema = val
 	case "table":

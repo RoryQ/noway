@@ -19,7 +19,8 @@ type Configuration struct {
 	Driver   string   `json:"driver" yaml:"driver" toml:"driver"`
 	Schemas  []string `json:"schemas" yaml:"schemas" toml:"schemas"`
 	DefaultSchema string `json:"defaultSchema" yaml:"defaultSchema" toml:"defaultSchema"`
-	Table    string   `json:"table" yaml:"table" toml:"table"` // default: flyway_schema_history
+	Table         string   `json:"table" yaml:"table" toml:"table"`                 // default: flyway_schema_history
+	CreateSchemas bool     `json:"createSchemas" yaml:"createSchemas" toml:"createSchemas"` // default: true
 
 	// Migrations Discovery
 	Locations                 []string `json:"locations" yaml:"locations" toml:"locations"`
@@ -74,6 +75,7 @@ type Configuration struct {
 func NewDefaultConfiguration() *Configuration {
 	return &Configuration{
 		Table:                        "flyway_schema_history",
+		CreateSchemas:                true,
 		Locations:                    []string{"filesystem:sql"},
 		SQLMigrationPrefix:           "V",
 		RepeatableSQLMigrationPrefix: "R",

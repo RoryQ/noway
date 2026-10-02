@@ -154,6 +154,8 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.Password = val
 		case "schemas":
 			cfg.Schemas = splitAndTrimCLI(val, ",")
+		case "createschemas", "create-schemas", "create_schemas":
+			cfg.CreateSchemas = parseBoolVal(val)
 		case "defaultschema":
 			cfg.DefaultSchema = val
 		case "table":

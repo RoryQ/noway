@@ -6,6 +6,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/RoryQ/noway/pkg/checksum"
 	"github.com/RoryQ/noway/pkg/config"
 	"github.com/RoryQ/noway/pkg/database"
 	"github.com/RoryQ/noway/pkg/database/mock"
@@ -626,3 +627,150 @@ exit 42
 		t.Errorf("expected 1 failed history record, got %+v", history)
 	}
 }
+
+func TestMigrateCreateSchemas(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+	}
+
+	t.Run("CreateSchemas_True_CreatesSchema", func(t *testing.T) {
+		cfg := config.NewDefaultConfiguration()
+		cfg.DefaultSchema = "auto_schema"
+		cfg.Schemas = []string{"auto_schema"}
+		cfg.CreateSchemas = true
+		cfg.FS = mockFS
+
+		db := mock.NewMockDatabase()
+		m, err := New(cfg, db)
+		if err != nil {
+			t.Fatalf("failed to create migrator: %v", err)
+		}
+
+		ctx := context.Background()
+		res, err := m.Migrate(ctx)
+		if err != nil {
+			t.Fatalf("Migrate failed: %v", err)
+		}
+		if res.MigrationsExecuted != 1 {
+			t.Errorf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+		}
+
+		exists, _ := db.SchemaExists(ctx, "auto_schema")
+		if !exists {
+			t.Errorf("expected schema 'auto_schema' to have been created")
+		}
+	})
+
+	t.Run("CreateSchemas_False_FailsIfMissing", func(t *testing.T) {
+		cfg := config.NewDefaultConfiguration()
+		cfg.DefaultSchema = "missing_schema"
+		cfg.Schemas = []string{"missing_schema"}
+		cfg.CreateSchemas = false
+		cfg.FS = mockFS
+
+		db := mock.NewMockDatabase()
+		m, err := New(cfg, db)
+		if err != nil {
+			t.Fatalf("failed to create migrator: %v", err)
+		}
+
+		ctx := context.Background()
+		_, err = m.Migrate(ctx)
+		if err == nil {
+			t.Fatalf("expected error because schema does not exist and createSchemas=false, got nil")
+		}
+		if !strings.Contains(err.Error(), "does not exist and createSchemas is false") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("CreateSchemas_False_SucceedsIfSchemaExists", func(t *testing.T) {
+		cfg := config.NewDefaultConfiguration()
+		cfg.DefaultSchema = "existing_schema"
+		cfg.Schemas = []string{"existing_schema"}
+		cfg.CreateSchemas = false
+		cfg.FS = mockFS
+
+		db := mock.NewMockDatabase()
+		_ = db.EnsureSchema(context.Background(), "existing_schema")
+
+		m, err := New(cfg, db)
+		if err != nil {
+			t.Fatalf("failed to create migrator: %v", err)
+		}
+
+		ctx := context.Background()
+		res, err := m.Migrate(ctx)
+		if err != nil {
+			t.Fatalf("expected migrate success for existing schema, got: %v", err)
+		}
+		if res.MigrationsExecuted != 1 {
+			t.Errorf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+		}
+	})
+}
+
+func TestMigratePlaceholderChecksumming(t *testing.T) {
+	// Raw SQL contains ${table_name}
+	rawSQL := "CREATE TABLE ${table_name} (id INT64, env STRING);"
+	mockFS := fstest.MapFS{
+		"sql/V1__create_table.sql": &fstest.MapFile{
+			Data: []byte(rawSQL),
+		},
+		"sql/R__view.sql": &fstest.MapFile{
+			Data: []byte("CREATE VIEW user_view AS SELECT * FROM ${table_name};"),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+	cfg.Placeholders = map[string]string{
+		"table_name": "real_users_table",
+	}
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if res.MigrationsExecuted != 2 {
+		t.Fatalf("expected 2 migrations executed, got %d", res.MigrationsExecuted)
+	}
+
+	// 1. Verify history checksum matches post-replacement SQL
+	history, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(history))
+	}
+
+	expectedReplacedSQL := "CREATE TABLE real_users_table (id INT64, env STRING);"
+	expectedChecksum, _ := checksum.CalculateString(expectedReplacedSQL)
+	rawChecksum, _ := checksum.CalculateString(rawSQL)
+
+	v1History := history[0]
+	if v1History.Checksum == nil {
+		t.Fatalf("expected non-nil checksum")
+	}
+	if *v1History.Checksum != expectedChecksum {
+		t.Errorf("expected checksum %d (from replaced sql), got %d (raw was %d)", expectedChecksum, *v1History.Checksum, rawChecksum)
+	}
+
+	// 2. Validate passes
+	valRes, err := m.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if !valRes.Valid {
+		t.Errorf("expected validation to pass, errors: %v", valRes.Error())
+	}
+}
+
