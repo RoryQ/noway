@@ -1,40 +1,36 @@
 # noway 🚀
 
-**noway** is a pure Go, drop-in replacement for [Flyway](https://flywaydb.org/) and the official [`flyway-gcp-bigquery`](https://github.com/flyway/flyway/tree/main/flyway-database/flyway-gcp-bigquery) driver.
+**noway** is a pure Go, drop-in replacement for [Flyway](https://flywaydb.org/), supporting Google Cloud BigQuery and Google Cloud Spanner.
 
 It is designed so that any database previously migrated or managed using Flyway can seamlessly use **noway** instead with **zero migration or database changes required**.
+
+---
+
+## Supported Databases & Dialects
+
+- 📊 **Google Cloud BigQuery**: Full support for BigQuery Standard SQL, datasets, routines, views, and BigQuery JDBC URLs.
+- ⚡ **Google Cloud Spanner**: Full support for Spanner GoogleSQL DDL/DML, instances, databases, emulator support, and Cloud Spanner JDBC URLs (`jdbc:cloudspanner:/projects/.../instances/.../databases/...`).
 
 ---
 
 ## Key Features & Compatibility
 
 - 🎯 **100% Flyway Schema History Compatibility**:
-  - Reads and writes to standard `flyway_schema_history` table with exact BigQuery data types:
-    ```sql
-    CREATE TABLE `flyway_schema_history` (
-        `installed_rank` INT64 NOT NULL,
-        `version` STRING,
-        `description` STRING NOT NULL,
-        `type` STRING NOT NULL,
-        `script` STRING NOT NULL,
-        `checksum` INT64,
-        `installed_by` STRING NOT NULL,
-        `installed_on` TIMESTAMP,
-        `execution_time` INT64 NOT NULL,
-        `success` BOOL NOT NULL
-    );
-    ```
-- 🔒 **Matching Insert-Row Concurrency Lock**:
-  - Implements Flyway's `installed_rank = -100` row-locking algorithm with automatic heartbeat renewal and expired lock cleanup.
+  - Reads and writes to standard `flyway_schema_history` table with exact BigQuery and Cloud Spanner data types and commit timestamp options.
+- 🔒 **Matching Concurrency Row Locks**:
+  - BigQuery: `installed_rank = -100` row lock with heartbeat renewal.
+  - Cloud Spanner: `installed_rank = -1` row lock within read-write transactions with automatic 10-minute stale lock reclamation.
 - 🧮 **Exact Flyway Checksum Algorithm**:
   - CRC32 checksum calculation matching Flyway's `ChecksumCalculator` (line-by-line, UTF-8 BOM removal, line-ending agnostic LF/CRLF).
+  - Versioned / Undo / Baseline migrations use raw file content checksums.
+  - Repeatable migrations calculate checksums after placeholder replacement (matching Flyway specification).
 - ⚙️ **Configuration Compatibility**:
   - Reads existing `flyway.conf` / `flyway.toml` / `flyway.yaml` / `flyway.json` files.
-  - Understands all standard `FLYWAY_*` environment variables (e.g. `FLYWAY_URL`, `FLYWAY_SCHEMAS`, `FLYWAY_TABLE`, `FLYWAY_LOCATIONS`, `FLYWAY_PLACEHOLDERS_*`).
-  - Supports standard Flyway JDBC BigQuery connection strings:
-    `jdbc:bigquery://https://www.googleapis.com/bigquery/v2:443;ProjectId=my-project;OAuthType=0;OAuthServiceAcctEmail=...;OAuthPKeyFile=...;DefaultDataset=my_dataset;Location=US;`
+  - Understands all standard `FLYWAY_*`, `SPANNER_*`, and `BIGQUERY_*` environment variables.
+  - Supports standard Flyway JDBC BigQuery and Cloud Spanner connection strings.
 - 📜 **Full Migration Script Dialect Support**:
   - BigQuery Standard SQL procedural blocks (`BEGIN ... END`, `IF ... THEN`, `LOOP`, `WHILE`, `CASE`).
+  - Spanner DDL routing via `DatabaseAdminClient.UpdateDatabaseDdl` and DML routing via `ReadWriteTransaction`.
   - Single-line comments (`--` and `#`) and multiline comments (`/* ... */`).
   - Multiline string literals (`'''...'''` and `"""..."""`).
   - Versioned migrations (`V1__description.sql`), Repeatable migrations (`R__views.sql`), Undo migrations (`U1__undo.sql`), and Baseline migrations (`B1__baseline.sql`).

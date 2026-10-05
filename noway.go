@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io/fs"
 
+	"strings"
+
 	"github.com/roryq/noway/pkg/config"
 	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/database/bigquery"
+	"github.com/roryq/noway/pkg/database/spanner"
 	"github.com/roryq/noway/pkg/migrator"
 	"github.com/roryq/noway/pkg/resolver"
 	"github.com/roryq/noway/pkg/version"
@@ -119,6 +122,33 @@ func WithEndpoint(endpoint string) Option {
 	return func(o *nowayOptions) {
 		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
 			c.GCPBigQueryEndpoint = endpoint
+		})
+	}
+}
+
+// WithSpannerInstance sets the Cloud Spanner instance ID.
+func WithSpannerInstance(instanceID string) Option {
+	return func(o *nowayOptions) {
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPSpannerInstanceID = instanceID
+		})
+	}
+}
+
+// WithSpannerDatabase sets the Cloud Spanner database ID.
+func WithSpannerDatabase(databaseID string) Option {
+	return func(o *nowayOptions) {
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPSpannerDatabaseID = databaseID
+		})
+	}
+}
+
+// WithSpannerEndpoint sets a custom Cloud Spanner endpoint (e.g. for emulator).
+func WithSpannerEndpoint(endpoint string) Option {
+	return func(o *nowayOptions) {
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPSpannerEndpoint = endpoint
 		})
 	}
 }
@@ -260,13 +290,23 @@ func New(opts ...Option) (*Noway, error) {
 	if options.db != nil {
 		db = options.db
 	} else {
-		// Initialize BigQuery driver
-		bqDB, err := bigquery.New(context.Background(), cfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize BigQuery driver: %w", err)
+		// Determine database driver
+		if strings.EqualFold(cfg.Driver, "cloudspanner") || strings.EqualFold(cfg.Driver, "spanner") || cfg.GCPSpannerDatabaseID != "" || config.IsSpannerURL(cfg.URL) {
+			spanDB, err := spanner.New(context.Background(), cfg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to initialize Cloud Spanner driver: %w", err)
+			}
+			db = spanDB
+			ownsDB = true
+		} else {
+			// Initialize BigQuery driver
+			bqDB, err := bigquery.New(context.Background(), cfg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to initialize BigQuery driver: %w", err)
+			}
+			db = bqDB
+			ownsDB = true
 		}
-		db = bqDB
-		ownsDB = true
 	}
 
 	m, err := migrator.New(cfg, db)

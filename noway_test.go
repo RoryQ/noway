@@ -144,3 +144,36 @@ func TestNowayFlociIntegration(t *testing.T) {
 		t.Errorf("expected endpoint %s, got %s", endpoint, nw.config.GCPBigQueryEndpoint)
 	}
 }
+
+func TestNowaySpannerOptions(t *testing.T) {
+	nw, err := New(
+		WithProject("my-spanner-proj"),
+		WithSpannerInstance("my-spanner-inst"),
+		WithSpannerDatabase("my-spanner-db"),
+		WithSpannerEndpoint("localhost:9010"),
+		WithLocations("migrations"),
+		WithFS(fstest.MapFS{
+			"migrations/V1__init.sql": &fstest.MapFile{
+				Data: []byte("CREATE TABLE users (id INT64) PRIMARY KEY (id);"),
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("failed to initialize noway with spanner options: %v", err)
+	}
+	defer nw.Close()
+
+	if nw.config.GCPProjectID != "my-spanner-proj" {
+		t.Errorf("expected project 'my-spanner-proj', got %s", nw.config.GCPProjectID)
+	}
+	if nw.config.GCPSpannerInstanceID != "my-spanner-inst" {
+		t.Errorf("expected instance 'my-spanner-inst', got %s", nw.config.GCPSpannerInstanceID)
+	}
+	if nw.config.GCPSpannerDatabaseID != "my-spanner-db" {
+		t.Errorf("expected database 'my-spanner-db', got %s", nw.config.GCPSpannerDatabaseID)
+	}
+	if nw.config.GCPSpannerEndpoint != "localhost:9010" {
+		t.Errorf("expected endpoint 'localhost:9010', got %s", nw.config.GCPSpannerEndpoint)
+	}
+}
+

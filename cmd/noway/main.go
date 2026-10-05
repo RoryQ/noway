@@ -14,7 +14,7 @@ import (
 const AppVersion = "1.0.0"
 
 func printBanner() {
-	fmt.Printf("Noway v%s by RoryQ - Drop-in Flyway replacement for BigQuery\n", AppVersion)
+	fmt.Printf("Noway v%s by RoryQ - Drop-in Flyway replacement for BigQuery & Cloud Spanner\n", AppVersion)
 }
 
 func main() {
@@ -186,6 +186,14 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.GCPLocation = val
 		case "gcpcredentialsfile", "keyfile":
 			cfg.GCPCredentialsFile = val
+		case "driver":
+			cfg.Driver = val
+		case "gcpspannerinstanceid", "spannerinstanceid", "spannerinstance", "spanner-instance-id", "spanner-instance":
+			cfg.GCPSpannerInstanceID = val
+		case "gcpspannerdatabaseid", "spannerdatabaseid", "spannerdatabase", "spanner-database-id", "spanner-database":
+			cfg.GCPSpannerDatabaseID = val
+		case "gcpspannerendpoint", "spannerendpoint", "spanner-endpoint":
+			cfg.GCPSpannerEndpoint = val
 		case "configfile", "configfiles", "config-file", "config-files":
 			// Handled in step 1
 		default:
@@ -386,10 +394,11 @@ Commands:
   version    Prints version information
 
 Configuration & Flags:
-  -url=<url>                  BigQuery JDBC URL or connection string
+  -url=<url>                  JDBC URL (BigQuery or Cloud Spanner)
+  -driver=<driver>            Driver (bigquery or cloudspanner)
   -gcpProjectId=<id>          Google Cloud Project ID
-  -defaultSchema=<dataset>    Default BigQuery dataset
-  -schemas=<ds1,ds2>          Comma-separated list of datasets
+  -defaultSchema=<schema>     Default BigQuery dataset or Spanner schema
+  -schemas=<s1,s2>            Comma-separated list of schemas / datasets
   -table=<table>              Schema history table name (default: flyway_schema_history)
   -locations=<loc1,loc2>      Migration script locations (default: filesystem:sql)
   -target=<version>           Target version to migrate up to (default: latest)
@@ -399,12 +408,16 @@ Configuration & Flags:
   -baselineVersion=<version>  Baseline version (default: 1)
   -baselineDescription=<desc> Baseline description (default: << Flyway Baseline >>)
   -baselineOnMigrate=<bool>   Auto-baseline on non-empty schema (default: false)
+  -spannerInstanceId=<id>     Cloud Spanner instance ID
+  -spannerDatabaseId=<id>     Cloud Spanner database ID
+  -spannerEndpoint=<host:port> Cloud Spanner endpoint (e.g. localhost:9010)
   -placeholders.<key>=<val>   Set custom placeholder values
   -configFile=<file>          Load custom config file (.conf, .toml, .yaml, .json)
   -outputType=<text|json>     Output format (text or json)
 
 Examples:
   noway migrate -url="jdbc:bigquery:;ProjectId=my-project;DefaultDataset=analytics;"
+  noway migrate -url="jdbc:cloudspanner:/projects/my-project/instances/my-instance/databases/my-db"
   noway info -locations=filesystem:./migrations
   noway validate -gcpProjectId=my-project -defaultSchema=analytics
 `)
