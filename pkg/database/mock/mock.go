@@ -91,7 +91,13 @@ func (m *MockDatabase) SchemaEmpty(ctx context.Context, schema string) (bool, er
 		return false, nil
 	}
 	tables := m.tables[schema]
-	return len(tables) == 0, nil
+	count := 0
+	for t := range tables {
+		if t != "flyway_schema_history" {
+			count++
+		}
+	}
+	return count == 0, nil
 }
 
 func (m *MockDatabase) DropSchema(ctx context.Context, schema string) error {

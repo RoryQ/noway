@@ -137,7 +137,10 @@ var StandardCallbackEvents = []string{
 	"beforeEachUndoStatement",
 	"afterEachUndoStatement",
 	"afterEachUndoStatementError",
+	"beforeCreateSchema",
 	"createSchema",
+	"afterCreateSchema",
+	"afterCreateSchemaError",
 }
 
 type seenTracking struct {

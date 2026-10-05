@@ -182,12 +182,20 @@ func (db *BigQueryDatabase) SchemaEmpty(ctx context.Context, schema string) (boo
 		return exists, err
 	}
 
+	historyTable := "flyway_schema_history"
+	if db.config != nil && db.config.Table != "" {
+		historyTable = db.config.Table
+	}
+
 	sql := fmt.Sprintf(`SELECT 
-		(SELECT COUNT(table_name) FROM %s.INFORMATION_SCHEMA.TABLES) + 
+		(SELECT COUNT(table_name) FROM %s.INFORMATION_SCHEMA.TABLES WHERE table_name != @table_name) + 
 		(SELECT COUNT(routine_name) FROM %s.INFORMATION_SCHEMA.ROUTINES) as total_count`,
 		db.Quote(schema), db.Quote(schema))
 
 	q := db.client.Query(sql)
+	q.Parameters = []bigquery.QueryParameter{
+		{Name: "table_name", Value: historyTable},
+	}
 	it, err := q.Read(ctx)
 	if err != nil {
 		return false, err

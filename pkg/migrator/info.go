@@ -118,6 +118,9 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 		if info.Type == "BASELINE" {
 			category = "Baseline"
 		}
+		if info.Type == "SCHEMA" {
+			category = "Schema"
+		}
 
 		result.FlywayFormat = append(result.FlywayFormat, FlywayInfoItem{
 			Category:      category,
@@ -157,6 +160,9 @@ func (r *InfoResult) RenderTable(w io.Writer) {
 		if item.Type == "BASELINE" {
 			cat = "Baseline"
 		}
+		if item.Type == "SCHEMA" {
+			cat = "Schema"
+		}
 
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			cat,
@@ -194,6 +200,9 @@ func computeMigrationInfos(
 	var baselineVersion *version.Version
 
 	for _, app := range applied {
+		if app.Type == "SCHEMA" {
+			continue
+		}
 		if app.Type == "BASELINE" && app.Version != nil {
 			baselineVersion = app.Version
 		}
@@ -217,11 +226,35 @@ func computeMigrationInfos(
 		}
 	}
 
-	// 1. Process all applied versioned migrations
+	// 1. Process all applied migrations
 	seenResolved := make(map[string]bool)
 	var prevMaxVer *version.Version
 
 	for _, app := range applied {
+		if app.Type == "SCHEMA" {
+			appCopy := app
+			instOn := app.InstalledOn
+			execTime := app.ExecutionTime
+			state := resolver.StateSuccess
+			if !app.Success {
+				state = resolver.StateFailed
+			}
+			infos = append(infos, resolver.MigrationInfo{
+				Version:       nil,
+				Description:   app.Description,
+				Type:          app.Type,
+				Script:        app.Script,
+				Checksum:      app.Checksum,
+				InstalledBy:   app.InstalledBy,
+				InstalledOn:   &instOn,
+				ExecutionTime: &execTime,
+				State:         state,
+				Resolved:      nil,
+				Applied:       &appCopy,
+			})
+			continue
+		}
+
 		if app.Version == nil || app.Version.IsEmpty() {
 			continue
 		}

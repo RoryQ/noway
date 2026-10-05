@@ -196,33 +196,64 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	table := m.config.Table
 	overallStart := time.Now()
 
-	// 1. Ensure schemas exist
-	if m.config.CreateSchemas {
-		for _, schema := range m.config.Schemas {
-			if err := m.db.EnsureSchema(ctx, schema); err != nil {
-				return nil, fmt.Errorf("failed to ensure schema '%s' exists: %w", schema, err)
-			}
+	m.callbackRunner.SetOperation("MIGRATE")
+
+	// Determine user early for callbacks & metadata
+	user := m.config.InstalledBy
+	if user == "" {
+		currentUser, _ := m.db.GetCurrentUser(ctx)
+		if currentUser != "" {
+			user = currentUser
+		} else {
+			user = "flyway"
 		}
-	} else {
-		for _, schema := range m.config.Schemas {
-			exists, err := m.db.SchemaExists(ctx, schema)
-			if err != nil {
-				return nil, fmt.Errorf("failed to check schema '%s' existence: %w", schema, err)
-			}
-			if !exists {
+	}
+	m.builtins.User = user
+
+	var createdSchemas []string
+
+	// 1. Ensure schemas exist
+	for _, schema := range m.config.Schemas {
+		exists, err := m.db.SchemaExists(ctx, schema)
+		if err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+			return nil, fmt.Errorf("failed to check schema '%s' existence: %w", schema, err)
+		}
+		if !exists {
+			if !m.config.CreateSchemas {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				return nil, fmt.Errorf("schema '%s' does not exist and createSchemas is false", schema)
 			}
+			if err := m.callbackRunner.Fire(ctx, "beforeCreateSchema"); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				return nil, err
+			}
+			if err := m.callbackRunner.Fire(ctx, "createSchema"); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				return nil, err
+			}
+			if err := m.db.EnsureSchema(ctx, schema); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				return nil, fmt.Errorf("failed to ensure schema '%s' exists: %w", schema, err)
+			}
+			if err := m.callbackRunner.Fire(ctx, "afterCreateSchema"); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				return nil, err
+			}
+			createdSchemas = append(createdSchemas, schema)
 		}
 	}
 
 	// 2. Ensure history table exists
 	historyExists, err := m.db.HistoryTableExists(ctx, defaultSchema, table)
 	if err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 		return nil, fmt.Errorf("failed to check history table: %w", err)
 	}
 
 	if !historyExists {
 		if err := m.db.EnsureHistoryTable(ctx, defaultSchema, table); err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			return nil, fmt.Errorf("failed to create history table: %w", err)
 		}
 	}
@@ -230,44 +261,64 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	// 3. Acquire database lock
 	unlock, err := m.db.Lock(ctx, defaultSchema, table)
 	if err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 		return nil, fmt.Errorf("failed to acquire database lock: %w", err)
 	}
 	defer func() {
 		_ = unlock(context.Background())
 	}()
 
-	// 4. Fetch applied migrations
+	// 4. Fire beforeMigrate callback
+	if err := m.callbackRunner.Fire(ctx, "beforeMigrate"); err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+		return nil, err
+	}
+
+	// 5. Fetch applied migrations
 	applied, err := m.db.FetchHistory(ctx, defaultSchema, table)
 	if err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 		return nil, fmt.Errorf("failed to fetch schema history: %w", err)
 	}
 
+	// Count non-schema applied migrations
+	nonSchemaApplied := 0
+	for _, app := range applied {
+		if app.Type != "SCHEMA" {
+			nonSchemaApplied++
+		}
+	}
+
 	// Handle baselineOnMigrate if newly created history table or non-empty unmanaged DB
-	if len(applied) == 0 && m.config.BaselineOnMigrate {
+	if nonSchemaApplied == 0 && m.config.BaselineOnMigrate {
 		isEmpty, err := m.db.SchemaEmpty(ctx, defaultSchema)
 		if err == nil && !isEmpty {
 			_, err = m.baselineInternal(ctx, defaultSchema, table)
 			if err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				return nil, fmt.Errorf("baseline on migrate failed: %w", err)
 			}
 			applied, err = m.db.FetchHistory(ctx, defaultSchema, table)
 			if err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				return nil, err
 			}
 		}
 	}
 
-	// 5. Resolve local migrations
+	// 6. Resolve local migrations
 	resolved, err := m.resolver.Resolve()
 	if err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 		return nil, fmt.Errorf("failed to resolve migrations: %w", err)
 	}
 	m.callbackRunner.callbacks = resolved.Callbacks
 
-	// 6. Validate on migrate
+	// 7. Validate on migrate
 	if m.config.ValidateOnMigrate {
 		valRes, err := m.Validate(ctx)
 		if err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			return nil, fmt.Errorf("validation error: %w", err)
 		}
 		if !valRes.Valid {
@@ -275,6 +326,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 				_, _ = m.Clean(ctx)
 				applied = nil
 			} else {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				return nil, fmt.Errorf("%s", valRes.Error())
 			}
 		}
@@ -290,6 +342,9 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	for _, app := range applied {
 		if app.InstalledRank >= nextInstalledRank {
 			nextInstalledRank = app.InstalledRank + 1
+		}
+		if app.Type == "SCHEMA" {
+			continue
 		}
 		if app.Type == "BASELINE" && app.Version != nil {
 			baselineVersion = app.Version
@@ -319,7 +374,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 
 	// Check for Cumulative Baseline Migrations on Fresh Database
 	var selectedBaseline *resolver.ResolvedMigration
-	if len(applied) == 0 && len(resolved.BaselineMigrations) > 0 {
+	if nonSchemaApplied == 0 && len(resolved.BaselineMigrations) > 0 {
 		for i := len(resolved.BaselineMigrations) - 1; i >= 0; i-- {
 			b := resolved.BaselineMigrations[i]
 			if b.Version == nil {
@@ -332,7 +387,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		}
 	}
 
-	// 7. Find pending versioned migrations
+	// 8. Find pending versioned migrations
 	var pendingVersioned []resolver.ResolvedMigration
 	if selectedBaseline != nil {
 		baselineVersion = selectedBaseline.Version
@@ -367,7 +422,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		pendingVersioned = append(pendingVersioned, res)
 	}
 
-	// 8. Find pending / modified repeatable migrations
+	// 9. Find pending / modified repeatable migrations
 	var pendingRepeatable []resolver.ResolvedMigration
 	for _, res := range resolved.RepeatableMigrations {
 		lastRun, wasApplied := appliedRepeatables[res.Script]
@@ -379,26 +434,6 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	}
 
 	totalToApply := len(pendingVersioned) + len(pendingRepeatable)
-
-	m.callbackRunner.SetOperation("MIGRATE")
-
-	// 9. Fire beforeMigrate callback
-	if err := m.callbackRunner.Fire(ctx, "beforeMigrate"); err != nil {
-		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
-		return nil, err
-	}
-
-	// Determine user
-	user := m.config.InstalledBy
-	if user == "" {
-		currentUser, _ := m.db.GetCurrentUser(ctx)
-		if currentUser != "" {
-			user = currentUser
-		} else {
-			user = "flyway"
-		}
-	}
-	m.builtins.User = user
 
 	result := &MigrateResult{
 		InitialVersion:     initialVersionStr,

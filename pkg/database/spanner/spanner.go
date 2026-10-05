@@ -191,10 +191,21 @@ func (db *SpannerDatabase) SchemaExists(ctx context.Context, schema string) (boo
 	return false, err
 }
 
-// SchemaEmpty checks if the database has no user tables.
+// SchemaEmpty checks if the database has no user tables (excluding schema history table).
 func (db *SpannerDatabase) SchemaEmpty(ctx context.Context, schema string) (bool, error) {
-	sql := `SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '' AND TABLE_TYPE = 'BASE TABLE'`
-	iter := db.client.Single().Query(ctx, spanner.NewStatement(sql))
+	historyTable := "flyway_schema_history"
+	if db.config != nil && db.config.Table != "" {
+		historyTable = db.config.Table
+	}
+
+	sql := `SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '' AND TABLE_TYPE = 'BASE TABLE' AND TABLE_NAME != @table_name`
+	stmt := spanner.Statement{
+		SQL: sql,
+		Params: map[string]interface{}{
+			"table_name": historyTable,
+		},
+	}
+	iter := db.client.Single().Query(ctx, stmt)
 	defer iter.Stop()
 
 	row, err := iter.Next()

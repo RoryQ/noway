@@ -62,14 +62,18 @@ func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table st
 		return nil, fmt.Errorf("failed to fetch schema history: %w", err)
 	}
 
+	nonSchemaApplied := 0
 	for _, app := range applied {
 		if app.Type == "BASELINE" {
 			return nil, fmt.Errorf("unable to baseline database: schema history table already baselined at version %s", app.Version.String())
 		}
+		if app.Type != "SCHEMA" {
+			nonSchemaApplied++
+		}
 	}
 
-	if len(applied) > 0 {
-		return nil, fmt.Errorf("unable to baseline database: schema history table is not empty and already contains %d applied migration(s)", len(applied))
+	if nonSchemaApplied > 0 {
+		return nil, fmt.Errorf("unable to baseline database: schema history table is not empty and already contains %d applied migration(s)", nonSchemaApplied)
 	}
 
 	// 2. Fire beforeBaseline callbacks
@@ -103,8 +107,15 @@ func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table st
 		return nil, fmt.Errorf("invalid baseline version '%s': %w", bVer, err)
 	}
 
+	nextRank := 1
+	for _, app := range applied {
+		if app.InstalledRank >= nextRank {
+			nextRank = app.InstalledRank + 1
+		}
+	}
+
 	rec := database.HistoryRecord{
-		InstalledRank: 1,
+		InstalledRank: nextRank,
 		Version:       &bVer,
 		Description:   bDesc,
 		Type:          "BASELINE",
