@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/RoryQ/noway/pkg/resolver"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // ValidationError represents a discrepancy between local migrations and database history.

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // Configuration represents complete configuration for noway / flyway operations.
@@ -69,6 +69,11 @@ type Configuration struct {
 	GCPCredentialsFile    string `json:"gcpCredentialsFile" yaml:"gcpCredentialsFile" toml:"gcpCredentialsFile"`
 	GCPCredentialsJSON    string `json:"gcpCredentialsJson" yaml:"gcpCredentialsJson" toml:"gcpCredentialsJson"`
 	GCPBigQueryEndpoint   string `json:"gcpBigQueryEndpoint" yaml:"gcpBigQueryEndpoint" toml:"gcpBigQueryEndpoint"`
+
+	// Cloud Spanner Specific Connection Overrides
+	GCPSpannerInstanceID  string `json:"gcpSpannerInstanceId" yaml:"gcpSpannerInstanceId" toml:"gcpSpannerInstanceId"`
+	GCPSpannerDatabaseID  string `json:"gcpSpannerDatabaseId" yaml:"gcpSpannerDatabaseId" toml:"gcpSpannerDatabaseId"`
+	GCPSpannerEndpoint    string `json:"gcpSpannerEndpoint" yaml:"gcpSpannerEndpoint" toml:"gcpSpannerEndpoint"`
 }
 
 // NewDefaultConfiguration returns standard Flyway defaults.
@@ -106,28 +111,53 @@ func NewDefaultConfiguration() *Configuration {
 func (c *Configuration) Finalize() error {
 	// Parse JDBC / GCP parameters if URL is provided
 	if c.URL != "" {
-		params, err := ParseJDBCBigQueryURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("invalid JDBC URL: %w", err)
-		}
-		if c.GCPProjectID == "" && params.ProjectID != "" {
-			c.GCPProjectID = params.ProjectID
-		}
-		if c.GCPDataset == "" && params.DefaultDataset != "" {
-			c.GCPDataset = params.DefaultDataset
-		}
-		if c.GCPLocation == "" && params.Location != "" {
-			c.GCPLocation = params.Location
-		}
-		if c.GCPCredentialsFile == "" && params.ServiceAccountFile != "" {
-			c.GCPCredentialsFile = params.ServiceAccountFile
-		}
-		if c.DefaultSchema == "" && params.DefaultDataset != "" {
-			c.DefaultSchema = params.DefaultDataset
+		if IsSpannerURL(c.URL) {
+			sParams, err := ParseJDBCSpannerURL(c.URL)
+			if err != nil {
+				return fmt.Errorf("invalid Cloud Spanner JDBC URL: %w", err)
+			}
+			if c.GCPProjectID == "" && sParams.ProjectID != "" {
+				c.GCPProjectID = sParams.ProjectID
+			}
+			if c.GCPSpannerInstanceID == "" && sParams.InstanceID != "" {
+				c.GCPSpannerInstanceID = sParams.InstanceID
+			}
+			if c.GCPSpannerDatabaseID == "" && sParams.DatabaseID != "" {
+				c.GCPSpannerDatabaseID = sParams.DatabaseID
+			}
+			if c.GCPSpannerEndpoint == "" && sParams.Endpoint != "" {
+				c.GCPSpannerEndpoint = sParams.Endpoint
+			}
+			if c.GCPCredentialsFile == "" && sParams.CredentialsFile != "" {
+				c.GCPCredentialsFile = sParams.CredentialsFile
+			}
+			if c.Driver == "" {
+				c.Driver = "cloudspanner"
+			}
+		} else {
+			params, err := ParseJDBCBigQueryURL(c.URL)
+			if err != nil {
+				return fmt.Errorf("invalid JDBC URL: %w", err)
+			}
+			if c.GCPProjectID == "" && params.ProjectID != "" {
+				c.GCPProjectID = params.ProjectID
+			}
+			if c.GCPDataset == "" && params.DefaultDataset != "" {
+				c.GCPDataset = params.DefaultDataset
+			}
+			if c.GCPLocation == "" && params.Location != "" {
+				c.GCPLocation = params.Location
+			}
+			if c.GCPCredentialsFile == "" && params.ServiceAccountFile != "" {
+				c.GCPCredentialsFile = params.ServiceAccountFile
+			}
+			if c.DefaultSchema == "" && params.DefaultDataset != "" {
+				c.DefaultSchema = params.DefaultDataset
+			}
 		}
 	}
 
-	// Environment variable fallback for GCP credentials
+	// Environment variable fallback for GCP credentials & endpoints
 	if c.GCPCredentialsFile == "" {
 		if envKey := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); envKey != "" {
 			c.GCPCredentialsFile = envKey
@@ -136,6 +166,21 @@ func (c *Configuration) Finalize() error {
 	if c.GCPBigQueryEndpoint == "" {
 		if envEndpoint := os.Getenv("BIGQUERY_EMULATOR_HOST"); envEndpoint != "" {
 			c.GCPBigQueryEndpoint = envEndpoint
+		}
+	}
+	if c.GCPSpannerEndpoint == "" {
+		if envEndpoint := os.Getenv("SPANNER_EMULATOR_HOST"); envEndpoint != "" {
+			c.GCPSpannerEndpoint = envEndpoint
+		}
+	}
+	if c.GCPSpannerInstanceID == "" {
+		if envInst := os.Getenv("SPANNER_INSTANCE_ID"); envInst != "" {
+			c.GCPSpannerInstanceID = envInst
+		}
+	}
+	if c.GCPSpannerDatabaseID == "" {
+		if envDb := os.Getenv("SPANNER_DATABASE_ID"); envDb != "" {
+			c.GCPSpannerDatabaseID = envDb
 		}
 	}
 	if c.GCPProjectID == "" {

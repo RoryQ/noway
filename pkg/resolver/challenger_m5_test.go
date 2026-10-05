@@ -5,7 +5,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/parser"
 )
 
 func TestChallengerM5_DeeplyNestedSubdirectories(t *testing.T) {

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway/pkg/checksum"
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/database/mock"
+	"github.com/roryq/noway/pkg/checksum"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/database/mock"
 )
 
 // ============================================================================
@@ -458,7 +458,7 @@ func TestChallenger_HistoryRecord_NilChecksum_Accepted(t *testing.T) {
 		InstalledRank: 2,
 		Version:       nil,
 		Description:   "view",
-		Type:          "REPEATABLE",
+		Type:          "SQL",
 		Script:        "R__view.sql",
 		Checksum:      nil,
 		Success:       true,
@@ -635,7 +635,7 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 			InstalledRank: 1,
 			Version:       nil,
 			Description:   "custom user view",
-			Type:          "REPEATABLE",
+			Type:          "SQL",
 			Script:        "R__legacy_path_file.sql",
 			Checksum:      &cs,
 			Success:       true,
@@ -679,7 +679,7 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 			InstalledRank: 1,
 			Version:       nil,
 			Description:   "compute metrics",
-			Type:          "REPEATABLE",
+			Type:          "SQL",
 			Script:        "R__compute_metrics.sql",
 			Checksum:      &oldCs,
 			Success:       true,
@@ -722,7 +722,7 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 			InstalledRank: 1,
 			Version:       nil,
 			Description:   "my view",
-			Type:          "SQL", // In DB it was recorded as SQL, but resolved as REPEATABLE
+			Type:          "JDBC", // In DB it was recorded as JDBC, but resolved as SQL
 			Script:        "R__my_view.sql",
 			Checksum:      &cs,
 			Success:       true,
@@ -766,7 +766,7 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 			InstalledRank: 1,
 			Version:       nil,
 			Description:   "lost view",
-			Type:          "REPEATABLE",
+			Type:          "SQL",
 			Script:        "R__lost_view.sql",
 			Success:       true,
 		})
@@ -809,7 +809,7 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 			InstalledRank: 1,
 			Version:       nil,
 			Description:   "old recorded description",
-			Type:          "REPEATABLE",
+			Type:          "SQL",
 			Script:        "R__my_view.sql",
 			Success:       true,
 		})

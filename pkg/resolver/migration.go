@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // MigrationType represents the type of a migration.

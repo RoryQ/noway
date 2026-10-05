@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // BaselineResult contains the baseline operation outcome.

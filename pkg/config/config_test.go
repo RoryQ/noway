@@ -134,3 +134,62 @@ func TestCreateSchemasConfig(t *testing.T) {
 	}
 }
 
+func TestParseJDBCSpannerURL(t *testing.T) {
+	// Standard JDBC format
+	url1 := "jdbc:cloudspanner:/projects/my-project/instances/my-instance/databases/my-database"
+	p1, err := ParseJDBCSpannerURL(url1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p1.ProjectID != "my-project" || p1.InstanceID != "my-instance" || p1.DatabaseID != "my-database" {
+		t.Errorf("unexpected params for url1: %+v", p1)
+	}
+
+	// Emulator format with host and query options
+	url2 := "jdbc:cloudspanner://localhost:9010/projects/test-p/instances/test-i/databases/test-d?autoConfigEmulator=true;usePlainText=true"
+	p2, err := ParseJDBCSpannerURL(url2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p2.Endpoint != "localhost:9010" || p2.ProjectID != "test-p" || p2.InstanceID != "test-i" || p2.DatabaseID != "test-d" {
+		t.Errorf("unexpected params for url2: %+v", p2)
+	}
+	if !p2.AutoConfigEmulator || !p2.UsePlainText {
+		t.Errorf("expected autoConfigEmulator and usePlainText true, got: %+v", p2)
+	}
+
+	// Shorthand format
+	url3 := "spanner://my-proj/my-inst/my-db"
+	p3, err := ParseJDBCSpannerURL(url3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p3.ProjectID != "my-proj" || p3.InstanceID != "my-inst" || p3.DatabaseID != "my-db" {
+		t.Errorf("unexpected params for url3: %+v", p3)
+	}
+}
+
+func TestSpannerConfAndEnv(t *testing.T) {
+	t.Setenv("SPANNER_INSTANCE_ID", "env-inst")
+	t.Setenv("SPANNER_DATABASE_ID", "env-db")
+	t.Setenv("SPANNER_EMULATOR_HOST", "localhost:9010")
+
+	cfg := NewDefaultConfiguration()
+	cfg.GCPProjectID = "env-proj"
+	LoadFromEnv(cfg)
+	if err := cfg.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+
+	if cfg.GCPSpannerInstanceID != "env-inst" {
+		t.Errorf("expected GCPSpannerInstanceID 'env-inst', got %q", cfg.GCPSpannerInstanceID)
+	}
+	if cfg.GCPSpannerDatabaseID != "env-db" {
+		t.Errorf("expected GCPSpannerDatabaseID 'env-db', got %q", cfg.GCPSpannerDatabaseID)
+	}
+	if cfg.GCPSpannerEndpoint != "localhost:9010" {
+		t.Errorf("expected GCPSpannerEndpoint 'localhost:9010', got %q", cfg.GCPSpannerEndpoint)
+	}
+}
+
+

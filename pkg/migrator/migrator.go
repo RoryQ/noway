@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/parser"
-	"github.com/RoryQ/noway/pkg/resolver"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // Migrator is the central coordinator for all Flyway database migration operations.

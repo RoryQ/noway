@@ -50,7 +50,7 @@ It is designed so that any database previously migrated or managed using Flyway 
 ### CLI Binary
 
 ```bash
-go install github.com/RoryQ/noway/cmd/noway@latest
+go install github.com/roryq/noway/cmd/noway@latest
 ```
 
 You can also alias or symlink `noway` to `flyway`:
@@ -61,7 +61,7 @@ alias flyway="noway"
 ### Go Library
 
 ```bash
-go get github.com/RoryQ/noway
+go get github.com/roryq/noway
 ```
 
 ---
@@ -148,7 +148,7 @@ import (
 	"embed"
 	"log"
 
-	"github.com/RoryQ/noway"
+	"github.com/roryq/noway"
 )
 
 //go:embed migrations/*.sql

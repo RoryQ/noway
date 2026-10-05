@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/RoryQ/noway"
-	"github.com/RoryQ/noway/pkg/config"
+	"github.com/roryq/noway"
+	"github.com/roryq/noway/pkg/config"
 )
 
 const AppVersion = "1.0.0"

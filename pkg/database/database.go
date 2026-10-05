@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/RoryQ/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/resolver"
 )
 
 // HistoryRecord represents a row in the flyway_schema_history table.

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/RoryQ/noway/pkg/checksum"
-	"github.com/RoryQ/noway/pkg/parser"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/checksum"
+	"github.com/roryq/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // ResolverConfig configures how migrations are discovered and parsed.
@@ -493,7 +493,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 		}
 
-		repType := TypeRepeatable
+		repType := TypeSQL
 		if isScript {
 			repType = TypeScript
 		}

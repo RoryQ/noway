@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/RoryQ/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/parser"
 )
 
 func TestAdversarial_EnvPlaceholderVariations(t *testing.T) {

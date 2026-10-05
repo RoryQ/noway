@@ -5,8 +5,8 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway/pkg/checksum"
-	"github.com/RoryQ/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/checksum"
+	"github.com/roryq/noway/pkg/parser"
 )
 
 // TestAdversarial_RepeatableMissingPlaceholderErrors verifies checksum error propagation

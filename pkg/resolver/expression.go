@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/RoryQ/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/parser"
 )
 
 // EvaluateShouldExecute evaluates a shouldExecute expression after placeholder replacement.

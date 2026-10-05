@@ -3,7 +3,7 @@ package resolver
 import (
 	"testing"
 
-	"github.com/RoryQ/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/parser"
 )
 
 func TestEvaluateShouldExecute(t *testing.T) {

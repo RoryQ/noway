@@ -7,10 +7,10 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway/pkg/checksum"
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/database/mock"
+	"github.com/roryq/noway/pkg/checksum"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/database/mock"
 )
 
 // -----------------------------------------------------------------------------
@@ -903,7 +903,7 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 		case "V3__failing.sql":
 			t.Errorf("V3 should have been deleted from history, but still present!")
 		case "R__r1_keep.sql":
-			if h.Type != "REPEATABLE" || !h.Success {
+			if h.Type != "SQL" || !h.Success {
 				t.Errorf("R1 in unexpected state: type=%s, success=%v", h.Type, h.Success)
 			}
 		case "R__r2_mod.sql":
@@ -1242,7 +1242,7 @@ func TestChallenger_RepairRestoredRepeatableMigrationReactivates(t *testing.T) {
 	// 2. Restore file on disk (same description)
 	fs["migrations/R__view.sql"] = &fstest.MapFile{Data: []byte("CREATE VIEW v AS SELECT 1;")}
 
-	// 3. Repair again -> restores Type to REPEATABLE
+	// 3. Repair again -> restores Type to SQL
 	m2, _ := New(cfg, db)
 	repRes, err := m2.Repair(ctx)
 	if err != nil {
@@ -1253,8 +1253,8 @@ func TestChallenger_RepairRestoredRepeatableMigrationReactivates(t *testing.T) {
 	}
 
 	historyAfter, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-	if len(historyAfter) != 1 || historyAfter[0].Type != "REPEATABLE" {
-		t.Errorf("expected record restored to REPEATABLE, got %q", historyAfter[0].Type)
+	if len(historyAfter) != 1 || historyAfter[0].Type != "SQL" {
+		t.Errorf("expected record restored to SQL, got %q", historyAfter[0].Type)
 	}
 
 	// 4. Validate passes

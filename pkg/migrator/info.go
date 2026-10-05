@@ -8,9 +8,9 @@ import (
 	"io"
 	"text/tabwriter"
 
-	"github.com/RoryQ/noway/pkg/parser"
-	"github.com/RoryQ/noway/pkg/resolver"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // InfoResult contains the migration info report.

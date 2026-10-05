@@ -5,10 +5,10 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/database/mock"
-	"github.com/RoryQ/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/database/mock"
+	"github.com/roryq/noway/pkg/resolver"
 )
 
 func TestChallenger_TargetCurrent(t *testing.T) {

@@ -144,6 +144,14 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 		cfg.GCPCredentialsFile = val
 	case "GCP_CREDENTIALS_JSON", "GCPCREDENTIALSJSON":
 		cfg.GCPCredentialsJSON = val
+	case "GCP_BIGQUERY_ENDPOINT", "GCPBIGQUERYENDPOINT":
+		cfg.GCPBigQueryEndpoint = val
+	case "SPANNER_INSTANCE_ID", "SPANNERINSTANCEID", "GCP_SPANNER_INSTANCE_ID", "GCPSPANNERINSTANCEID":
+		cfg.GCPSpannerInstanceID = val
+	case "SPANNER_DATABASE_ID", "SPANNERDATABASEID", "GCP_SPANNER_DATABASE_ID", "GCPSPANNERDATABASEID":
+		cfg.GCPSpannerDatabaseID = val
+	case "SPANNER_ENDPOINT", "SPANNERENDPOINT", "GCP_SPANNER_ENDPOINT", "GCPSPANNERENDPOINT":
+		cfg.GCPSpannerEndpoint = val
 	default:
 		if strings.HasPrefix(keyUpper, "PLACEHOLDERS_") {
 			phKey := key[len("PLACEHOLDERS_"):]
@@ -281,6 +289,14 @@ func applyProperty(cfg *Configuration, key, val string) {
 		cfg.GCPCredentialsFile = val
 	case "gcpcredentialsjson":
 		cfg.GCPCredentialsJSON = val
+	case "gcpbigqueryendpoint", "bigqueryendpoint":
+		cfg.GCPBigQueryEndpoint = val
+	case "spannerinstanceid", "spanner_instance_id", "gcpspannerinstanceid", "instanceid", "instance_id":
+		cfg.GCPSpannerInstanceID = val
+	case "spannerdatabaseid", "spanner_database_id", "gcpspannerdatabaseid", "databaseid", "database_id":
+		cfg.GCPSpannerDatabaseID = val
+	case "spannerendpoint", "spanner_endpoint", "gcpspannerendpoint":
+		cfg.GCPSpannerEndpoint = val
 	default:
 		keyLower := strings.ToLower(key)
 		if strings.HasPrefix(keyLower, "placeholders.") {

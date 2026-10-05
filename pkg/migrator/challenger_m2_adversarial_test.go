@@ -5,10 +5,10 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway/pkg/checksum"
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/database/mock"
+	"github.com/roryq/noway/pkg/checksum"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/database/mock"
 )
 
 // -----------------------------------------------------------------------------
@@ -438,7 +438,7 @@ func TestChallengerCumulativeBaselinePopulatedDatabase_Adversarial(t *testing.T)
 			InstalledRank: 1,
 			Version:       nil,
 			Description:   "seed",
-			Type:          "REPEATABLE",
+			Type:          "SQL",
 			Script:        "R__seed.sql",
 			Checksum:      &csSeed,
 			Success:       true,
@@ -496,7 +496,7 @@ func TestChallengerCumulativeBaselinePopulatedDatabase_Adversarial(t *testing.T)
 			InstalledRank: 2,
 			Version:       nil,
 			Description:   "seed",
-			Type:          "REPEATABLE",
+			Type:          "SQL",
 			Script:        "R__seed.sql",
 			Checksum:      &csSeed,
 			Success:       true,

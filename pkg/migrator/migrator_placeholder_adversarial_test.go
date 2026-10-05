@@ -6,9 +6,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway/pkg/checksum"
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database/mock"
+	"github.com/roryq/noway/pkg/checksum"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database/mock"
 )
 
 func TestAdversarial_MigratePlaceholderConfOverridesAndEscapes(t *testing.T) {

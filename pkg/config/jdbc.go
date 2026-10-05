@@ -125,3 +125,121 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 
 	return params, nil
 }
+
+// SpannerConnectionParams parsed from Cloud Spanner JDBC or custom URLs.
+type SpannerConnectionParams struct {
+	ProjectID          string
+	InstanceID         string
+	DatabaseID         string
+	Endpoint           string
+	CredentialsFile    string
+	UsePlainText       bool
+	AutoConfigEmulator bool
+}
+
+// IsSpannerURL checks whether a raw URL targets Google Cloud Spanner.
+func IsSpannerURL(rawURL string) bool {
+	return strings.HasPrefix(rawURL, "jdbc:cloudspanner:") ||
+		strings.HasPrefix(rawURL, "spanner://")
+}
+
+// ParseJDBCSpannerURL parses a Cloud Spanner JDBC or custom URL.
+// Supports:
+// - jdbc:cloudspanner:/projects/{project}/instances/{instance}/databases/{database}
+// - jdbc:cloudspanner://localhost:9010/projects/{project}/instances/{instance}/databases/{database}
+// - spanner://projects/{project}/instances/{instance}/databases/{database}
+// - spanner://{project}/{instance}/{database}
+func ParseJDBCSpannerURL(rawURL string) (*SpannerConnectionParams, error) {
+	params := &SpannerConnectionParams{}
+	if rawURL == "" {
+		return params, nil
+	}
+
+	trimmed := rawURL
+
+	// Strip prefix
+	if strings.HasPrefix(trimmed, "jdbc:cloudspanner:") {
+		trimmed = strings.TrimPrefix(trimmed, "jdbc:cloudspanner:")
+	} else if strings.HasPrefix(trimmed, "spanner://") {
+		trimmed = strings.TrimPrefix(trimmed, "spanner://")
+	} else {
+		return nil, fmt.Errorf("not a Cloud Spanner URL: %s", rawURL)
+	}
+
+	// Extract query string or semicolon parameters if present
+	var queryStr string
+	if qIdx := strings.IndexAny(trimmed, "?;"); qIdx != -1 {
+		queryStr = trimmed[qIdx+1:]
+		trimmed = trimmed[:qIdx]
+	}
+
+	// Parse host/endpoint if present (e.g., //localhost:9010/projects/...)
+	if strings.HasPrefix(trimmed, "//") {
+		trimmed = strings.TrimPrefix(trimmed, "//")
+		slashIdx := strings.Index(trimmed, "/")
+		if slashIdx != -1 {
+			params.Endpoint = trimmed[:slashIdx]
+			trimmed = trimmed[slashIdx:]
+		}
+	}
+
+	// Clean path
+	trimmed = strings.Trim(trimmed, "/")
+	parts := strings.Split(trimmed, "/")
+
+	if len(parts) >= 6 && parts[0] == "projects" && parts[2] == "instances" && parts[4] == "databases" {
+		params.ProjectID = parts[1]
+		params.InstanceID = parts[3]
+		params.DatabaseID = parts[5]
+	} else if len(parts) == 3 {
+		// Shorthand: project/instance/database
+		params.ProjectID = parts[0]
+		params.InstanceID = parts[1]
+		params.DatabaseID = parts[2]
+	}
+
+	// Parse query params (supports both ?a=b&c=d and ;a=b;c=d)
+	if queryStr != "" {
+		kvPairs := strings.FieldsFunc(queryStr, func(r rune) bool {
+			return r == '&' || r == ';'
+		})
+		for _, pair := range kvPairs {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			kv := strings.SplitN(pair, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			k := strings.ToLower(strings.TrimSpace(kv[0]))
+			v := strings.TrimSpace(kv[1])
+
+			switch k {
+			case "credentials", "credentials_file", "keyfile", "oauthpkeyfile":
+				params.CredentialsFile = v
+			case "autoconfigemulator", "auto_config_emulator":
+				params.AutoConfigEmulator = strings.EqualFold(v, "true") || v == "1"
+			case "useplaintext", "use_plain_text":
+				params.UsePlainText = strings.EqualFold(v, "true") || v == "1"
+			case "endpoint", "host":
+				params.Endpoint = v
+			case "project", "projectid", "project_id":
+				if params.ProjectID == "" {
+					params.ProjectID = v
+				}
+			case "instance", "instanceid", "instance_id":
+				if params.InstanceID == "" {
+					params.InstanceID = v
+				}
+			case "database", "databaseid", "database_id":
+				if params.DatabaseID == "" {
+					params.DatabaseID = v
+				}
+			}
+		}
+	}
+
+	return params, nil
+}
+

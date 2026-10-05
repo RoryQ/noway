@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/resolver"
 )
 
 // RepairResult contains the repaired migrations outcome.

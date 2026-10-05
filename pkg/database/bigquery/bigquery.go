@@ -13,10 +13,10 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/resolver"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // BigQueryDatabase implements database.Database for Google Cloud BigQuery.

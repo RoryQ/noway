@@ -5,8 +5,8 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway/pkg/checksum"
-	"github.com/RoryQ/noway/pkg/parser"
+	"github.com/roryq/noway/pkg/checksum"
+	"github.com/roryq/noway/pkg/parser"
 )
 
 func TestResolverFS(t *testing.T) {
@@ -681,4 +681,56 @@ func TestResolver_CallbackDeterministicTieBreaking(t *testing.T) {
 		t.Errorf("expected tie-breaking by physical location: %s < %s", cbs[0].PhysicalLocation, cbs[1].PhysicalLocation)
 	}
 }
+
+func TestResolverRepeatableMigrationTypes(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"migrations/R__sql_view.sql": &fstest.MapFile{
+			Data: []byte("CREATE VIEW v AS SELECT 1;"),
+		},
+		"migrations/R__script_view.sh": &fstest.MapFile{
+			Data: []byte("#!/bin/bash\necho 'running script'"),
+		},
+	}
+
+	res := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"migrations"},
+	})
+
+	resolved, err := res.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+
+	if len(resolved.RepeatableMigrations) != 2 {
+		t.Fatalf("expected 2 repeatable migrations, got %d", len(resolved.RepeatableMigrations))
+	}
+
+	for _, rm := range resolved.RepeatableMigrations {
+		if rm.Script == "R__sql_view.sql" {
+			if rm.Type != TypeSQL {
+				t.Errorf("expected R__sql_view.sql to resolve with Type %q (Flyway parity), got %q", TypeSQL, rm.Type)
+			}
+			if !rm.IsRepeatable {
+				t.Errorf("expected IsRepeatable to be true")
+			}
+			if rm.IsScript {
+				t.Errorf("expected IsScript to be false for .sql")
+			}
+		} else if rm.Script == "R__script_view.sh" {
+			if rm.Type != TypeScript {
+				t.Errorf("expected R__script_view.sh to resolve with Type %q, got %q", TypeScript, rm.Type)
+			}
+			if !rm.IsRepeatable {
+				t.Errorf("expected IsRepeatable to be true")
+			}
+			if !rm.IsScript {
+				t.Errorf("expected IsScript to be true for .sh")
+			}
+		} else {
+			t.Errorf("unexpected repeatable migration: %s", rm.Script)
+		}
+	}
+}
+
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/RoryQ/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/resolver"
 )
 
 // UndoResult contains the undo operation result.

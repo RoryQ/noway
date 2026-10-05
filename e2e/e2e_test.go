@@ -6,12 +6,12 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/RoryQ/noway"
-	"github.com/RoryQ/noway/pkg/checksum"
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/database/mock"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway"
+	"github.com/roryq/noway/pkg/checksum"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/database/mock"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // setupNoway configures an in-memory noway instance backed by MockDatabase and MapFS.

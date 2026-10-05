@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RoryQ/noway/pkg/database"
+	"github.com/roryq/noway/pkg/database"
 )
 
 func TestChallengerM5_MockDatabaseHistoryCRUDAndNilFields(t *testing.T) {

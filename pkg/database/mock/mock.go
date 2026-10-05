@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/resolver"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // MockDatabase is an in-memory implementation of Database for unit testing.

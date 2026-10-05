@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io/fs"
 
-	"github.com/RoryQ/noway/pkg/config"
-	"github.com/RoryQ/noway/pkg/database"
-	"github.com/RoryQ/noway/pkg/database/bigquery"
-	"github.com/RoryQ/noway/pkg/migrator"
-	"github.com/RoryQ/noway/pkg/resolver"
-	"github.com/RoryQ/noway/pkg/version"
+	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/database/bigquery"
+	"github.com/roryq/noway/pkg/migrator"
+	"github.com/roryq/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // Re-export common types for ease of use

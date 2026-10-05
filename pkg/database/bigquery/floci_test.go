@@ -12,8 +12,8 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
-	"github.com/RoryQ/noway/pkg/config"
-	driver "github.com/RoryQ/noway/pkg/database/bigquery"
+	"github.com/roryq/noway/pkg/config"
+	driver "github.com/roryq/noway/pkg/database/bigquery"
 )
 
 func getFlociEndpoint() string {
