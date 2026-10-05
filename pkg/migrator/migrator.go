@@ -244,7 +244,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		}
 	}
 
-	// 2. Ensure history table exists
+	// 2. Ensure history table exists and handle baselineOnMigrate
 	historyExists, err := m.db.HistoryTableExists(ctx, defaultSchema, table)
 	if err != nil {
 		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
@@ -252,9 +252,39 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	}
 
 	if !historyExists {
-		if err := m.db.EnsureHistoryTable(ctx, defaultSchema, table); err != nil {
-			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
-			return nil, fmt.Errorf("failed to create history table: %w", err)
+		var nonEmptySchemas []string
+		for _, schema := range m.config.Schemas {
+			empty, err := m.db.SchemaEmpty(ctx, schema)
+			if err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				return nil, fmt.Errorf("failed to check if schema '%s' is empty: %w", schema, err)
+			}
+			if !empty {
+				nonEmptySchemas = append(nonEmptySchemas, schema)
+			}
+		}
+
+		if len(nonEmptySchemas) == 0 {
+			// All schemas empty -> create history table
+			if err := m.db.EnsureHistoryTable(ctx, defaultSchema, table); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				return nil, fmt.Errorf("failed to create history table: %w", err)
+			}
+		} else {
+			if m.config.BaselineOnMigrate {
+				if err := m.db.EnsureHistoryTable(ctx, defaultSchema, table); err != nil {
+					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+					return nil, fmt.Errorf("failed to create history table: %w", err)
+				}
+				_, err := m.baselineInternal(ctx, defaultSchema, table)
+				if err != nil {
+					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+					return nil, fmt.Errorf("baseline on migrate failed: %w", err)
+				}
+			} else {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				return nil, fmt.Errorf("Found non-empty schema(s) %s but no schema history table. Use baseline() or set baselineOnMigrate to true to initialize the schema history table.", strings.Join(nonEmptySchemas, ", "))
+			}
 		}
 	}
 
@@ -286,23 +316,6 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	for _, app := range applied {
 		if app.Type != "SCHEMA" {
 			nonSchemaApplied++
-		}
-	}
-
-	// Handle baselineOnMigrate if newly created history table or non-empty unmanaged DB
-	if nonSchemaApplied == 0 && m.config.BaselineOnMigrate {
-		isEmpty, err := m.db.SchemaEmpty(ctx, defaultSchema)
-		if err == nil && !isEmpty {
-			_, err = m.baselineInternal(ctx, defaultSchema, table)
-			if err != nil {
-				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
-				return nil, fmt.Errorf("baseline on migrate failed: %w", err)
-			}
-			applied, err = m.db.FetchHistory(ctx, defaultSchema, table)
-			if err != nil {
-				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
-				return nil, err
-			}
 		}
 	}
 

@@ -421,3 +421,85 @@ func TestInfo_SchemaHistoryWithSchemaRecord(t *testing.T) {
 		t.Errorf("expected rendered table to include 'Schema' category, got:\n%s", tableStr)
 	}
 }
+
+// TestMigrate_NonEmptySchemaWithoutHistoryTable_BaselineOnMigrateFalse_FailsWithFlywayError
+// verifies that if a non-empty schema exists with no history table and baselineOnMigrate=false,
+// Migrate fails with the exact Flyway error message.
+func TestMigrate_NonEmptySchemaWithoutHistoryTable_BaselineOnMigrateFalse_FailsWithFlywayError(t *testing.T) {
+	ctx := context.Background()
+	mockFS := fstest.MapFS{
+		"migrations/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "existing_schema"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"migrations"}
+	cfg.BaselineOnMigrate = false
+
+	db := mock.NewMockDatabase()
+	_ = db.EnsureSchema(ctx, "existing_schema")
+	_ = db.EnsureHistoryTable(ctx, "existing_schema", "user_table") // simulates pre-existing table
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("Failed to create migrator: %v", err)
+	}
+
+	_, err = m.Migrate(ctx)
+	if err == nil {
+		t.Fatalf("expected Migrate to fail on non-empty schema with baselineOnMigrate=false")
+	}
+
+	expectedSubstr := "Found non-empty schema(s) existing_schema but no schema history table"
+	if !strings.Contains(err.Error(), expectedSubstr) {
+		t.Errorf("expected error containing '%s', got: %v", expectedSubstr, err)
+	}
+}
+
+// TestMigrate_MultipleSchemas_BaselineOnMigrate_ChecksAllSchemas
+// verifies that all configured schemas are checked for emptiness when deciding to baseline.
+func TestMigrate_MultipleSchemas_BaselineOnMigrate_ChecksAllSchemas(t *testing.T) {
+	ctx := context.Background()
+	mockFS := fstest.MapFS{
+		"migrations/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+		"migrations/V2__add_t.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t (id INT64);"),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "schema_a"
+	cfg.Schemas = []string{"schema_a", "schema_b"}
+	cfg.FS = mockFS
+	cfg.Locations = []string{"migrations"}
+	cfg.BaselineOnMigrate = true
+	cfg.BaselineVersion = "1"
+
+	db := mock.NewMockDatabase()
+	_ = db.EnsureSchema(ctx, "schema_a") // empty
+	_ = db.EnsureSchema(ctx, "schema_b")
+	_ = db.EnsureHistoryTable(ctx, "schema_b", "legacy_b_table") // non-empty schema_b
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("Failed to create migrator: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	// Since schema_b is non-empty, baselineOnMigrate should have triggered and only V2 executed
+	if res.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed after baseline (V2), got %d", res.MigrationsExecuted)
+	}
+	if res.TargetVersion != "2" {
+		t.Fatalf("expected TargetVersion '2', got %s", res.TargetVersion)
+	}
+}
