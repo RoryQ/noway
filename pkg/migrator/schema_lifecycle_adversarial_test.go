@@ -503,3 +503,57 @@ func TestMigrate_MultipleSchemas_BaselineOnMigrate_ChecksAllSchemas(t *testing.T
 		t.Fatalf("expected TargetVersion '2', got %s", res.TargetVersion)
 	}
 }
+
+// TestMigrate_HistoryTableAlreadyExists_SkipsBaselineCheckAndEmptinessQuery verifies
+// that if the history table already exists, Flyway assumes the schema history is initialized
+// and does not run baseline checks or schema emptiness queries.
+func TestMigrate_HistoryTableAlreadyExists_SkipsBaselineCheckAndEmptinessQuery(t *testing.T) {
+	ctx := context.Background()
+	mockFS := fstest.MapFS{
+		"migrations/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "existing_history_ds"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"migrations"}
+	cfg.BaselineOnMigrate = true // enabled, but table already exists!
+	cfg.BaselineVersion = "1"
+
+	db := mock.NewMockDatabase()
+	_ = db.EnsureSchema(ctx, "existing_history_ds")
+	// Pre-create the schema history table (empty of migration records)
+	_ = db.EnsureHistoryTable(ctx, "existing_history_ds", "flyway_schema_history")
+	// Also create another pre-existing table in the schema
+	_ = db.EnsureHistoryTable(ctx, "existing_history_ds", "user_data_table")
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("Failed to create migrator: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	// Since flyway_schema_history already existed, baselineOnMigrate is bypassed,
+	// and V1 is executed normally.
+	if res.MigrationsExecuted != 1 {
+		t.Fatalf("expected V1 to be executed because history table already existed, got %d migrations", res.MigrationsExecuted)
+	}
+	if res.TargetVersion != "1" {
+		t.Fatalf("expected TargetVersion '1', got %s", res.TargetVersion)
+	}
+
+	history, err := db.FetchHistory(ctx, "existing_history_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory failed: %v", err)
+	}
+	if len(history) != 1 || history[0].Type != "SQL" || history[0].Version.String() != "1" {
+		t.Fatalf("expected 1 SQL record for V1 in history, got: %+v", history)
+	}
+}
+
