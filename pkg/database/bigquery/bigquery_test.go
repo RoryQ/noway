@@ -206,3 +206,102 @@ func TestBigQueryRetry(t *testing.T) {
 		}
 	})
 }
+
+func TestPollJobStatus(t *testing.T) {
+	t.Run("ImmediateDone", func(t *testing.T) {
+		calls := 0
+		status, err := pollJobStatus(context.Background(), 1*time.Millisecond, 5*time.Millisecond, func(ctx context.Context) (*bigquery.JobStatus, error) {
+			calls++
+			return &bigquery.JobStatus{State: bigquery.Done}, nil
+		})
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if !status.Done() {
+			t.Errorf("expected status.Done() to be true")
+		}
+		if calls != 1 {
+			t.Errorf("expected 1 call, got %d", calls)
+		}
+	})
+
+	t.Run("RunningThenDone", func(t *testing.T) {
+		calls := 0
+		status, err := pollJobStatus(context.Background(), 1*time.Millisecond, 5*time.Millisecond, func(ctx context.Context) (*bigquery.JobStatus, error) {
+			calls++
+			if calls < 3 {
+				return &bigquery.JobStatus{State: bigquery.Running}, nil
+			}
+			return &bigquery.JobStatus{State: bigquery.Done}, nil
+		})
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if !status.Done() {
+			t.Errorf("expected status.Done() to be true")
+		}
+		if calls != 3 {
+			t.Errorf("expected 3 calls, got %d", calls)
+		}
+	})
+
+	t.Run("TransientStatusErrorRecovers", func(t *testing.T) {
+		calls := 0
+		status, err := pollJobStatus(context.Background(), 1*time.Millisecond, 5*time.Millisecond, func(ctx context.Context) (*bigquery.JobStatus, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New("rateLimitExceeded: too many metadata update operations")
+			}
+			return &bigquery.JobStatus{State: bigquery.Done}, nil
+		})
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if !status.Done() {
+			t.Errorf("expected status.Done() to be true")
+		}
+		if calls != 2 {
+			t.Errorf("expected 2 calls, got %d", calls)
+		}
+	})
+
+	t.Run("NonRetryableStatusErrorFailsImmediately", func(t *testing.T) {
+		calls := 0
+		_, err := pollJobStatus(context.Background(), 1*time.Millisecond, 5*time.Millisecond, func(ctx context.Context) (*bigquery.JobStatus, error) {
+			calls++
+			return nil, errors.New("notFound: job not found in BigQuery")
+		})
+		if err == nil || !strings.Contains(err.Error(), "notFound") {
+			t.Fatalf("expected notFound error, got %v", err)
+		}
+		if calls != 1 {
+			t.Errorf("expected 1 call for non-retryable error, got %d", calls)
+		}
+	})
+
+	t.Run("ExhaustsStatusRetries", func(t *testing.T) {
+		calls := 0
+		_, err := pollJobStatus(context.Background(), 1*time.Millisecond, 5*time.Millisecond, func(ctx context.Context) (*bigquery.JobStatus, error) {
+			calls++
+			return nil, errors.New("rateLimitExceeded: quota reached")
+		})
+		if err == nil || !strings.Contains(err.Error(), "failed to get job status after 10 retries") {
+			t.Fatalf("expected retries exhausted error, got %v", err)
+		}
+		if calls != 11 { // 1 initial + 10 retries
+			t.Errorf("expected 11 calls, got %d", calls)
+		}
+	})
+
+	t.Run("ContextCancellation", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+
+		_, err := pollJobStatus(ctx, 200*time.Millisecond, 500*time.Millisecond, func(ctx context.Context) (*bigquery.JobStatus, error) {
+			return &bigquery.JobStatus{State: bigquery.Running}, nil
+		})
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context timeout/cancellation, got %v", err)
+		}
+	})
+}

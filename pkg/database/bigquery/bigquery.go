@@ -542,7 +542,7 @@ func (db *BigQueryDatabase) InsertHistory(ctx context.Context, schema, table str
 			return fmt.Errorf("failed to insert history record: %w", err)
 		}
 
-		status, err := job.Wait(ctx)
+		status, err := db.waitForJob(ctx, job)
 		if err != nil {
 			return fmt.Errorf("failed waiting for history insert job: %w", err)
 		}
@@ -581,7 +581,7 @@ func (db *BigQueryDatabase) UpdateHistory(ctx context.Context, schema, table str
 			return fmt.Errorf("failed to update history record: %w", err)
 		}
 
-		status, err := job.Wait(ctx)
+		status, err := db.waitForJob(ctx, job)
 		if err != nil {
 			return fmt.Errorf("failed waiting for history update job: %w", err)
 		}
@@ -607,7 +607,7 @@ func (db *BigQueryDatabase) DeleteHistory(ctx context.Context, schema, table str
 			return fmt.Errorf("failed to delete history record: %w", err)
 		}
 
-		status, err := job.Wait(ctx)
+		status, err := db.waitForJob(ctx, job)
 		if err != nil {
 			return fmt.Errorf("failed waiting for history delete job: %w", err)
 		}
@@ -668,7 +668,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		}
 		job, err := q.Run(ctx)
 		if err == nil {
-			status, err := job.Wait(ctx)
+			status, err := db.waitForJob(ctx, job)
 			if err == nil && status.Err() == nil {
 				// Verify if our lock is the active lock holder
 				checkQ := db.client.Query(checkActiveLockSQL)
@@ -688,7 +688,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 								{Name: "lock_id", Value: lockID},
 							}
 							if delJob, err := selfQ.Run(ctx); err == nil {
-								_, _ = delJob.Wait(ctx)
+								_, _ = db.waitForJob(ctx, delJob)
 							}
 						}
 					}
@@ -706,7 +706,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 			{Name: "lock_id", Value: lockID},
 		}
 		if cleanJob, err := cleanQ.Run(context.Background()); err == nil {
-			_, _ = cleanJob.Wait(context.Background())
+			_, _ = db.waitForJob(context.Background(), cleanJob)
 		}
 		return nil, fmt.Errorf("unable to obtain lock on Flyway schema history table %s.%s after %d retries", schema, table, maxRetries)
 	}
@@ -736,7 +736,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 				}
 				job, err := q.Run(heartbeatCtx)
 				if err == nil {
-					_, _ = job.Wait(heartbeatCtx)
+					_, _ = db.waitForJob(heartbeatCtx, job)
 				}
 			}
 		}
@@ -757,7 +757,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		if err != nil {
 			return fmt.Errorf("failed to release lock: %w", err)
 		}
-		status, err := job.Wait(unlockCtx)
+		status, err := db.waitForJob(unlockCtx, job)
 		if err != nil {
 			return fmt.Errorf("failed waiting for lock release job: %w", err)
 		}
@@ -781,7 +781,7 @@ func (db *BigQueryDatabase) ExecuteStatement(ctx context.Context, sql string) er
 			return fmt.Errorf("failed to run query: %w", err)
 		}
 
-		status, err := job.Wait(ctx)
+		status, err := db.waitForJob(ctx, job)
 		if err != nil {
 			return fmt.Errorf("query execution wait failed: %w", err)
 		}
@@ -795,6 +795,73 @@ func (db *BigQueryDatabase) ExecuteStatement(ctx context.Context, sql string) er
 		return fmt.Errorf("%w\nSQL: %s", err, trimmed)
 	}
 	return nil
+}
+
+// waitForJob polls job.Status until completion, with backoff and retry on transient status errors.
+func (db *BigQueryDatabase) waitForJob(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+	initialBackoff := 500 * time.Millisecond
+	if db.retryInitialBackoff > 0 {
+		initialBackoff = db.retryInitialBackoff
+	}
+	maxBackoff := 5 * time.Second
+	if db.retryMaxBackoff > 0 {
+		maxBackoff = db.retryMaxBackoff
+	}
+
+	return pollJobStatus(ctx, initialBackoff, maxBackoff, job.Status)
+}
+
+func pollJobStatus(
+	ctx context.Context,
+	initialBackoff time.Duration,
+	maxBackoff time.Duration,
+	getStatus func(context.Context) (*bigquery.JobStatus, error),
+) (*bigquery.JobStatus, error) {
+	backoff := initialBackoff
+	maxStatusRetries := 10
+	statusRetries := 0
+	var lastStatusErr error
+
+	for {
+		status, err := getStatus(ctx)
+		if err != nil {
+			if isRetryableBigQueryError(err) {
+				statusRetries++
+				lastStatusErr = err
+				if statusRetries > maxStatusRetries {
+					return nil, fmt.Errorf("failed to get job status after %d retries: %w", maxStatusRetries, lastStatusErr)
+				}
+				jitterFactor := 0.8 + 0.4*rand.Float64()
+				sleepDuration := time.Duration(float64(backoff) * jitterFactor)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(sleepDuration):
+				}
+				backoff = min(backoff*2, maxBackoff)
+				continue
+			}
+			return nil, err
+		}
+
+		// Reset status retries on successful call
+		statusRetries = 0
+
+		if status.Done() {
+			return status, nil
+		}
+
+		// Job is running / pending, wait before next poll
+		jitterFactor := 0.8 + 0.4*rand.Float64()
+		sleepDuration := time.Duration(float64(backoff) * jitterFactor)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(sleepDuration):
+		}
+
+		backoff = min(backoff*2, maxBackoff)
+	}
 }
 
 func (db *BigQueryDatabase) retry(ctx context.Context, op func() error) error {
