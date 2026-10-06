@@ -2,7 +2,9 @@ package bigquery
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -10,6 +12,7 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	"github.com/google/uuid"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
@@ -21,10 +24,12 @@ import (
 
 // BigQueryDatabase implements database.Database for Google Cloud BigQuery.
 type BigQueryDatabase struct {
-	client    *bigquery.Client
-	projectID string
-	location  string
-	config    *config.Configuration
+	client              *bigquery.Client
+	projectID           string
+	location            string
+	config              *config.Configuration
+	retryInitialBackoff time.Duration
+	retryMaxBackoff     time.Duration
 }
 
 // New creates and initializes a new BigQueryDatabase instance.
@@ -125,17 +130,19 @@ func (db *BigQueryDatabase) EnsureSchema(ctx context.Context, schema string) err
 	meta := &bigquery.DatasetMetadata{
 		Location: db.location,
 	}
-	err = ds.Create(ctx, meta)
-	if err != nil {
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
-			return nil
+	return db.retry(ctx, func() error {
+		err := ds.Create(ctx, meta)
+		if err != nil {
+			errLower := strings.ToLower(err.Error())
+			if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
+				return nil
+			}
+			// Fallback to SQL DDL
+			sql := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", db.Quote(schema))
+			return db.ExecuteStatement(ctx, sql)
 		}
-		// Fallback to SQL DDL
-		sql := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", db.Quote(schema))
-		return db.ExecuteStatement(ctx, sql)
-	}
-	return nil
+		return nil
+	})
 }
 
 // SchemaExists checks if the dataset exists.
@@ -322,16 +329,17 @@ func (db *BigQueryDatabase) EnsureHistoryTable(ctx context.Context, schema, tabl
 		{Name: "execution_time", Type: bigquery.IntegerFieldType, Required: true},
 		{Name: "success", Type: bigquery.BooleanFieldType, Required: true},
 	}
-	err := tbl.Create(ctx, &bigquery.TableMetadata{
-		Schema: historySchema,
-	})
-	if err != nil {
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
-			return nil
-		}
-		// Fallback to SQL DDL
-		sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+	return db.retry(ctx, func() error {
+		err := tbl.Create(ctx, &bigquery.TableMetadata{
+			Schema: historySchema,
+		})
+		if err != nil {
+			errLower := strings.ToLower(err.Error())
+			if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
+				return nil
+			}
+			// Fallback to SQL DDL
+			sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
     `+"`installed_rank`"+` INT64 NOT NULL,
     `+"`version`"+` STRING,
     `+"`description`"+` STRING NOT NULL,
@@ -343,9 +351,10 @@ func (db *BigQueryDatabase) EnsureHistoryTable(ctx context.Context, schema, tabl
     `+"`execution_time`"+` INT64 NOT NULL,
     `+"`success`"+` BOOL NOT NULL
 )`, db.Quote(schema, table))
-		return db.ExecuteStatement(ctx, sql)
-	}
-	return nil
+			return db.ExecuteStatement(ctx, sql)
+		}
+		return nil
+	})
 }
 
 // HistoryTableExists checks if the history table exists.
@@ -404,68 +413,75 @@ func (db *BigQueryDatabase) FetchHistory(ctx context.Context, schema, table stri
 	WHERE `+"`installed_rank`"+` > 0 
 	ORDER BY `+"`installed_rank`"+` ASC`, db.Quote(schema, table))
 
-	q := db.client.Query(sql)
-	it, err := q.Read(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch schema history: %w", err)
-	}
-
 	var records []resolver.AppliedMigration
-	for {
-		var row struct {
-			InstalledRank int64                   `bigquery:"installed_rank"`
-			Version       bigquery.NullString     `bigquery:"version"`
-			Description   string                  `bigquery:"description"`
-			Type          string                  `bigquery:"type"`
-			Script        string                  `bigquery:"script"`
-			Checksum      bigquery.NullInt64      `bigquery:"checksum"`
-			InstalledBy   string                  `bigquery:"installed_by"`
-			InstalledOn   bigquery.NullTimestamp  `bigquery:"installed_on"`
-			ExecutionTime int64                   `bigquery:"execution_time"`
-			Success       bool                    `bigquery:"success"`
-		}
-
-		err := it.Next(&row)
-		if err == iterator.Done {
-			break
-		}
+	err := db.retry(ctx, func() error {
+		records = nil
+		q := db.client.Query(sql)
+		it, err := q.Read(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("error reading schema history row: %w", err)
+			return fmt.Errorf("failed to fetch schema history: %w", err)
 		}
 
-		var vPtr *version.Version
-		if row.Version.Valid && row.Version.StringVal != "" {
-			v, err := version.Parse(row.Version.StringVal)
-			if err == nil {
-				vPtr = &v
+		for {
+			var row struct {
+				InstalledRank int64                   `bigquery:"installed_rank"`
+				Version       bigquery.NullString     `bigquery:"version"`
+				Description   string                  `bigquery:"description"`
+				Type          string                  `bigquery:"type"`
+				Script        string                  `bigquery:"script"`
+				Checksum      bigquery.NullInt64      `bigquery:"checksum"`
+				InstalledBy   string                  `bigquery:"installed_by"`
+				InstalledOn   bigquery.NullTimestamp  `bigquery:"installed_on"`
+				ExecutionTime int64                   `bigquery:"execution_time"`
+				Success       bool                    `bigquery:"success"`
 			}
-		}
 
-		var csPtr *int64
-		if row.Checksum.Valid {
-			c := row.Checksum.Int64
-			csPtr = &c
-		}
+			err := it.Next(&row)
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("error reading schema history row: %w", err)
+			}
 
-		var instOn time.Time
-		if row.InstalledOn.Valid {
-			instOn = row.InstalledOn.Timestamp
-		}
+			var vPtr *version.Version
+			if row.Version.Valid && row.Version.StringVal != "" {
+				v, err := version.Parse(row.Version.StringVal)
+				if err == nil {
+					vPtr = &v
+				}
+			}
 
-		records = append(records, resolver.AppliedMigration{
-			InstalledRank: int(row.InstalledRank),
-			Version:       vPtr,
-			Description:   row.Description,
-			Type:          row.Type,
-			Script:        row.Script,
-			Checksum:      csPtr,
-			InstalledBy:   row.InstalledBy,
-			InstalledOn:   instOn,
-			ExecutionTime: row.ExecutionTime,
-			Success:       row.Success,
-		})
+			var csPtr *int64
+			if row.Checksum.Valid {
+				c := row.Checksum.Int64
+				csPtr = &c
+			}
+
+			var instOn time.Time
+			if row.InstalledOn.Valid {
+				instOn = row.InstalledOn.Timestamp
+			}
+
+			records = append(records, resolver.AppliedMigration{
+				InstalledRank: int(row.InstalledRank),
+				Version:       vPtr,
+				Description:   row.Description,
+				Type:          row.Type,
+				Script:        row.Script,
+				Checksum:      csPtr,
+				InstalledBy:   row.InstalledBy,
+				InstalledOn:   instOn,
+				ExecutionTime: row.ExecutionTime,
+				Success:       row.Success,
+			})
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
 	}
-
 	return records, nil
 }
 
@@ -495,8 +511,6 @@ func (db *BigQueryDatabase) InsertHistory(ctx context.Context, schema, table str
 		@success
 	)`, db.Quote(schema, table))
 
-	q := db.client.Query(sql)
-
 	verNull := bigquery.NullString{}
 	if rec.Version != nil {
 		verNull.StringVal = *rec.Version
@@ -509,31 +523,34 @@ func (db *BigQueryDatabase) InsertHistory(ctx context.Context, schema, table str
 		csNull.Valid = true
 	}
 
-	q.Parameters = []bigquery.QueryParameter{
-		{Name: "installed_rank", Value: int64(rec.InstalledRank)},
-		{Name: "version", Value: verNull},
-		{Name: "description", Value: rec.Description},
-		{Name: "type", Value: rec.Type},
-		{Name: "script", Value: rec.Script},
-		{Name: "checksum", Value: csNull},
-		{Name: "installed_by", Value: rec.InstalledBy},
-		{Name: "execution_time", Value: rec.ExecutionTime},
-		{Name: "success", Value: rec.Success},
-	}
+	return db.retry(ctx, func() error {
+		q := db.client.Query(sql)
+		q.Parameters = []bigquery.QueryParameter{
+			{Name: "installed_rank", Value: int64(rec.InstalledRank)},
+			{Name: "version", Value: verNull},
+			{Name: "description", Value: rec.Description},
+			{Name: "type", Value: rec.Type},
+			{Name: "script", Value: rec.Script},
+			{Name: "checksum", Value: csNull},
+			{Name: "installed_by", Value: rec.InstalledBy},
+			{Name: "execution_time", Value: rec.ExecutionTime},
+			{Name: "success", Value: rec.Success},
+		}
 
-	job, err := q.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to insert history record: %w", err)
-	}
+		job, err := q.Run(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to insert history record: %w", err)
+		}
 
-	status, err := job.Wait(ctx)
-	if err != nil {
-		return fmt.Errorf("failed waiting for history insert job: %w", err)
-	}
-	if err := status.Err(); err != nil {
-		return fmt.Errorf("history insert failed: %w", err)
-	}
-	return nil
+		status, err := job.Wait(ctx)
+		if err != nil {
+			return fmt.Errorf("failed waiting for history insert job: %w", err)
+		}
+		if err := status.Err(); err != nil {
+			return fmt.Errorf("history insert failed: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpdateHistory updates an existing migration record.
@@ -544,50 +561,61 @@ func (db *BigQueryDatabase) UpdateHistory(ctx context.Context, schema, table str
 	    `+"`type`"+` = @type
 	WHERE `+"`installed_rank`"+` = @installed_rank`, db.Quote(schema, table))
 
-	q := db.client.Query(sql)
 	csNull := bigquery.NullInt64{}
 	if rec.Checksum != nil {
 		csNull.Int64 = *rec.Checksum
 		csNull.Valid = true
 	}
 
-	q.Parameters = []bigquery.QueryParameter{
-		{Name: "checksum", Value: csNull},
-		{Name: "description", Value: rec.Description},
-		{Name: "type", Value: rec.Type},
-		{Name: "installed_rank", Value: int64(rec.InstalledRank)},
-	}
+	return db.retry(ctx, func() error {
+		q := db.client.Query(sql)
+		q.Parameters = []bigquery.QueryParameter{
+			{Name: "checksum", Value: csNull},
+			{Name: "description", Value: rec.Description},
+			{Name: "type", Value: rec.Type},
+			{Name: "installed_rank", Value: int64(rec.InstalledRank)},
+		}
 
-	job, err := q.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to update history record: %w", err)
-	}
+		job, err := q.Run(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to update history record: %w", err)
+		}
 
-	status, err := job.Wait(ctx)
-	if err != nil {
-		return fmt.Errorf("failed waiting for history update job: %w", err)
-	}
-	return status.Err()
+		status, err := job.Wait(ctx)
+		if err != nil {
+			return fmt.Errorf("failed waiting for history update job: %w", err)
+		}
+		if err := status.Err(); err != nil {
+			return fmt.Errorf("history update failed: %w", err)
+		}
+		return nil
+	})
 }
 
 // DeleteHistory deletes a migration record.
 func (db *BigQueryDatabase) DeleteHistory(ctx context.Context, schema, table string, installedRank int) error {
 	sql := fmt.Sprintf("DELETE FROM %s WHERE `installed_rank` = @installed_rank", db.Quote(schema, table))
-	q := db.client.Query(sql)
-	q.Parameters = []bigquery.QueryParameter{
-		{Name: "installed_rank", Value: int64(installedRank)},
-	}
 
-	job, err := q.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to delete history record: %w", err)
-	}
+	return db.retry(ctx, func() error {
+		q := db.client.Query(sql)
+		q.Parameters = []bigquery.QueryParameter{
+			{Name: "installed_rank", Value: int64(installedRank)},
+		}
 
-	status, err := job.Wait(ctx)
-	if err != nil {
-		return fmt.Errorf("failed waiting for history delete job: %w", err)
-	}
-	return status.Err()
+		job, err := q.Run(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to delete history record: %w", err)
+		}
+
+		status, err := job.Wait(ctx)
+		if err != nil {
+			return fmt.Errorf("failed waiting for history delete job: %w", err)
+		}
+		if err := status.Err(); err != nil {
+			return fmt.Errorf("history delete failed: %w", err)
+		}
+		return nil
+	})
 }
 
 // Lock acquires a Flyway-compatible row lock in the history table.
@@ -746,19 +774,137 @@ func (db *BigQueryDatabase) ExecuteStatement(ctx context.Context, sql string) er
 		return nil
 	}
 
-	q := db.client.Query(trimmed)
-	job, err := q.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to run query: %w\nSQL: %s", err, trimmed)
-	}
+	err := db.retry(ctx, func() error {
+		q := db.client.Query(trimmed)
+		job, err := q.Run(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to run query: %w", err)
+		}
 
-	status, err := job.Wait(ctx)
-	if err != nil {
-		return fmt.Errorf("query execution wait failed: %w\nSQL: %s", err, trimmed)
-	}
-	if err := status.Err(); err != nil {
-		return fmt.Errorf("query execution failed: %w\nSQL: %s", err, trimmed)
-	}
+		status, err := job.Wait(ctx)
+		if err != nil {
+			return fmt.Errorf("query execution wait failed: %w", err)
+		}
+		if err := status.Err(); err != nil {
+			return fmt.Errorf("query execution failed: %w", err)
+		}
+		return nil
+	})
 
+	if err != nil {
+		return fmt.Errorf("%w\nSQL: %s", err, trimmed)
+	}
 	return nil
+}
+
+func (db *BigQueryDatabase) retry(ctx context.Context, op func() error) error {
+	maxRetries := 5
+	if db.config != nil && db.config.ConnectRetries > 0 {
+		maxRetries = db.config.ConnectRetries
+	}
+
+	initialBackoff := 2 * time.Second
+	if db.retryInitialBackoff > 0 {
+		initialBackoff = db.retryInitialBackoff
+	}
+
+	maxBackoff := 30 * time.Second
+	if db.retryMaxBackoff > 0 {
+		maxBackoff = db.retryMaxBackoff
+	}
+
+	backoff := initialBackoff
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Calculate jittered backoff: ±20%
+			jitterFactor := 0.8 + 0.4*rand.Float64()
+			sleepDuration := time.Duration(float64(backoff) * jitterFactor)
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(sleepDuration):
+			}
+
+			backoff = time.Duration(float64(backoff) * 2.0)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+
+		err := op()
+		if err == nil {
+			return nil
+		}
+
+		if isRetryableBigQueryError(err) {
+			lastErr = err
+			continue
+		}
+
+		return err
+	}
+
+	return fmt.Errorf("operation failed after %d retries: %w", maxRetries, lastErr)
+}
+
+func isRetryableBigQueryError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Direct check for googleapi.Error
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) {
+		if gErr.Code == 429 || gErr.Code == 500 || gErr.Code == 502 || gErr.Code == 503 || gErr.Code == 504 {
+			return true
+		}
+		for _, item := range gErr.Errors {
+			if isRetryableReason(item.Reason) {
+				return true
+			}
+		}
+	}
+
+	// Direct check for bigquery.Error
+	var bqErr *bigquery.Error
+	if errors.As(err, &bqErr) {
+		if isRetryableReason(bqErr.Reason) {
+			return true
+		}
+	}
+
+	// Fallback string matching on error message
+	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "ratelimitexceeded") ||
+		strings.Contains(errStr, "jobratelimitexceeded") ||
+		strings.Contains(errStr, "quotaexceeded") ||
+		strings.Contains(errStr, "exceeded rate limits") ||
+		strings.Contains(errStr, "too many metadata update operations") ||
+		strings.Contains(errStr, "backenderror") ||
+		strings.Contains(errStr, "internalerror") ||
+		strings.Contains(errStr, "concurrentmodification") ||
+		strings.Contains(errStr, "status code 429") ||
+		strings.Contains(errStr, "status code 503") ||
+		strings.Contains(errStr, "status code 500") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "broken pipe") {
+		return true
+	}
+
+	return false
+}
+
+func isRetryableReason(reason string) bool {
+	r := strings.ToLower(reason)
+	return r == "ratelimitexceeded" ||
+		r == "jobratelimitexceeded" ||
+		r == "quotaexceeded" ||
+		r == "backenderror" ||
+		r == "internalerror" ||
+		r == "concurrentmodification" ||
+		r == "rate_limit_exceeded" ||
+		r == "quota_exceeded"
 }
