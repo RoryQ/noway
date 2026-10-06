@@ -178,6 +178,8 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.BaselineOnMigrate = parseBoolVal(val)
 		case "outputtype", "output":
 			cfg.OutputType = val
+		case "dryrunoutput", "dry-run-output", "dry_run_output":
+			cfg.DryRunOutput = val
 		case "gcpprojectid", "project":
 			cfg.GCPProjectID = val
 		case "gcpdataset", "dataset":
@@ -414,6 +416,7 @@ Configuration & Flags:
   -placeholders.<key>=<val>   Set custom placeholder values
   -configFile=<file>          Load custom config file (.conf, .toml, .yaml, .json)
   -outputType=<text|json>     Output format (text or json)
+  -dryRunOutput=<file>        Output file for dry run SQL script (or - for stdout)
 
 Examples:
   noway migrate -url="jdbc:bigquery:;ProjectId=my-project;DefaultDataset=analytics;"

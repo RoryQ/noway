@@ -88,7 +88,7 @@ func (m *MockDatabase) SchemaEmpty(ctx context.Context, schema string) (bool, er
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.schemas[schema] {
-		return false, nil
+		return true, nil
 	}
 	tables := m.tables[schema]
 	count := 0

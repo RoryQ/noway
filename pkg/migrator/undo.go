@@ -19,6 +19,7 @@ type UndoResult struct {
 func (m *Migrator) Undo(ctx context.Context) (*UndoResult, error) {
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
+	isDryRun := m.config.DryRunOutput != ""
 
 	// 1. Ensure history table exists
 	exists, err := m.db.HistoryTableExists(ctx, defaultSchema, table)
@@ -29,14 +30,16 @@ func (m *Migrator) Undo(ctx context.Context) (*UndoResult, error) {
 		return nil, fmt.Errorf("no schema history table found to undo migrations")
 	}
 
-	// 2. Lock history table
-	unlock, err := m.db.Lock(ctx, defaultSchema, table)
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire lock for undo: %w", err)
+	// 2. Lock history table if not dry run
+	if !isDryRun {
+		unlock, err := m.db.Lock(ctx, defaultSchema, table)
+		if err != nil {
+			return nil, fmt.Errorf("failed to acquire lock for undo: %w", err)
+		}
+		defer func() {
+			_ = unlock(context.Background())
+		}()
 	}
-	defer func() {
-		_ = unlock(context.Background())
-	}()
 
 	// 3. Fetch applied history
 	applied, err := m.db.FetchHistory(ctx, defaultSchema, table)
@@ -76,18 +79,31 @@ func (m *Migrator) Undo(ctx context.Context) (*UndoResult, error) {
 		return nil, fmt.Errorf("no undo migration found for version %s (expected U%s__*.sql)", latestApplied.Version.String(), latestApplied.Version.String())
 	}
 
+	// Placeholders
+	sql, err := m.replacer.Replace(targetUndo.Content, m.builtins)
+	if err != nil {
+		return nil, fmt.Errorf("error replacing placeholders in undo script '%s': %w", targetUndo.Script, err)
+	}
+
+	if isDryRun {
+		user := m.config.InstalledBy
+		if user == "" {
+			currentUser, _ := m.db.GetCurrentUser(ctx)
+			if currentUser != "" {
+				user = currentUser
+			} else {
+				user = "flyway"
+			}
+		}
+		return m.undoDryRun(ctx, defaultSchema, table, user, latestApplied, targetUndo, sql)
+	}
+
 	// 5. Fire beforeUndo callbacks
 	if err := m.callbackRunner.Fire(ctx, "beforeUndo"); err != nil {
 		return nil, err
 	}
 	if err := m.callbackRunner.Fire(ctx, "beforeEachUndo"); err != nil {
 		return nil, err
-	}
-
-	// 6. Execute undo script
-	sql, err := m.replacer.Replace(targetUndo.Content, m.builtins)
-	if err != nil {
-		return nil, fmt.Errorf("error replacing placeholders in undo script '%s': %w", targetUndo.Script, err)
 	}
 
 	stmts := m.parser.SplitStatements(sql)

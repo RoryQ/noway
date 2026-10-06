@@ -178,8 +178,11 @@ func (db *BigQueryDatabase) SchemaExists(ctx context.Context, schema string) (bo
 // SchemaEmpty checks if the dataset has 0 tables and 0 routines.
 func (db *BigQueryDatabase) SchemaEmpty(ctx context.Context, schema string) (bool, error) {
 	exists, err := db.SchemaExists(ctx, schema)
-	if err != nil || !exists {
-		return exists, err
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return true, nil
 	}
 
 	historyTable := "flyway_schema_history"

@@ -193,6 +193,14 @@ func (db *SpannerDatabase) SchemaExists(ctx context.Context, schema string) (boo
 
 // SchemaEmpty checks if the database has no user tables (excluding schema history table).
 func (db *SpannerDatabase) SchemaEmpty(ctx context.Context, schema string) (bool, error) {
+	exists, err := db.SchemaExists(ctx, schema)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return true, nil
+	}
+
 	historyTable := "flyway_schema_history"
 	if db.config != nil && db.config.Table != "" {
 		historyTable = db.config.Table

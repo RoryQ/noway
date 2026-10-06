@@ -134,6 +134,8 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 		cfg.BaselineOnMigrate = parseBool(val, false)
 	case "OUTPUT_TYPE", "OUTPUTTYPE":
 		cfg.OutputType = val
+	case "DRY_RUN_OUTPUT", "DRYRUNOUTPUT":
+		cfg.DryRunOutput = val
 	case "GCP_PROJECT_ID", "GCPPROJECTID":
 		cfg.GCPProjectID = val
 	case "GCP_DATASET", "GCPDATASET":
@@ -279,6 +281,8 @@ func applyProperty(cfg *Configuration, key, val string) {
 		cfg.BaselineOnMigrate = parseBool(val, false)
 	case "outputtype":
 		cfg.OutputType = val
+	case "dryrunoutput", "dry_run_output":
+		cfg.DryRunOutput = val
 	case "gcpprojectid":
 		cfg.GCPProjectID = val
 	case "gcpdataset":

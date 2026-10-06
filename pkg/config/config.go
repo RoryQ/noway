@@ -60,7 +60,8 @@ type Configuration struct {
 	BaselineOnMigrate   bool   `json:"baselineOnMigrate" yaml:"baselineOnMigrate" toml:"baselineOnMigrate"`       // default: false
 
 	// Output & Output formatting
-	OutputType string `json:"outputType" yaml:"outputType" toml:"outputType"` // "text" or "json"
+	OutputType   string `json:"outputType" yaml:"outputType" toml:"outputType"`       // "text" or "json"
+	DryRunOutput string `json:"dryRunOutput" yaml:"dryRunOutput" toml:"dryRunOutput"` // Output file for dry run SQL (or - for stdout)
 
 	// BigQuery Specific Connection Overrides
 	GCPProjectID          string `json:"gcpProjectId" yaml:"gcpProjectId" toml:"gcpProjectId"`
