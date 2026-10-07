@@ -322,3 +322,191 @@ func TestFlociRepeatableMigrationRename(t *testing.T) {
 	// Cleanup
 	_ = db.DropSchema(ctx, datasetName)
 }
+
+// TestFlociValidationParity validates Flyway validation parity features against floci-gcp.
+func TestFlociValidationParity(t *testing.T) {
+	endpoint := getFlociEndpoint()
+	if !isFlociAvailable(endpoint) {
+		t.Skip("floci-gcp emulator is not running; skipping floci integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	projectID := "floci-local"
+	datasetName := "floci_val_parity_test"
+	tableName := "flyway_schema_history"
+
+	baseCfg := func(fs fstest.MapFS) *config.Configuration {
+		cfg := config.NewDefaultConfiguration()
+		cfg.GCPProjectID = projectID
+		cfg.GCPBigQueryEndpoint = endpoint
+		cfg.DefaultSchema = datasetName
+		cfg.Schemas = []string{datasetName}
+		cfg.Table = tableName
+		cfg.FS = fs
+		cfg.Locations = []string{"migrations"}
+		_ = cfg.Finalize()
+		return cfg
+	}
+
+	cfgInitial := baseCfg(nil)
+	db, err := driver.New(ctx, cfgInitial)
+	if err != nil {
+		t.Fatalf("failed to initialize BigQuery driver for floci-gcp: %v", err)
+	}
+	defer db.Close()
+
+	// Clean dataset before starting
+	_ = db.DropSchema(ctx, datasetName)
+	if err := db.EnsureSchema(ctx, datasetName); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+	defer func() {
+		_ = db.DropSchema(ctx, datasetName)
+	}()
+
+	v1SQL := "CREATE TABLE IF NOT EXISTS `" + projectID + "." + datasetName + ".t1` (id INT64);"
+	v2SQL := "CREATE TABLE IF NOT EXISTS `" + projectID + "." + datasetName + ".t2` (id INT64);"
+
+	// -------------------------------------------------------------------------
+	// 1. Non-empty dataset without history table check
+	// -------------------------------------------------------------------------
+	t.Run("NonEmptyDatasetWithoutHistoryTable", func(t *testing.T) {
+		// Create an unmanaged table directly in the dataset
+		unmanagedTableSQL := "CREATE TABLE IF NOT EXISTS `" + projectID + "." + datasetName + ".unmanaged_table` (id INT64);"
+		if err := db.ExecuteStatement(ctx, unmanagedTableSQL); err != nil {
+			t.Fatalf("failed creating unmanaged table: %v", err)
+		}
+
+		fs := fstest.MapFS{
+			"migrations/V1__init.sql": &fstest.MapFile{Data: []byte(v1SQL)},
+			"migrations/.keep":        &fstest.MapFile{Data: []byte("")},
+		}
+
+		// Validate with BaselineOnMigrate=false -> Fails
+		cfgNoBaseline := baseCfg(fs)
+		cfgNoBaseline.BaselineOnMigrate = false
+		m1, _ := migrator.New(cfgNoBaseline, db)
+		valRes1, err := m1.Validate(ctx)
+		if err != nil {
+			t.Fatalf("Validate error: %v", err)
+		}
+		if valRes1.Valid {
+			t.Fatalf("expected Validate to fail on non-empty dataset without schema history table")
+		}
+		if !strings.Contains(valRes1.Error(), "Found non-empty schema(s)") {
+			t.Errorf("expected non-empty schema error message, got: %s", valRes1.Error())
+		}
+
+		// Validate with BaselineOnMigrate=true -> Passes
+		cfgWithBaseline := baseCfg(fs)
+		cfgWithBaseline.BaselineOnMigrate = true
+		m2, _ := migrator.New(cfgWithBaseline, db)
+		valRes2, err := m2.Validate(ctx)
+		if err != nil {
+			t.Fatalf("Validate error: %v", err)
+		}
+		if !valRes2.Valid {
+			t.Fatalf("expected Validate to pass with BaselineOnMigrate=true, got: %s", valRes2.Error())
+		}
+	})
+
+	// -------------------------------------------------------------------------
+	// 2. Setup History: Apply V1 and V2
+	// -------------------------------------------------------------------------
+	fsBoth := fstest.MapFS{
+		"migrations/V1__init.sql": &fstest.MapFile{Data: []byte(v1SQL)},
+		"migrations/V2__t2.sql":   &fstest.MapFile{Data: []byte(v2SQL)},
+		"migrations/.keep":        &fstest.MapFile{Data: []byte("")},
+	}
+	cfgBoth := baseCfg(fsBoth)
+	cfgBoth.BaselineOnMigrate = true
+	mMigrate, err := migrator.New(cfgBoth, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	migRes, err := mMigrate.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate V1+V2 failed: %v", err)
+	}
+	if migRes.MigrationsExecuted != 2 {
+		t.Fatalf("expected 2 migrations executed, got %d", migRes.MigrationsExecuted)
+	}
+
+	// -------------------------------------------------------------------------
+	// 3. IgnoreMissingMigrations Parity
+	// -------------------------------------------------------------------------
+	t.Run("IgnoreMissingMigrations", func(t *testing.T) {
+		// Local filesystem only has V2 (V1 is missing from local files)
+		fsOnlyV2 := fstest.MapFS{
+			"migrations/V2__t2.sql": &fstest.MapFile{Data: []byte(v2SQL)},
+			"migrations/.keep":      &fstest.MapFile{Data: []byte("")},
+		}
+
+		// Default IgnoreMissingMigrations=false -> Fails
+		cfgDefault := baseCfg(fsOnlyV2)
+		mDefault, _ := migrator.New(cfgDefault, db)
+		valResDefault, err := mDefault.Validate(ctx)
+		if err != nil {
+			t.Fatalf("Validate error: %v", err)
+		}
+		if valResDefault.Valid {
+			t.Fatalf("expected Validate to fail when applied V1 is missing locally")
+		}
+		if !strings.Contains(valResDefault.Error(), "Detected applied migration not resolved locally: V1__init.sql") {
+			t.Errorf("unexpected error message: %s", valResDefault.Error())
+		}
+
+		// IgnoreMissingMigrations=true -> Passes
+		cfgIgnoreMissing := baseCfg(fsOnlyV2)
+		cfgIgnoreMissing.IgnoreMissingMigrations = true
+		mIgnore, _ := migrator.New(cfgIgnoreMissing, db)
+		valResIgnore, err := mIgnore.Validate(ctx)
+		if err != nil {
+			t.Fatalf("Validate error: %v", err)
+		}
+		if !valResIgnore.Valid {
+			t.Fatalf("expected Validate to pass with IgnoreMissingMigrations=true, got: %s", valResIgnore.Error())
+		}
+	})
+
+	// -------------------------------------------------------------------------
+	// 4. IgnoreFutureMigrations Parity
+	// -------------------------------------------------------------------------
+	t.Run("IgnoreFutureMigrations", func(t *testing.T) {
+		// Local filesystem only has V1 (V2 in database is a future migration)
+		fsOnlyV1 := fstest.MapFS{
+			"migrations/V1__init.sql": &fstest.MapFile{Data: []byte(v1SQL)},
+			"migrations/.keep":        &fstest.MapFile{Data: []byte("")},
+		}
+
+		// Default IgnoreFutureMigrations=true -> Passes
+		cfgDefault := baseCfg(fsOnlyV1)
+		mDefault, _ := migrator.New(cfgDefault, db)
+		valResDefault, err := mDefault.Validate(ctx)
+		if err != nil {
+			t.Fatalf("Validate error: %v", err)
+		}
+		if !valResDefault.Valid {
+			t.Fatalf("expected Validate to pass with IgnoreFutureMigrations=true (default), got: %s", valResDefault.Error())
+		}
+
+		// IgnoreFutureMigrations=false -> Fails
+		cfgStrict := baseCfg(fsOnlyV1)
+		cfgStrict.IgnoreFutureMigrations = false
+		mStrict, _ := migrator.New(cfgStrict, db)
+		valResStrict, err := mStrict.Validate(ctx)
+		if err != nil {
+			t.Fatalf("Validate error: %v", err)
+		}
+		if valResStrict.Valid {
+			t.Fatalf("expected Validate to fail with IgnoreFutureMigrations=false")
+		}
+		if !strings.Contains(valResStrict.Error(), "(future)") {
+			t.Errorf("expected (future) error message, got: %s", valResStrict.Error())
+		}
+	})
+}
+
