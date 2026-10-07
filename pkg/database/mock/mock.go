@@ -78,6 +78,16 @@ func (m *MockDatabase) EnsureSchema(ctx context.Context, schema string) error {
 	return nil
 }
 
+func (m *MockDatabase) AddTable(schema, table string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.schemas[schema] = true
+	if _, ok := m.tables[schema]; !ok {
+		m.tables[schema] = make(map[string]bool)
+	}
+	m.tables[schema][table] = true
+}
+
 func (m *MockDatabase) SchemaExists(ctx context.Context, schema string) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

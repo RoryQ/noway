@@ -536,9 +536,9 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
-				undoType := TypeUndo
+				undoType := TypeUndoSQL
 				if isScript {
-					undoType = TypeScript
+					undoType = TypeUndoScript
 				}
 				result.UndoMigrations = append(result.UndoMigrations, ResolvedMigration{
 					Version:          &ver,

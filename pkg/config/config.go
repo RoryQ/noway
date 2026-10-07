@@ -41,18 +41,21 @@ type Configuration struct {
 	Placeholders           map[string]string `json:"placeholders" yaml:"placeholders" toml:"placeholders"`
 
 	// Execution & Validation Control
-	Target                 string `json:"target" yaml:"target" toml:"target"`                                 // default: latest
-	TargetVersion          *version.Version `json:"-" yaml:"-" toml:"-"`
-	OutOfOrder             bool   `json:"outOfOrder" yaml:"outOfOrder" toml:"outOfOrder"`                     // default: false
-	ValidateOnMigrate      bool   `json:"validateOnMigrate" yaml:"validateOnMigrate" toml:"validateOnMigrate"` // default: true
-	CleanDisabled          bool   `json:"cleanDisabled" yaml:"cleanDisabled" toml:"cleanDisabled"`             // default: true
-	CleanOnValidationError bool   `json:"cleanOnValidationError" yaml:"cleanOnValidationError" toml:"cleanOnValidationError"` // default: false
-	Mixed                  bool   `json:"mixed" yaml:"mixed" toml:"mixed"`                                     // default: false
-	Group                  bool   `json:"group" yaml:"group" toml:"group"`                                     // default: false
-	Batch                  bool   `json:"batch" yaml:"batch" toml:"batch"`                                     // default: false
-	InstalledBy            string `json:"installedBy" yaml:"installedBy" toml:"installedBy"`                 // default: current user
-	ConnectRetries         int    `json:"connectRetries" yaml:"connectRetries" toml:"connectRetries"`         // default: 0
-	LockRetryCount         int    `json:"lockRetryCount" yaml:"lockRetryCount" toml:"lockRetryCount"`         // default: 50
+	Target                  string           `json:"target" yaml:"target" toml:"target"`                                                 // default: latest
+	TargetVersion           *version.Version `json:"-" yaml:"-" toml:"-"`
+	OutOfOrder              bool             `json:"outOfOrder" yaml:"outOfOrder" toml:"outOfOrder"`                                     // default: false
+	ValidateOnMigrate       bool             `json:"validateOnMigrate" yaml:"validateOnMigrate" toml:"validateOnMigrate"`               // default: true
+	IgnoreFutureMigrations  bool             `json:"ignoreFutureMigrations" yaml:"ignoreFutureMigrations" toml:"ignoreFutureMigrations"` // default: true
+	IgnoreMissingMigrations bool             `json:"ignoreMissingMigrations" yaml:"ignoreMissingMigrations" toml:"ignoreMissingMigrations"` // default: false
+	IgnorePendingMigrations bool             `json:"ignorePendingMigrations" yaml:"ignorePendingMigrations" toml:"ignorePendingMigrations"` // default: false
+	CleanDisabled           bool             `json:"cleanDisabled" yaml:"cleanDisabled" toml:"cleanDisabled"`                             // default: true
+	CleanOnValidationError  bool             `json:"cleanOnValidationError" yaml:"cleanOnValidationError" toml:"cleanOnValidationError"` // default: false
+	Mixed                   bool             `json:"mixed" yaml:"mixed" toml:"mixed"`                                                     // default: false
+	Group                   bool             `json:"group" yaml:"group" toml:"group"`                                                     // default: false
+	Batch                   bool             `json:"batch" yaml:"batch" toml:"batch"`                                                     // default: false
+	InstalledBy             string           `json:"installedBy" yaml:"installedBy" toml:"installedBy"`                                 // default: current user
+	ConnectRetries          int              `json:"connectRetries" yaml:"connectRetries" toml:"connectRetries"`                         // default: 0
+	LockRetryCount          int              `json:"lockRetryCount" yaml:"lockRetryCount" toml:"lockRetryCount"`                         // default: 50
 
 	// Baseline
 	BaselineVersion     string `json:"baselineVersion" yaml:"baselineVersion" toml:"baselineVersion"`             // default: 1
@@ -98,6 +101,9 @@ func NewDefaultConfiguration() *Configuration {
 		Target:                       "latest",
 		OutOfOrder:                   false,
 		ValidateOnMigrate:            true,
+		IgnoreFutureMigrations:       true,
+		IgnoreMissingMigrations:      false,
+		IgnorePendingMigrations:      false,
 		CleanDisabled:                true,
 		CleanOnValidationError:       false,
 		BaselineVersion:              "1",

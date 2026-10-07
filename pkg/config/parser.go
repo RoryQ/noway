@@ -110,6 +110,12 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 		cfg.OutOfOrder = parseBool(val, false)
 	case "VALIDATE_ON_MIGRATE", "VALIDATEONMIGRATE":
 		cfg.ValidateOnMigrate = parseBool(val, true)
+	case "IGNORE_FUTURE_MIGRATIONS", "IGNOREFUTUREMIGRATIONS":
+		cfg.IgnoreFutureMigrations = parseBool(val, true)
+	case "IGNORE_MISSING_MIGRATIONS", "IGNOREMISSINGMIGRATIONS":
+		cfg.IgnoreMissingMigrations = parseBool(val, false)
+	case "IGNORE_PENDING_MIGRATIONS", "IGNOREPENDINGMIGRATIONS":
+		cfg.IgnorePendingMigrations = parseBool(val, false)
 	case "CLEAN_DISABLED", "CLEANDISABLED":
 		cfg.CleanDisabled = parseBool(val, true)
 	case "CLEAN_ON_VALIDATION_ERROR", "CLEANONVALIDATIONERROR":
@@ -257,6 +263,12 @@ func applyProperty(cfg *Configuration, key, val string) {
 		cfg.OutOfOrder = parseBool(val, false)
 	case "validateonmigrate":
 		cfg.ValidateOnMigrate = parseBool(val, true)
+	case "ignorefuturemigrations", "ignore_future_migrations":
+		cfg.IgnoreFutureMigrations = parseBool(val, true)
+	case "ignoremissingmigrations", "ignore_missing_migrations":
+		cfg.IgnoreMissingMigrations = parseBool(val, false)
+	case "ignorependingmigrations", "ignore_pending_migrations":
+		cfg.IgnorePendingMigrations = parseBool(val, false)
 	case "cleandisabled":
 		cfg.CleanDisabled = parseBool(val, true)
 	case "cleanonvalidationerror":

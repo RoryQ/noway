@@ -168,6 +168,12 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.OutOfOrder = parseBoolVal(val)
 		case "validateonmigrate":
 			cfg.ValidateOnMigrate = parseBoolVal(val)
+		case "ignorefuturemigrations", "ignore-future-migrations", "ignore_future_migrations":
+			cfg.IgnoreFutureMigrations = parseBoolVal(val)
+		case "ignoremissingmigrations", "ignore-missing-migrations", "ignore_missing_migrations":
+			cfg.IgnoreMissingMigrations = parseBoolVal(val)
+		case "ignorependingmigrations", "ignore-pending-migrations", "ignore_pending_migrations":
+			cfg.IgnorePendingMigrations = parseBoolVal(val)
 		case "cleandisabled":
 			cfg.CleanDisabled = parseBoolVal(val)
 		case "baselineversion":

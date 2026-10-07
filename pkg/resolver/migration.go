@@ -11,13 +11,16 @@ import (
 type MigrationType string
 
 const (
-	TypeSQL        MigrationType = "SQL"
-	TypeScript     MigrationType = "SCRIPT"
-	TypeBaseline   MigrationType = "BASELINE"
 	TypeSchema     MigrationType = "SCHEMA"
+	TypeBaseline   MigrationType = "BASELINE"
+	TypeSQL        MigrationType = "SQL"
+	TypeJDBC       MigrationType = "JDBC"
+	TypeCustom     MigrationType = "CUSTOM"
+	TypeScript     MigrationType = "SCRIPT"
+	TypeUndoSQL    MigrationType = "UNDO_SQL"
+	TypeUndoJDBC   MigrationType = "UNDO_JDBC"
+	TypeUndoScript MigrationType = "UNDO_SCRIPT"
 	TypeDelete     MigrationType = "DELETE"
-	TypeRepeatable MigrationType = "REPEATABLE"
-	TypeUndo       MigrationType = "UNDO"
 )
 
 // MigrationState represents the current state of a migration.

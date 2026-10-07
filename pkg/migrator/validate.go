@@ -62,7 +62,34 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 		return nil, fmt.Errorf("failed to check history table existence: %w", err)
 	}
 	if !exists {
-		// No history table yet -> valid (clean state)
+		// If history table doesn't exist, check if any configured schemas are non-empty
+		var nonEmptySchemas []string
+		for _, schema := range m.config.Schemas {
+			empty, err := m.db.SchemaEmpty(ctx, schema)
+			if err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+				return nil, fmt.Errorf("failed to check if schema '%s' is empty: %w", schema, err)
+			}
+			if !empty {
+				nonEmptySchemas = append(nonEmptySchemas, schema)
+			}
+		}
+
+		if len(nonEmptySchemas) > 0 && !m.config.BaselineOnMigrate {
+			if err := m.callbackRunner.Fire(ctx, "afterValidateError"); err != nil {
+				return nil, err
+			}
+			return &ValidateResult{
+				Valid: false,
+				Errors: []ValidationError{
+					{
+						Message: fmt.Sprintf("Found non-empty schema(s) %s but no schema history table. Use baseline() or set baselineOnMigrate to true to initialize the schema history table.", strings.Join(nonEmptySchemas, ", ")),
+					},
+				},
+			}, nil
+		}
+
+		// No history table yet & schemas empty (or baselineOnMigrate) -> valid (clean state)
 		if err := m.callbackRunner.Fire(ctx, "afterValidate"); err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterValidateError")
 			return nil, err
@@ -87,6 +114,13 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			if maxResolvedVersion == nil || res.Version.IsNewerThan(*maxResolvedVersion) {
 				maxResolvedVersion = res.Version
 			}
+		}
+	}
+
+	resolvedUndoByVersion := make(map[string]resolver.ResolvedMigration)
+	for _, res := range resolved.UndoMigrations {
+		if res.Version != nil {
+			resolvedUndoByVersion[res.Version.Normalized()] = res
 		}
 	}
 
@@ -136,6 +170,63 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			continue
 		}
 
+		// Undo migration validation
+		if strings.HasPrefix(app.Type, "UNDO") {
+			if app.Version != nil && !app.Version.IsEmpty() {
+				verKey := app.Version.Normalized()
+				res, found := resolvedUndoByVersion[verKey]
+				if !found {
+					if !m.config.IgnoreMissingMigrations {
+						result.Valid = false
+						result.Errors = append(result.Errors, ValidationError{
+							Version:     app.Version,
+							Description: app.Description,
+							File:        app.Script,
+							Message:     fmt.Sprintf("Detected applied undo migration not resolved locally: %s", app.Script),
+						})
+					}
+					continue
+				}
+
+				// Check checksum
+				if app.Checksum != nil && *app.Checksum != res.Checksum {
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Version:     app.Version,
+						Description: app.Description,
+						File:        res.Script,
+						Message: fmt.Sprintf("Migration checksum mismatch for undo migration version %s\n-> Applied to database : %d\n-> Resolved locally    : %d\nEither revert the changes to the file, or run repair to update the schema history.",
+							app.Version.String(), *app.Checksum, res.Checksum),
+					})
+				}
+
+				// Check description
+				if app.Description != res.Description {
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Version:     app.Version,
+						Description: app.Description,
+						File:        res.Script,
+						Message: fmt.Sprintf("Migration description mismatch for undo migration version %s\n-> Applied to database : %s\n-> Resolved locally    : %s",
+							app.Version.String(), app.Description, res.Description),
+					})
+				}
+
+				// Check type
+				if app.Type != string(res.Type) {
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Version:     app.Version,
+						Description: app.Description,
+						File:        res.Script,
+						Message: fmt.Sprintf("Migration type mismatch for undo migration version %s\n-> Applied to database : %s\n-> Resolved locally    : %s",
+							app.Version.String(), app.Type, string(res.Type)),
+					})
+				}
+			}
+			continue
+		}
+
 		// Versioned migration validation
 		if app.Version != nil && !app.Version.IsEmpty() {
 			verKey := app.Version.Normalized()
@@ -149,21 +240,25 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			if !found {
 				// Check if it's future
 				if maxResolvedVersion != nil && app.Version.IsNewerThan(*maxResolvedVersion) {
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Version:     app.Version,
-						Description: app.Description,
-						File:        app.Script,
-						Message:     fmt.Sprintf("Detected applied migration not resolved locally (future): %s", app.Script),
-					})
+					if !m.config.IgnoreFutureMigrations {
+						result.Valid = false
+						result.Errors = append(result.Errors, ValidationError{
+							Version:     app.Version,
+							Description: app.Description,
+							File:        app.Script,
+							Message:     fmt.Sprintf("Detected applied migration not resolved locally (future): %s", app.Script),
+						})
+					}
 				} else {
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Version:     app.Version,
-						Description: app.Description,
-						File:        app.Script,
-						Message:     fmt.Sprintf("Detected applied migration not resolved locally: %s", app.Script),
-					})
+					if !m.config.IgnoreMissingMigrations {
+						result.Valid = false
+						result.Errors = append(result.Errors, ValidationError{
+							Version:     app.Version,
+							Description: app.Description,
+							File:        app.Script,
+							Message:     fmt.Sprintf("Detected applied migration not resolved locally: %s", app.Script),
+						})
+					}
 				}
 				continue
 			}
@@ -242,7 +337,7 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 	}
 
 	// Feature 13: Check for out-of-order pending versioned migrations
-	if !m.config.OutOfOrder && maxAppliedVersion != nil {
+	if !m.config.IgnorePendingMigrations && !m.config.OutOfOrder && maxAppliedVersion != nil {
 		effectiveTarget := m.determineEffectiveTarget(
 			maxAppliedVersion,
 			baselineVersion,
