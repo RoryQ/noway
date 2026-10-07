@@ -798,13 +798,13 @@ func TestChallenger_M5_CorruptedHistoryRecords(t *testing.T) {
 
 		m, _ := New(cfg, db)
 
-		// 1. Validate should flag orphaned repeatable migration
+		// 1. In Flyway, Validate does not fail on orphaned/deleted repeatable migration
 		valRes, err := m.Validate(ctx)
 		if err != nil {
 			t.Fatalf("Validate failed: %v", err)
 		}
-		if valRes.Valid {
-			t.Errorf("expected Validate to fail on orphaned nil-version record")
+		if !valRes.Valid {
+			t.Errorf("expected Validate to pass on orphaned repeatable record (Flyway parity), got: %s", valRes.Error())
 		}
 
 		// 2. Repair should mark missing repeatable migration as DELETE

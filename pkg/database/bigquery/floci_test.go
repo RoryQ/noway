@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"cloud.google.com/go/bigquery"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/roryq/noway/pkg/config"
 	driver "github.com/roryq/noway/pkg/database/bigquery"
+	"github.com/roryq/noway/pkg/migrator"
 )
 
 func getFlociEndpoint() string {
@@ -205,4 +207,118 @@ func TestFlociGCPIntegration(t *testing.T) {
 			t.Fatalf("expected at least 1 history record from floci-gcp, got 0")
 		}
 	})
+}
+
+// TestFlociRepeatableMigrationRename tests the full lifecycle of renaming a repeatable migration against floci-gcp.
+func TestFlociRepeatableMigrationRename(t *testing.T) {
+	endpoint := getFlociEndpoint()
+	if !isFlociAvailable(endpoint) {
+		t.Skip("floci-gcp emulator is not running; skipping floci integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	projectID := "floci-local"
+	datasetName := "floci_repeatable_test"
+	tableName := "flyway_schema_history"
+
+	fs := fstest.MapFS{
+		"migrations/V1__init.sql":       &fstest.MapFile{Data: []byte("CREATE TABLE IF NOT EXISTS `" + projectID + "." + datasetName + ".users` (id INT64, name STRING);")},
+		"migrations/R__user_view.sql":   &fstest.MapFile{Data: []byte("CREATE VIEW IF NOT EXISTS `" + projectID + "." + datasetName + ".user_view` AS SELECT id, name FROM `" + projectID + "." + datasetName + ".users`;")},
+		"migrations/.keep":              &fstest.MapFile{Data: []byte("")},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.GCPProjectID = projectID
+	cfg.GCPBigQueryEndpoint = endpoint
+	cfg.DefaultSchema = datasetName
+	cfg.Schemas = []string{datasetName}
+	cfg.Table = tableName
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+	if err := cfg.Finalize(); err != nil {
+		t.Fatalf("config finalize failed: %v", err)
+	}
+
+	db, err := driver.New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("failed to initialize BigQuery driver for floci-gcp: %v", err)
+	}
+	defer db.Close()
+
+	// Clean dataset beforehand if present
+	_ = db.DropSchema(ctx, datasetName)
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	// 1. Initial Migrate: applies V1 and R__user_view
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("initial Migrate failed: %v", err)
+	}
+	if res.MigrationsExecuted != 2 {
+		t.Fatalf("expected 2 migrations executed, got %d", res.MigrationsExecuted)
+	}
+
+	// 2. Validate passes on current state
+	valRes, err := m.Validate(ctx)
+	if err != nil || !valRes.Valid {
+		t.Fatalf("initial Validate failed: %v, errors: %s", err, valRes.Error())
+	}
+
+	// 3. Rename repeatable migration: delete R__user_view.sql, add R__customer_view.sql
+	delete(fs, "migrations/R__user_view.sql")
+	fs["migrations/R__customer_view.sql"] = &fstest.MapFile{
+		Data: []byte("CREATE VIEW IF NOT EXISTS `" + projectID + "." + datasetName + ".customer_view` AS SELECT id, name FROM `" + projectID + "." + datasetName + ".users`;"),
+	}
+
+	// 4. Validate MUST PASS per Flyway parity (missing/renamed repeatable is treated as DELETED, not error)
+	m2, _ := migrator.New(cfg, db)
+	valRes2, err := m2.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate after rename returned error: %v", err)
+	}
+	if !valRes2.Valid {
+		t.Fatalf("expected Validate to pass after repeatable migration rename (Flyway parity), got: %s", valRes2.Error())
+	}
+
+	// 5. Migrate applies R__customer_view cleanly
+	migRes2, err := m2.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate after rename failed: %v", err)
+	}
+	if migRes2.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed (R__customer_view), got %d", migRes2.MigrationsExecuted)
+	}
+
+	// 6. Verify history has 3 records: V1, R__user_view, R__customer_view
+	history, err := db.FetchHistory(ctx, datasetName, tableName)
+	if err != nil {
+		t.Fatalf("FetchHistory failed: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("expected 3 history records, got %d", len(history))
+	}
+
+	// 7. Repair marks R__user_view as DELETE
+	repRes, err := m2.Repair(ctx)
+	if err != nil {
+		t.Fatalf("Repair failed: %v", err)
+	}
+	if len(repRes.DeletedMigrations) != 1 || repRes.DeletedMigrations[0] != "R__user_view.sql" {
+		t.Fatalf("expected R__user_view.sql marked as DELETE by repair, got: %+v", repRes.DeletedMigrations)
+	}
+
+	// 8. Validate continues to pass
+	valRes3, err := m2.Validate(ctx)
+	if err != nil || !valRes3.Valid {
+		t.Fatalf("Validate after repair failed: %v, errors: %s", err, valRes3.Error())
+	}
+
+	// Cleanup
+	_ = db.DropSchema(ctx, datasetName)
 }

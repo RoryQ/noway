@@ -211,13 +211,7 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 				res, found = resolvedRepeatableByScript[app.Script]
 			}
 			if !found {
-				result.Valid = false
-				result.Errors = append(result.Errors, ValidationError{
-					Version:     nil,
-					Description: app.Description,
-					File:        app.Script,
-					Message:     fmt.Sprintf("Detected applied repeatable migration not resolved locally: %s", app.Script),
-				})
+				// Repeatable migration deleted or renamed on disk -> Flyway treats as DELETED, not a validation error
 				continue
 			}
 

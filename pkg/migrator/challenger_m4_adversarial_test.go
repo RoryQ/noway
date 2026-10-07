@@ -791,11 +791,9 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Validate failed: %v", err)
 		}
-		if valRes.Valid {
-			t.Fatalf("expected missing repeatable migration to fail validation")
-		}
-		if !strings.Contains(valRes.Error(), "not resolved locally") {
-			t.Errorf("expected 'not resolved locally' error message, got: %s", valRes.Error())
+		// In Flyway, missing/deleted repeatable migrations do NOT cause validation failure (treated as DELETED)
+		if !valRes.Valid {
+			t.Fatalf("expected missing repeatable migration to pass validation (Flyway parity), got error: %s", valRes.Error())
 		}
 	})
 

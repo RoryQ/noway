@@ -461,13 +461,13 @@ func TestChallenger_RepairMissingRepeatableMigration_MarkedDeleteAndValidatePass
 		// Delete R__view.sql from disk
 		delete(fs, "migrations/R__view.sql")
 
-		// Before Repair: Validate MUST fail
+		// Before Repair: In Flyway, Validate passes (missing repeatable is treated as DELETED, not error)
 		valBefore, err := m.Validate(ctx)
 		if err != nil {
 			t.Fatalf("Validate failed: %v", err)
 		}
-		if valBefore.Valid {
-			t.Fatalf("expected Validate to fail when applied repeatable is missing from disk")
+		if !valBefore.Valid {
+			t.Fatalf("expected Validate to pass when applied repeatable is missing from disk (Flyway parity), got error: %s", valBefore.Error())
 		}
 
 		// Run Repair
@@ -845,7 +845,7 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 	expectedR2Cs, _ := checksum.CalculateString("CREATE VIEW r2 AS SELECT 2000;")
 	// - V3 remains in failed state in history
 
-	// 4. Validate before Repair MUST fail with multiple errors
+	// 4. Validate before Repair MUST fail on versioned discrepancies (V3 failed + V2 deleted)
 	valBefore, err := mFailing.Validate(ctx)
 	if err != nil {
 		t.Fatalf("Validate error: %v", err)
@@ -853,8 +853,8 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 	if valBefore.Valid {
 		t.Fatalf("expected Validate to fail on combined discrepancies")
 	}
-	if len(valBefore.Errors) < 3 {
-		t.Errorf("expected at least 3 validation errors, got %d: %s", len(valBefore.Errors), valBefore.Error())
+	if len(valBefore.Errors) < 2 {
+		t.Errorf("expected at least 2 validation errors (V3 failed + V2 deleted), got %d: %s", len(valBefore.Errors), valBefore.Error())
 	}
 
 	// 5. Execute Repair() in a single call
