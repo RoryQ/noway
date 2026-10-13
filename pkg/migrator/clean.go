@@ -5,9 +5,14 @@ import (
 	"fmt"
 )
 
-// CleanResult contains the clean operation summary.
+// CleanResult contains the clean operation summary matching Flyway's output schema.
 type CleanResult struct {
 	SchemasCleaned []string `json:"schemasCleaned"`
+	SchemasDropped []string `json:"schemasDropped"`
+	FlywayVersion  string   `json:"flywayVersion"`
+	Database       string   `json:"database"`
+	Warnings       []string `json:"warnings"`
+	Operation      string   `json:"operation"`
 }
 
 // Clean drops all objects (tables, views, materialized views, routines) in the configured schemas.
@@ -29,7 +34,14 @@ func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
 		return nil, err
 	}
 
-	result := &CleanResult{}
+	result := &CleanResult{
+		SchemasCleaned: make([]string, 0),
+		SchemasDropped: make([]string, 0),
+		FlywayVersion:  "1.0.0",
+		Database:       m.DatabaseName(),
+		Warnings:       make([]string, 0),
+		Operation:      "clean",
+	}
 
 	// 2. Clean each schema
 	for _, schema := range schemas {

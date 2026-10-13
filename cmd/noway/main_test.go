@@ -39,3 +39,19 @@ func TestParseCLIArgs(t *testing.T) {
 		t.Errorf("expected placeholder cluster=c1, got %s", cfg.Placeholders["cluster"])
 	}
 }
+
+func TestParseCLIArgs_OutputType(t *testing.T) {
+	args := []string{
+		"-url=jdbc:bigquery:;ProjectId=test-proj;DefaultDataset=analytics;",
+		"-outputType=json",
+	}
+
+	cfg, err := parseCLIArgs(args)
+	if err != nil {
+		t.Fatalf("parseCLIArgs error: %v", err)
+	}
+
+	if cfg.OutputType != "json" {
+		t.Errorf("expected OutputType 'json', got '%s'", cfg.OutputType)
+	}
+}

@@ -47,6 +47,10 @@ func main() {
 
 	nw, err := noway.New(noway.WithConfig(cfg))
 	if err != nil {
+		if cfg.OutputType == "json" {
+			outputJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}
@@ -240,13 +244,36 @@ func parseBoolVal(v string) bool {
 	return l == "true" || l == "yes" || l == "1" || l == "on"
 }
 
+func outputJSONError(err error) {
+	type ErrorDetails struct {
+		ErrorCode string `json:"errorCode"`
+		Message   string `json:"message"`
+	}
+	type ErrorResult struct {
+		Error ErrorDetails `json:"error"`
+	}
+	data, _ := json.MarshalIndent(ErrorResult{
+		Error: ErrorDetails{
+			ErrorCode: "FAULT",
+			Message:   err.Error(),
+		},
+	}, "", "  ")
+	fmt.Println(string(data))
+}
+
 func runMigrate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
-	fmt.Printf("Database: %s\n", cfg.GCPProjectID)
-	fmt.Printf("Schema: %s\n", cfg.GetDefaultSchema())
-	fmt.Println("Executing migrate...")
+	if cfg.OutputType != "json" {
+		fmt.Printf("Database: %s\n", cfg.GCPProjectID)
+		fmt.Printf("Schema: %s\n", cfg.GetDefaultSchema())
+		fmt.Println("Executing migrate...")
+	}
 
 	res, err := nw.Migrate(ctx)
 	if err != nil {
+		if cfg.OutputType == "json" {
+			outputJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}
@@ -272,12 +299,16 @@ func runMigrate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration)
 func runInfo(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
 	res, err := nw.Info(ctx)
 	if err != nil {
+		if cfg.OutputType == "json" {
+			outputJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}
 
 	if cfg.OutputType == "json" {
-		data, _ := json.MarshalIndent(res.FlywayFormat, "", "  ")
+		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
 		return
 	}
@@ -288,6 +319,10 @@ func runInfo(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
 func runValidate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
 	res, err := nw.Validate(ctx)
 	if err != nil {
+		if cfg.OutputType == "json" {
+			outputJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}
@@ -312,6 +347,10 @@ func runValidate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration
 func runBaseline(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
 	res, err := nw.Baseline(ctx)
 	if err != nil {
+		if cfg.OutputType == "json" {
+			outputJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}
@@ -328,6 +367,10 @@ func runBaseline(ctx context.Context, nw *noway.Noway, cfg *config.Configuration
 func runRepair(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
 	res, err := nw.Repair(ctx)
 	if err != nil {
+		if cfg.OutputType == "json" {
+			outputJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}
@@ -354,6 +397,10 @@ func runRepair(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) 
 func runClean(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
 	res, err := nw.Clean(ctx)
 	if err != nil {
+		if cfg.OutputType == "json" {
+			outputJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}
@@ -372,6 +419,10 @@ func runClean(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
 func runUndo(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
 	res, err := nw.Undo(ctx)
 	if err != nil {
+		if cfg.OutputType == "json" {
+			outputJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}

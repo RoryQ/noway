@@ -8,10 +8,31 @@ import (
 	"github.com/roryq/noway/pkg/resolver"
 )
 
-// UndoResult contains the undo operation result.
+// UndoResult contains the undo operation result matching Flyway's output schema.
 type UndoResult struct {
-	UndoneVersion string `json:"undoneVersion"`
-	Script        string `json:"script"`
+	InitialSchemaVersion string       `json:"initialSchemaVersion"`
+	TargetSchemaVersion  string       `json:"targetSchemaVersion"`
+	SchemaName           string       `json:"schemaName"`
+	Migrations           []UndoOutput `json:"migrations"`
+	MigrationsUndone     int          `json:"migrationsUndone"`
+	Success              bool         `json:"success"`
+	FlywayVersion        string       `json:"flywayVersion"`
+	Database             string       `json:"database"`
+	Warnings             []string     `json:"warnings"`
+	Operation            string       `json:"operation"`
+
+	// Deprecated: Alias fields for backward-compatibility with Go code and tests
+	UndoneVersion string `json:"-"`
+	Script        string `json:"-"`
+	ExecutionTime int64  `json:"-"`
+}
+
+// UndoOutput describes an undone migration matching Flyway UndoOutput.
+type UndoOutput struct {
+	Category      string `json:"category"`
+	Version       string `json:"version"`
+	Description   string `json:"description"`
+	Filepath      string `json:"filepath"`
 	ExecutionTime int64  `json:"executionTime"`
 }
 
@@ -133,9 +154,36 @@ func (m *Migrator) Undo(ctx context.Context) (*UndoResult, error) {
 		return nil, err
 	}
 
+	prevVersion := ""
+	for i := len(applied) - 1; i >= 0; i-- {
+		app := applied[i]
+		if app.InstalledRank != latestApplied.InstalledRank && app.Version != nil && !app.Version.IsEmpty() && app.Success && app.Type == "SQL" {
+			prevVersion = app.Version.String()
+			break
+		}
+	}
+
 	return &UndoResult{
-		UndoneVersion: latestApplied.Version.String(),
-		Script:        targetUndo.Script,
-		ExecutionTime: execTime,
+		InitialSchemaVersion: latestApplied.Version.String(),
+		TargetSchemaVersion:  prevVersion,
+		SchemaName:           defaultSchema,
+		Migrations: []UndoOutput{
+			{
+				Category:      "Versioned",
+				Version:       latestApplied.Version.String(),
+				Description:   targetUndo.Description,
+				Filepath:      targetUndo.Script,
+				ExecutionTime: execTime,
+			},
+		},
+		MigrationsUndone: 1,
+		Success:          true,
+		FlywayVersion:    "1.0.0",
+		Database:         m.DatabaseName(),
+		Warnings:         make([]string, 0),
+		Operation:        "undo",
+		UndoneVersion:    latestApplied.Version.String(),
+		Script:           targetUndo.Script,
+		ExecutionTime:    execTime,
 	}, nil
 }

@@ -27,17 +27,27 @@ type Migrator struct {
 	builtins       parser.BuiltinPlaceholders
 }
 
-// MigrateResult holds the outcome of a migration run.
+// MigrateResult holds the outcome of a migration run matching Flyway schema.
 type MigrateResult struct {
-	InitialVersion      string            `json:"initialVersion"`
-	TargetVersion       string            `json:"targetVersion"`
-	MigrationsExecuted  int               `json:"migrationsExecuted"`
-	Success             bool              `json:"success"`
-	ExecutedMigrations  []ExecutedSummary `json:"executedMigrations"`
-	TotalExecutionTime  int64             `json:"totalExecutionTime"`
+	InitialSchemaVersion string            `json:"initialSchemaVersion"`
+	TargetSchemaVersion  string            `json:"targetSchemaVersion"`
+	SchemaName           string            `json:"schemaName"`
+	Migrations           []ExecutedSummary `json:"migrations"`
+	MigrationsExecuted   int               `json:"migrationsExecuted"`
+	Success              bool              `json:"success"`
+	FlywayVersion        string            `json:"flywayVersion"`
+	Database             string            `json:"database"`
+	Warnings             []string          `json:"warnings"`
+	Operation            string            `json:"operation"`
+
+	// Deprecated: Alias fields for backward-compatibility with Go code and tests
+	InitialVersion     string            `json:"-"`
+	TargetVersion      string            `json:"-"`
+	ExecutedMigrations []ExecutedSummary `json:"-"`
+	TotalExecutionTime int64             `json:"-"`
 }
 
-// ExecutedSummary describes an applied migration during the run.
+// ExecutedSummary describes an applied migration during the run matching Flyway MigrateOutput.
 type ExecutedSummary struct {
 	Category      string `json:"category"`
 	Version       string `json:"version"`
@@ -188,6 +198,23 @@ func (m *Migrator) determineEffectiveTarget(
 	}
 
 	return nil
+}
+
+// DatabaseName returns the logical database name matching Flyway conventions.
+func (m *Migrator) DatabaseName() string {
+	if m.config.GCPProjectID != "" {
+		return m.config.GCPProjectID
+	}
+	if m.config.GCPSpannerDatabaseID != "" {
+		return m.config.GCPSpannerDatabaseID
+	}
+	if m.config.GCPDataset != "" {
+		return m.config.GCPDataset
+	}
+	if m.config.Driver != "" {
+		return m.config.Driver
+	}
+	return "BigQuery"
 }
 
 // Migrate executes pending migrations.
@@ -489,9 +516,16 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	}
 
 	result := &MigrateResult{
-		InitialVersion:     initialVersionStr,
-		Success:            true,
-		ExecutedMigrations: make([]ExecutedSummary, 0, totalToApply),
+		InitialSchemaVersion: initialVersionStr,
+		InitialVersion:       initialVersionStr,
+		SchemaName:           defaultSchema,
+		Migrations:           make([]ExecutedSummary, 0, totalToApply),
+		ExecutedMigrations:   make([]ExecutedSummary, 0, totalToApply),
+		Success:              true,
+		FlywayVersion:        "1.0.0",
+		Database:             m.DatabaseName(),
+		Warnings:             make([]string, 0),
+		Operation:            "migrate",
 	}
 
 	currentVersion := maxAppliedVersion
@@ -518,7 +552,8 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 				result.Success = false
 				return result, err
 			}
-			result.ExecutedMigrations = append(result.ExecutedMigrations, *execSummary)
+			result.Migrations = append(result.Migrations, *execSummary)
+			result.ExecutedMigrations = result.Migrations
 			result.MigrationsExecuted++
 			nextInstalledRank++
 			if currentVersion == nil || mig.Version.IsNewerThan(*currentVersion) {
@@ -560,13 +595,14 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 				result.Success = false
 				return result, err
 			}
-			result.ExecutedMigrations = append(result.ExecutedMigrations, *execSummary)
+			result.Migrations = append(result.Migrations, *execSummary)
+			result.ExecutedMigrations = result.Migrations
 			result.MigrationsExecuted++
 			nextInstalledRank++
 		}
 
 		// Fire afterMigrateApplied callback if len(appliedMigrations) > 0
-		if len(result.ExecutedMigrations) > 0 {
+		if len(result.Migrations) > 0 {
 			if err := m.callbackRunner.Fire(ctx, "afterMigrateApplied"); err != nil {
 				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				result.Success = false
@@ -582,8 +618,10 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 	}
 
 	if currentVersion != nil {
+		result.TargetSchemaVersion = currentVersion.String()
 		result.TargetVersion = currentVersion.String()
 	} else {
+		result.TargetSchemaVersion = initialVersionStr
 		result.TargetVersion = initialVersionStr
 	}
 	result.TotalExecutionTime = time.Since(overallStart).Milliseconds()

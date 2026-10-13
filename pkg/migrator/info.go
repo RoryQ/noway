@@ -13,26 +13,72 @@ import (
 	"github.com/roryq/noway/pkg/version"
 )
 
-// InfoResult contains the migration info report.
+// InfoResult contains the migration info report matching Flyway's output schema.
 type InfoResult struct {
-	Schema       string                   `json:"schema"`
-	Table        string                   `json:"table"`
-	Migrations   []resolver.MigrationInfo `json:"migrations"`
-	FlywayFormat []FlywayInfoItem         `json:"flywayFormat"`
+	SchemaVersion   string   `json:"schemaVersion"`
+	SchemaName      string   `json:"schemaName"`
+	AllSchemasEmpty bool     `json:"allSchemasEmpty"`
+	FlywayVersion   string   `json:"flywayVersion"`
+	Database        string   `json:"database"`
+	Warnings        []string `json:"warnings"`
+	Operation       string   `json:"operation"`
+
+	// Deprecated: Alias fields for backward-compatibility with Go code and tests
+	Schema       string                   `json:"-"`
+	Table        string                   `json:"-"`
+	Migrations   []resolver.MigrationInfo `json:"-"`
+	FlywayFormat []FlywayInfoItem         `json:"-"`
 }
 
-// FlywayInfoItem matches Flyway's JSON info schema.
+func (r *InfoResult) MarshalJSON() ([]byte, error) {
+	type Alias struct {
+		SchemaVersion   string           `json:"schemaVersion"`
+		SchemaName      string           `json:"schemaName"`
+		Migrations      []FlywayInfoItem `json:"migrations"`
+		AllSchemasEmpty bool             `json:"allSchemasEmpty"`
+		FlywayVersion   string           `json:"flywayVersion"`
+		Database        string           `json:"database"`
+		Warnings        []string         `json:"warnings"`
+		Operation       string           `json:"operation"`
+	}
+	warnings := r.Warnings
+	if warnings == nil {
+		warnings = []string{}
+	}
+	migs := r.FlywayFormat
+	if migs == nil {
+		migs = []FlywayInfoItem{}
+	}
+	return json.Marshal(&Alias{
+		SchemaVersion:   r.SchemaVersion,
+		SchemaName:      r.SchemaName,
+		Migrations:      migs,
+		AllSchemasEmpty: r.AllSchemasEmpty,
+		FlywayVersion:   r.FlywayVersion,
+		Database:        r.Database,
+		Warnings:        warnings,
+		Operation:       r.Operation,
+	})
+}
+
+// FlywayInfoItem matches Flyway's JSON InfoOutput schema.
 type FlywayInfoItem struct {
-	Category      string `json:"category"`
-	Version       string `json:"version"`
-	Description   string `json:"description"`
-	Type          string `json:"type"`
-	InstalledOn   string `json:"installedOn"`
-	State         string `json:"state"`
-	Undoable      string `json:"undoable"`
-	File          string `json:"filepath"`
-	InstalledBy   string `json:"installedBy"`
-	ExecutionTime int64  `json:"executionTime"`
+	Category       string `json:"category"`
+	Version        string `json:"version"`
+	RawVersion     string `json:"rawVersion"`
+	Description    string `json:"description"`
+	Type           string `json:"type"`
+	InstalledOnUTC string `json:"installedOnUTC"`
+	State          string `json:"state"`
+	Undoable       string `json:"undoable"`
+	Filepath       string `json:"filepath"`
+	UndoFilepath   string `json:"undoFilepath"`
+	InstalledBy    string `json:"installedBy"`
+	ExecutionTime  int64  `json:"executionTime"`
+
+	// Deprecated: Alias fields for backward-compatibility with Go code and tests
+	InstalledOn string `json:"-"`
+	File        string `json:"-"`
 }
 
 // Info gathers info on all resolved and applied migrations.
@@ -96,16 +142,32 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 	// 3. Compute merged migration infos
 	infos := computeMigrationInfos(res, applied, effectiveTargetVersion, m.config.OutOfOrder, m.replacer, m.builtins)
 
+	schemaVersion := ""
+	if maxAppliedVersion != nil {
+		schemaVersion = maxAppliedVersion.String()
+	}
+	allSchemasEmpty := (!exists || len(applied) == 0)
+
 	result := &InfoResult{
-		Schema:     defaultSchema,
-		Table:      table,
-		Migrations: infos,
+		SchemaVersion:   schemaVersion,
+		SchemaName:      defaultSchema,
+		AllSchemasEmpty: allSchemasEmpty,
+		FlywayVersion:   "1.0.0",
+		Database:        m.DatabaseName(),
+		Warnings:        make([]string, 0),
+		Operation:       "info",
+		Schema:          defaultSchema,
+		Table:           table,
+		Migrations:      infos,
+		FlywayFormat:    make([]FlywayInfoItem, 0, len(infos)),
 	}
 
 	for _, info := range infos {
 		instOn := ""
+		instOnUTC := ""
 		if info.InstalledOn != nil {
 			instOn = info.InstalledOn.Format("2006-01-02 15:04:05")
+			instOnUTC = info.InstalledOn.UTC().Format("2006-01-02T15:04:05.000Z")
 		}
 		execTime := int64(0)
 		if info.ExecutionTime != nil {
@@ -123,16 +185,20 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 		}
 
 		result.FlywayFormat = append(result.FlywayFormat, FlywayInfoItem{
-			Category:      category,
-			Version:       info.VersionString(),
-			Description:   info.Description,
-			Type:          info.Type,
-			InstalledOn:   instOn,
-			State:         string(info.State),
-			Undoable:      "No",
-			File:          info.Script,
-			InstalledBy:   info.InstalledBy,
-			ExecutionTime: execTime,
+			Category:       category,
+			Version:        info.VersionString(),
+			RawVersion:     info.VersionString(),
+			Description:    info.Description,
+			Type:           info.Type,
+			InstalledOnUTC: instOnUTC,
+			State:          string(info.State),
+			Undoable:       "No",
+			Filepath:       info.Script,
+			UndoFilepath:   "",
+			InstalledBy:    info.InstalledBy,
+			ExecutionTime:  execTime,
+			InstalledOn:    instOn,
+			File:           info.Script,
 		})
 	}
 

@@ -8,13 +8,30 @@ import (
 	"github.com/roryq/noway/pkg/resolver"
 )
 
-// RepairResult contains the repaired migrations outcome.
+// RepairOutput describes a repaired migration matching Flyway RepairOutput.
+type RepairOutput struct {
+	Version     string `json:"version"`
+	Description string `json:"description"`
+	Filepath    string `json:"filepath"`
+}
+
+// RepairResult contains the repaired migrations outcome matching Flyway's output schema.
 type RepairResult struct {
-	Schema            string   `json:"schema"`
-	Table             string   `json:"table"`
-	RemovedFailed     []string `json:"removedFailed"`
-	AlignedChecksums  []string `json:"alignedChecksums"`
-	DeletedMigrations []string `json:"deletedMigrations,omitempty"`
+	RepairActions     []string       `json:"repairActions"`
+	MigrationsAligned []RepairOutput `json:"migrationsAligned"`
+	MigrationsDeleted []RepairOutput `json:"migrationsDeleted"`
+	MigrationsRemoved []RepairOutput `json:"migrationsRemoved"`
+	FlywayVersion     string         `json:"flywayVersion"`
+	Database          string         `json:"database"`
+	Warnings          []string       `json:"warnings"`
+	Operation         string         `json:"operation"`
+
+	// Deprecated: Alias fields for backward-compatibility with Go code and tests
+	Schema            string   `json:"-"`
+	Table             string   `json:"-"`
+	RemovedFailed     []string `json:"-"`
+	AlignedChecksums  []string `json:"-"`
+	DeletedMigrations []string `json:"-"`
 }
 
 // Repair repairs the schema history table by removing failed migrations and aligning checksums/descriptions.
@@ -28,7 +45,18 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 		return nil, fmt.Errorf("failed to check history table existence: %w", err)
 	}
 	if !exists {
-		return &RepairResult{Schema: defaultSchema, Table: table}, nil
+		return &RepairResult{
+			RepairActions:     []string{},
+			MigrationsAligned: []RepairOutput{},
+			MigrationsDeleted: []RepairOutput{},
+			MigrationsRemoved: []RepairOutput{},
+			FlywayVersion:     "1.0.0",
+			Database:          m.DatabaseName(),
+			Warnings:          []string{},
+			Operation:         "repair",
+			Schema:            defaultSchema,
+			Table:             table,
+		}, nil
 	}
 
 	// 2. Lock table
@@ -58,8 +86,16 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 	}
 
 	result := &RepairResult{
-		Schema: defaultSchema,
-		Table:  table,
+		RepairActions:     make([]string, 0),
+		MigrationsAligned: make([]RepairOutput, 0),
+		MigrationsDeleted: make([]RepairOutput, 0),
+		MigrationsRemoved: make([]RepairOutput, 0),
+		FlywayVersion:     "1.0.0",
+		Database:          m.DatabaseName(),
+		Warnings:          make([]string, 0),
+		Operation:         "repair",
+		Schema:            defaultSchema,
+		Table:             table,
 	}
 
 	// Map resolved by version
@@ -84,6 +120,15 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 				return nil, fmt.Errorf("failed to remove failed migration %s: %w", app.Script, err)
 			}
 			result.RemovedFailed = append(result.RemovedFailed, app.Script)
+			vStr := ""
+			if app.Version != nil {
+				vStr = app.Version.String()
+			}
+			result.MigrationsRemoved = append(result.MigrationsRemoved, RepairOutput{
+				Version:     vStr,
+				Description: app.Description,
+				Filepath:    app.Script,
+			})
 			continue
 		}
 
@@ -123,6 +168,11 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 						return nil, fmt.Errorf("failed to align checksum for %s: %w", app.Script, err)
 					}
 					result.AlignedChecksums = append(result.AlignedChecksums, fmt.Sprintf("%s (checksum -> %d)", res.Script, cs))
+					result.MigrationsAligned = append(result.MigrationsAligned, RepairOutput{
+						Version:     res.Version.String(),
+						Description: res.Description,
+						Filepath:    res.Script,
+					})
 				}
 			} else {
 				// Feature 18: Missing versioned migration on disk -> Mark as DELETE
@@ -145,6 +195,15 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 						return nil, fmt.Errorf("failed to mark deleted migration %s: %w", app.Script, err)
 					}
 					result.DeletedMigrations = append(result.DeletedMigrations, app.Script)
+					vStr := ""
+					if app.Version != nil {
+						vStr = app.Version.String()
+					}
+					result.MigrationsDeleted = append(result.MigrationsDeleted, RepairOutput{
+						Version:     vStr,
+						Description: app.Description,
+						Filepath:    app.Script,
+					})
 				}
 			}
 		} else {
@@ -168,6 +227,11 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 						return nil, fmt.Errorf("failed to align metadata for %s: %w", app.Script, err)
 					}
 					result.AlignedChecksums = append(result.AlignedChecksums, res.Script)
+					result.MigrationsAligned = append(result.MigrationsAligned, RepairOutput{
+						Version:     "",
+						Description: res.Description,
+						Filepath:    res.Script,
+					})
 				}
 			} else {
 				// Feature 18: Missing repeatable migration on disk -> Mark as DELETE
@@ -185,9 +249,24 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 						return nil, fmt.Errorf("failed to mark deleted migration %s: %w", app.Script, err)
 					}
 					result.DeletedMigrations = append(result.DeletedMigrations, app.Script)
+					result.MigrationsDeleted = append(result.MigrationsDeleted, RepairOutput{
+						Version:     "",
+						Description: app.Description,
+						Filepath:    app.Script,
+					})
 				}
 			}
 		}
+	}
+
+	if len(result.MigrationsRemoved) > 0 {
+		result.RepairActions = append(result.RepairActions, "Remove failed migrations")
+	}
+	if len(result.MigrationsAligned) > 0 {
+		result.RepairActions = append(result.RepairActions, "Align checksums")
+	}
+	if len(result.MigrationsDeleted) > 0 {
+		result.RepairActions = append(result.RepairActions, "Delete missing migrations")
 	}
 
 	// 6. Fire afterRepair callbacks

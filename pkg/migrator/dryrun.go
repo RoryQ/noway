@@ -253,9 +253,16 @@ func (m *Migrator) migrateDryRun(
 
 	totalToApply := len(pendingVersioned) + len(pendingRepeatable)
 	result := &MigrateResult{
-		InitialVersion:     initialVersionStr,
-		Success:            true,
-		ExecutedMigrations: make([]ExecutedSummary, 0, totalToApply),
+		InitialSchemaVersion: initialVersionStr,
+		InitialVersion:       initialVersionStr,
+		SchemaName:           defaultSchema,
+		Migrations:           make([]ExecutedSummary, 0, totalToApply),
+		ExecutedMigrations:   make([]ExecutedSummary, 0, totalToApply),
+		Success:              true,
+		FlywayVersion:        "1.0.0",
+		Database:             m.DatabaseName(),
+		Warnings:             make([]string, 0),
+		Operation:            "migrate",
 	}
 
 	currentVersion := maxAppliedVersion
@@ -280,14 +287,16 @@ func (m *Migrator) migrateDryRun(
 		if mig.Version != nil {
 			verStr = mig.Version.String()
 		}
-		result.ExecutedMigrations = append(result.ExecutedMigrations, ExecutedSummary{
+		exec := ExecutedSummary{
 			Category:      "Versioned",
 			Version:       verStr,
 			Description:   mig.Description,
 			Type:          string(mig.Type),
 			Script:        mig.Script,
 			ExecutionTime: 0,
-		})
+		}
+		result.Migrations = append(result.Migrations, exec)
+		result.ExecutedMigrations = result.Migrations
 		result.MigrationsExecuted++
 		nextInstalledRank++
 		if currentVersion == nil || mig.Version.IsNewerThan(*currentVersion) {
@@ -331,20 +340,22 @@ func (m *Migrator) migrateDryRun(
 
 		builder.WriteMigration(mig, sql, nextInstalledRank, user)
 
-		result.ExecutedMigrations = append(result.ExecutedMigrations, ExecutedSummary{
+		exec := ExecutedSummary{
 			Category:      "Repeatable",
 			Version:       "",
 			Description:   mig.Description,
 			Type:          string(mig.Type),
 			Script:        mig.Script,
 			ExecutionTime: 0,
-		})
+		}
+		result.Migrations = append(result.Migrations, exec)
+		result.ExecutedMigrations = result.Migrations
 		result.MigrationsExecuted++
 		nextInstalledRank++
 	}
 
 	// 8. afterMigrateApplied callbacks
-	if len(result.ExecutedMigrations) > 0 {
+	if len(result.Migrations) > 0 {
 		for _, cb := range m.callbackRunner.callbacks["afterMigrateApplied"] {
 			if !isScriptFile(cb.Filename) {
 				sql, _ := m.replacer.Replace(cb.Content, m.builtins)
@@ -362,8 +373,10 @@ func (m *Migrator) migrateDryRun(
 	}
 
 	if currentVersion != nil {
+		result.TargetSchemaVersion = currentVersion.String()
 		result.TargetVersion = currentVersion.String()
 	} else {
+		result.TargetSchemaVersion = initialVersionStr
 		result.TargetVersion = initialVersionStr
 	}
 
@@ -419,8 +432,26 @@ func (m *Migrator) undoDryRun(
 	}
 
 	return &UndoResult{
-		UndoneVersion: latestApplied.Version.String(),
-		Script:        targetUndo.Script,
-		ExecutionTime: 0,
+		InitialSchemaVersion: latestApplied.Version.String(),
+		TargetSchemaVersion:  "",
+		SchemaName:           defaultSchema,
+		Migrations: []UndoOutput{
+			{
+				Category:      "Versioned",
+				Version:       latestApplied.Version.String(),
+				Description:   targetUndo.Description,
+				Filepath:      targetUndo.Script,
+				ExecutionTime: 0,
+			},
+		},
+		MigrationsUndone: 1,
+		Success:          true,
+		FlywayVersion:    "1.0.0",
+		Database:         m.DatabaseName(),
+		Warnings:         make([]string, 0),
+		Operation:        "undo",
+		UndoneVersion:    latestApplied.Version.String(),
+		Script:           targetUndo.Script,
+		ExecutionTime:    0,
 	}, nil
 }

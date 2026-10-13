@@ -17,10 +17,69 @@ type ValidationError struct {
 	Message     string           `json:"message"`
 }
 
-// ValidateResult contains validation findings.
+// ErrorDetails represents Flyway error information.
+type ErrorDetails struct {
+	ErrorCode    string `json:"errorCode"`
+	ErrorMessage string `json:"errorMessage"`
+}
+
+// ValidateOutput describes an invalid migration matching Flyway ValidateOutput.
+type ValidateOutput struct {
+	Version      string        `json:"version"`
+	Description  string        `json:"description"`
+	Filepath     string        `json:"filepath"`
+	ErrorDetails *ErrorDetails `json:"errorDetails"`
+}
+
+// ValidateResult contains validation findings matching Flyway's output schema.
 type ValidateResult struct {
-	Valid  bool              `json:"valid"`
-	Errors []ValidationError `json:"errors"`
+	ValidationSuccessful bool             `json:"validationSuccessful"`
+	ValidateCount        int              `json:"validateCount"`
+	InvalidMigrations    []ValidateOutput `json:"invalidMigrations"`
+	ErrorDetails         *ErrorDetails    `json:"errorDetails,omitempty"`
+	FlywayVersion        string           `json:"flywayVersion"`
+	Database             string           `json:"database"`
+	Warnings             []string         `json:"warnings"`
+	Operation            string           `json:"operation"`
+
+	// Deprecated: Alias fields for backward-compatibility with Go code and tests
+	Valid  bool              `json:"-"`
+	Errors []ValidationError `json:"-"`
+}
+
+func (r *ValidateResult) finalize(db string, validateCount int) {
+	r.ValidationSuccessful = r.Valid
+	r.FlywayVersion = "1.0.0"
+	r.Database = db
+	r.Operation = "validate"
+	if r.Warnings == nil {
+		r.Warnings = []string{}
+	}
+	r.ValidateCount = validateCount
+	if r.InvalidMigrations == nil {
+		r.InvalidMigrations = []ValidateOutput{}
+	}
+	if !r.Valid {
+		r.ErrorDetails = &ErrorDetails{
+			ErrorCode:    "FAULT",
+			ErrorMessage: r.Error(),
+		}
+		for _, err := range r.Errors {
+			verStr := ""
+			if err.Version != nil {
+				verStr = err.Version.String()
+			}
+			r.InvalidMigrations = append(r.InvalidMigrations, ValidateOutput{
+				Version:     verStr,
+				Description: err.Description,
+				Filepath:    err.File,
+				ErrorDetails: &ErrorDetails{
+					ErrorCode:    "FAULT",
+					ErrorMessage: err.Message,
+				},
+			})
+		}
+	}
 }
 
 // Error formats validation errors into a single error string matching Flyway format.
@@ -79,14 +138,16 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			if err := m.callbackRunner.Fire(ctx, "afterValidateError"); err != nil {
 				return nil, err
 			}
-			return &ValidateResult{
+			res := &ValidateResult{
 				Valid: false,
 				Errors: []ValidationError{
 					{
 						Message: fmt.Sprintf("Found non-empty schema(s) %s but no schema history table. Use baseline() or set baselineOnMigrate to true to initialize the schema history table.", strings.Join(nonEmptySchemas, ", ")),
 					},
 				},
-			}, nil
+			}
+			res.finalize(m.DatabaseName(), 0)
+			return res, nil
 		}
 
 		// No history table yet & schemas empty (or baselineOnMigrate) -> valid (clean state)
@@ -94,7 +155,9 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			_ = m.callbackRunner.Fire(ctx, "afterValidateError")
 			return nil, err
 		}
-		return &ValidateResult{Valid: true}, nil
+		res := &ValidateResult{Valid: true}
+		res.finalize(m.DatabaseName(), 0)
+		return res, nil
 	}
 
 	applied, err := m.db.FetchHistory(ctx, defaultSchema, table)
@@ -384,6 +447,9 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			}
 		}
 	}
+
+	validateCount := len(resolved.VersionedMigrations) + len(resolved.RepeatableMigrations)
+	result.finalize(m.DatabaseName(), validateCount)
 
 	if !result.Valid {
 		_ = m.callbackRunner.Fire(ctx, "afterValidateError")

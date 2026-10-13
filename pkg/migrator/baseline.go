@@ -9,13 +9,20 @@ import (
 	"github.com/roryq/noway/pkg/version"
 )
 
-// BaselineResult contains the baseline operation outcome.
+// BaselineResult contains the baseline operation outcome matching Flyway's output schema.
 type BaselineResult struct {
-	Schema              string `json:"schema"`
-	Table               string `json:"table"`
-	BaselineVersion     string `json:"baselineVersion"`
-	BaselineDescription string `json:"baselineDescription"`
-	Success             bool   `json:"success"`
+	BaselineVersion       string   `json:"baselineVersion"`
+	SuccessfullyBaselined bool     `json:"successfullyBaselined"`
+	FlywayVersion         string   `json:"flywayVersion"`
+	Database              string   `json:"database"`
+	Warnings              []string `json:"warnings"`
+	Operation             string   `json:"operation"`
+
+	// Deprecated: Alias fields for backward-compatibility with Go code and tests
+	Schema              string `json:"-"`
+	Table               string `json:"-"`
+	BaselineDescription string `json:"-"`
+	Success             bool   `json:"-"`
 }
 
 // Baseline baselines an existing database, setting the baseline version marker.
@@ -138,10 +145,15 @@ func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table st
 	}
 
 	return &BaselineResult{
-		Schema:              defaultSchema,
-		Table:               table,
-		BaselineVersion:     bVer,
-		BaselineDescription: bDesc,
-		Success:             true,
+		BaselineVersion:       bVer,
+		SuccessfullyBaselined: true,
+		FlywayVersion:         "1.0.0",
+		Database:              m.DatabaseName(),
+		Warnings:              make([]string, 0),
+		Operation:             "baseline",
+		Schema:                defaultSchema,
+		Table:                 table,
+		BaselineDescription:   bDesc,
+		Success:               true,
 	}, nil
 }
