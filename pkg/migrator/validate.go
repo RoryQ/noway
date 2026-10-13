@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/earthboundkid/versioninfo/v2"
 	"github.com/roryq/noway/pkg/resolver"
 	"github.com/roryq/noway/pkg/version"
 )
@@ -49,7 +50,11 @@ type ValidateResult struct {
 
 func (r *ValidateResult) finalize(db string, validateCount int) {
 	r.ValidationSuccessful = r.Valid
-	r.FlywayVersion = "1.0.0"
+	if versioninfo.Version != "" && versioninfo.Version != "unknown" && versioninfo.Version != "(devel)" {
+		r.FlywayVersion = versioninfo.Version
+	} else {
+		r.FlywayVersion = versioninfo.Short()
+	}
 	r.Database = db
 	r.Operation = "validate"
 	if r.Warnings == nil {

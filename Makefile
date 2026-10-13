@@ -4,12 +4,15 @@ BINARY_NAME ?= noway
 BIN_DIR ?= bin
 FLOCI_ENDPOINT ?= http://localhost:4588/bigquery/v2/
 
+GIT_TAG ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS ?= -X github.com/earthboundkid/versioninfo/v2.Version=$(GIT_TAG) -X main.version=$(GIT_TAG)
+
 all: build test
 
 ## build: Build the noway CLI binary
 build:
 	@mkdir -p $(BIN_DIR)
-	go build -v -o $(BIN_DIR)/$(BINARY_NAME) ./cmd/noway
+	go build -ldflags "$(LDFLAGS)" -v -o $(BIN_DIR)/$(BINARY_NAME) ./cmd/noway
 
 ## test: Run unit tests across all packages
 test:

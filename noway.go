@@ -7,6 +7,7 @@ import (
 
 	"strings"
 
+	"github.com/earthboundkid/versioninfo/v2"
 	"github.com/roryq/noway/pkg/config"
 	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/database/bigquery"
@@ -30,6 +31,14 @@ type (
 	MigrationInfo    = resolver.MigrationInfo
 	Version          = version.Version
 )
+
+// AppVersion returns the current Noway application version inherited from git tag or build info.
+func AppVersion() string {
+	if versioninfo.Version != "" && versioninfo.Version != "unknown" && versioninfo.Version != "(devel)" {
+		return versioninfo.Version
+	}
+	return versioninfo.Short()
+}
 
 // Option configures Noway.
 type Option func(*nowayOptions)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/earthboundkid/versioninfo/v2"
 	"github.com/roryq/noway/pkg/config"
 	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/parser"
@@ -215,6 +216,14 @@ func (m *Migrator) DatabaseName() string {
 		return m.config.Driver
 	}
 	return "BigQuery"
+}
+
+// FlywayVersion returns the Flyway/Noway version string matching Flyway conventions.
+func (m *Migrator) FlywayVersion() string {
+	if versioninfo.Version != "" && versioninfo.Version != "unknown" && versioninfo.Version != "(devel)" {
+		return versioninfo.Version
+	}
+	return versioninfo.Short()
 }
 
 // Migrate executes pending migrations.
@@ -522,7 +531,7 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		Migrations:           make([]ExecutedSummary, 0, totalToApply),
 		ExecutedMigrations:   make([]ExecutedSummary, 0, totalToApply),
 		Success:              true,
-		FlywayVersion:        "1.0.0",
+		FlywayVersion:        m.FlywayVersion(),
 		Database:             m.DatabaseName(),
 		Warnings:             make([]string, 0),
 		Operation:            "migrate",

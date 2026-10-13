@@ -147,7 +147,7 @@ func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table st
 	return &BaselineResult{
 		BaselineVersion:       bVer,
 		SuccessfullyBaselined: true,
-		FlywayVersion:         "1.0.0",
+		FlywayVersion:         m.FlywayVersion(),
 		Database:              m.DatabaseName(),
 		Warnings:              make([]string, 0),
 		Operation:             "baseline",

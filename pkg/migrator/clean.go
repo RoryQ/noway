@@ -37,7 +37,7 @@ func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
 	result := &CleanResult{
 		SchemasCleaned: make([]string, 0),
 		SchemasDropped: make([]string, 0),
-		FlywayVersion:  "1.0.0",
+		FlywayVersion:  m.FlywayVersion(),
 		Database:       m.DatabaseName(),
 		Warnings:       make([]string, 0),
 		Operation:      "clean",

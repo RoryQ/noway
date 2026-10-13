@@ -152,7 +152,7 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 		SchemaVersion:   schemaVersion,
 		SchemaName:      defaultSchema,
 		AllSchemasEmpty: allSchemasEmpty,
-		FlywayVersion:   "1.0.0",
+		FlywayVersion:   m.FlywayVersion(),
 		Database:        m.DatabaseName(),
 		Warnings:        make([]string, 0),
 		Operation:       "info",

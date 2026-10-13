@@ -178,7 +178,7 @@ func (m *Migrator) Undo(ctx context.Context) (*UndoResult, error) {
 		},
 		MigrationsUndone: 1,
 		Success:          true,
-		FlywayVersion:    "1.0.0",
+		FlywayVersion:    m.FlywayVersion(),
 		Database:         m.DatabaseName(),
 		Warnings:         make([]string, 0),
 		Operation:        "undo",

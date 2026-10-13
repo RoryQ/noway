@@ -7,14 +7,35 @@ import (
 	"os"
 	"strings"
 
+	"github.com/earthboundkid/versioninfo/v2"
 	"github.com/roryq/noway"
 	"github.com/roryq/noway/pkg/config"
 )
 
-const AppVersion = "1.0.0"
+var version string
+
+func init() {
+	if version != "" && versioninfo.Version == "unknown" {
+		versioninfo.Version = version
+	}
+}
 
 func printBanner() {
-	fmt.Printf("Noway v%s by RoryQ - Drop-in Flyway replacement for BigQuery & Cloud Spanner\n", AppVersion)
+	ver := noway.AppVersion()
+	if !strings.HasPrefix(ver, "v") && ver != "devel" && ver != "unknown" {
+		ver = "v" + ver
+	}
+	fmt.Printf("Noway %s by RoryQ - Drop-in Flyway replacement for BigQuery & Cloud Spanner\n", ver)
+}
+
+func isJSONRequested(args []string) bool {
+	for _, arg := range args {
+		clean := strings.ToLower(strings.TrimLeft(arg, "-"))
+		if clean == "outputtype=json" || clean == "output=json" {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {
@@ -25,6 +46,22 @@ func main() {
 
 	cmd := os.Args[1]
 	if cmd == "version" || cmd == "-version" || cmd == "--version" || cmd == "-v" {
+		if isJSONRequested(os.Args[2:]) {
+			out := struct {
+				Command        string   `json:"command"`
+				Edition        string   `json:"edition"`
+				PluginVersions []string `json:"pluginVersions"`
+				ProductVersion string   `json:"productVersion"`
+			}{
+				Command:        "version",
+				Edition:        "COMMUNITY",
+				PluginVersions: []string{},
+				ProductVersion: strings.TrimPrefix(noway.AppVersion(), "v"),
+			}
+			data, _ := json.MarshalIndent(out, "", "  ")
+			fmt.Println(string(data))
+			return
+		}
 		printBanner()
 		return
 	}
