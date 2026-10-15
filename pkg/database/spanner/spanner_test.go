@@ -3,7 +3,16 @@ package spanner
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"cloud.google.com/go/spanner"
+	"cloud.google.com/go/spanner/spannertest"
+	"cloud.google.com/go/spanner/spansql"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/roryq/noway/pkg/config"
 )
@@ -193,3 +202,97 @@ func TestNewValidation(t *testing.T) {
 		t.Errorf("expected database ID error, got %v", err)
 	}
 }
+
+func TestSpannerLockAndHeartbeat(t *testing.T) {
+	srv, err := spannertest.NewServer("localhost:0")
+	if err != nil {
+		t.Fatalf("failed to start spannertest server: %v", err)
+	}
+	defer srv.Close()
+
+	ctx := context.Background()
+	conn, err := grpc.DialContext(ctx, srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial spannertest server: %v", err)
+	}
+	defer conn.Close()
+
+	dbURI := "projects/test-proj/instances/test-inst/databases/test-db"
+	client, err := spanner.NewClient(ctx, dbURI, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("failed to create spanner client: %v", err)
+	}
+	defer client.Close()
+
+	ddl, err := spansql.ParseDDL("schema.sql", `CREATE TABLE flyway_schema_history (
+		installed_rank INT64 NOT NULL,
+		version STRING(50),
+		description STRING(200) NOT NULL,
+		type STRING(20) NOT NULL,
+		script STRING(1000) NOT NULL,
+		checksum INT64,
+		installed_by STRING(100) NOT NULL,
+		installed_on TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp=true),
+		execution_time INT64 NOT NULL,
+		success BOOL NOT NULL
+	) PRIMARY KEY (installed_rank);`)
+	if err != nil {
+		t.Fatalf("failed to parse DDL: %v", err)
+	}
+	if err := srv.UpdateDDL(ddl); err != nil {
+		t.Fatalf("failed to update DDL in spannertest: %v", err)
+	}
+
+	var heartbeatCount int64
+	db := &SpannerDatabase{
+		client:            client,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 30 * time.Millisecond,
+		onHeartbeat: func(err error) {
+			if err != nil {
+				t.Logf("heartbeat tick error: %v", err)
+			}
+			atomic.AddInt64(&heartbeatCount, 1)
+		},
+	}
+
+	// 1. Acquire lock
+	unlock, err := db.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("failed to acquire Spanner lock: %v", err)
+	}
+
+	// 2. Wait for heartbeat ticks
+	time.Sleep(100 * time.Millisecond)
+	if count := atomic.LoadInt64(&heartbeatCount); count < 2 {
+		t.Errorf("expected at least 2 heartbeats, got %d", count)
+	}
+
+	// 3. Concurrent lock attempt should fail with lock already held
+	db2 := &SpannerDatabase{
+		client: client,
+		config: &config.Configuration{LockRetryCount: 1},
+	}
+	_, err2 := db2.Lock(ctx, "", "flyway_schema_history")
+	if err2 == nil || !strings.Contains(err2.Error(), "lock already held") {
+		t.Errorf("expected 'lock already held' error on concurrent lock, got: %v", err2)
+	}
+
+	// 4. Release lock
+	if err := unlock(ctx); err != nil {
+		t.Fatalf("failed to unlock: %v", err)
+	}
+
+	// Calling unlock again should be safe and idempotent
+	if err := unlock(ctx); err != nil {
+		t.Errorf("expected idempotent unlock, got error: %v", err)
+	}
+
+	// 5. Another lock attempt should now succeed
+	unlock2, err3 := db2.Lock(ctx, "", "flyway_schema_history")
+	if err3 != nil {
+		t.Fatalf("failed to acquire lock after release: %v", err3)
+	}
+	_ = unlock2(ctx)
+}
+

@@ -31,6 +31,13 @@ type SpannerDatabase struct {
 	databaseID  string
 	config      *config.Configuration
 	mu          sync.Mutex
+
+	// heartbeatInterval is the interval between lock heartbeat refreshes.
+	// If <= 0, defaults to 3 minutes.
+	heartbeatInterval time.Duration
+
+	// onHeartbeat is an optional hook called on each heartbeat tick (used for testing).
+	onHeartbeat func(err error)
 }
 
 var _ database.Database = (*SpannerDatabase)(nil)
@@ -623,10 +630,49 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 		})
 
 		if err == nil && acquired {
+			interval := db.heartbeatInterval
+			if interval <= 0 {
+				interval = 3 * time.Minute
+			}
+
+			// Start background lock heartbeat to update installed_on every 3 minutes
+			heartbeatCtx, cancelHeartbeat := context.WithCancel(context.Background())
+			var wg sync.WaitGroup
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+				ticker := time.NewTicker(interval)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-heartbeatCtx.Done():
+						return
+					case <-ticker.C:
+						m := spanner.Update(tableName,
+							[]string{"installed_rank", "installed_on"},
+							[]interface{}{int64(-1), spanner.CommitTimestamp},
+						)
+						_, hErr := db.client.Apply(heartbeatCtx, []*spanner.Mutation{m})
+						if db.onHeartbeat != nil {
+							db.onHeartbeat(hErr)
+						}
+					}
+				}
+			}()
+
+			var unlockOnce sync.Once
+			var unlockErr error
 			unlock := func(unlockCtx context.Context) error {
-				m := spanner.Delete(tableName, spanner.Key{int64(-1)}.AsPrefix())
-				_, uErr := db.client.Apply(unlockCtx, []*spanner.Mutation{m})
-				return uErr
+				unlockOnce.Do(func() {
+					cancelHeartbeat()
+					wg.Wait()
+
+					m := spanner.Delete(tableName, spanner.Key{int64(-1)}.AsPrefix())
+					_, unlockErr = db.client.Apply(unlockCtx, []*spanner.Mutation{m})
+				})
+				return unlockErr
 			}
 			return unlock, nil
 		}
