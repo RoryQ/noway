@@ -761,3 +761,143 @@ SELECT 2;`
 		t.Fatalf("expected 2 statements, got %d", len(stmts))
 	}
 }
+
+func TestParserDropModelIfExists_Regression(t *testing.T) {
+	tests := []struct {
+		name          string
+		sql           string
+		expectedStmts []string
+	}{
+		{
+			name: "DROP MODEL IF EXISTS followed by SELECT",
+			sql:  "DROP MODEL IF EXISTS my_model;\nSELECT 1;",
+			expectedStmts: []string{
+				"DROP MODEL IF EXISTS my_model",
+				"SELECT 1",
+			},
+		},
+		{
+			name: "multiple DROP MODEL IF EXISTS statements",
+			sql:  "DROP MODEL IF EXISTS dataset.model_a;\nDROP MODEL IF EXISTS dataset.model_b;\nSELECT 'done';",
+			expectedStmts: []string{
+				"DROP MODEL IF EXISTS dataset.model_a",
+				"DROP MODEL IF EXISTS dataset.model_b",
+				"SELECT 'done'",
+			},
+		},
+		{
+			name: "DROP MODEL IF EXISTS alongside other DDL",
+			sql:  "DROP MODEL IF EXISTS m1;\nDROP TABLE IF EXISTS t1;\nDROP VIEW IF EXISTS v1;\nSELECT 42;",
+			expectedStmts: []string{
+				"DROP MODEL IF EXISTS m1",
+				"DROP TABLE IF EXISTS t1",
+				"DROP VIEW IF EXISTS v1",
+				"SELECT 42",
+			},
+		},
+	}
+
+	p := NewBigQueryParser()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmts := p.SplitStatements(tt.sql)
+			if len(stmts) != len(tt.expectedStmts) {
+				t.Fatalf("expected %d statements, got %d: %#v", len(tt.expectedStmts), len(stmts), stmts)
+			}
+			for i, stmt := range stmts {
+				if stmt.SQL != tt.expectedStmts[i] {
+					t.Errorf("stmt %d SQL mismatch:\ngot:  %q\nwant: %q", i, stmt.SQL, tt.expectedStmts[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParserSpannerChangeStream_Regression(t *testing.T) {
+	tests := []struct {
+		name          string
+		sql           string
+		expectedStmts []string
+	}{
+		{
+			name: "CREATE CHANGE STREAM FOR ALL",
+			sql:  "CREATE CHANGE STREAM my_stream FOR ALL;\nSELECT 1;",
+			expectedStmts: []string{
+				"CREATE CHANGE STREAM my_stream FOR ALL",
+				"SELECT 1",
+			},
+		},
+		{
+			name: "CREATE CHANGE STREAM FOR table list",
+			sql:  "CREATE CHANGE STREAM stream_tables FOR t1, t2;\nSELECT 2;",
+			expectedStmts: []string{
+				"CREATE CHANGE STREAM stream_tables FOR t1, t2",
+				"SELECT 2",
+			},
+		},
+		{
+			name: "CREATE CHANGE STREAM FOR table with columns",
+			sql:  "CREATE CHANGE STREAM stream_cols FOR t1(c1, c2);\nSELECT 3;",
+			expectedStmts: []string{
+				"CREATE CHANGE STREAM stream_cols FOR t1(c1, c2)",
+				"SELECT 3",
+			},
+		},
+		{
+			name: "ALTER CHANGE STREAM SET FOR ALL",
+			sql:  "ALTER CHANGE STREAM my_stream SET FOR ALL;\nSELECT 4;",
+			expectedStmts: []string{
+				"ALTER CHANGE STREAM my_stream SET FOR ALL",
+				"SELECT 4",
+			},
+		},
+		{
+			name: "ALTER CHANGE STREAM DROP FOR ALL",
+			sql:  "ALTER CHANGE STREAM my_stream DROP FOR ALL;\nSELECT 5;",
+			expectedStmts: []string{
+				"ALTER CHANGE STREAM my_stream DROP FOR ALL",
+				"SELECT 5",
+			},
+		},
+		{
+			name: "CREATE CHANGE STREAM and procedural FOR in same script",
+			sql: `CREATE CHANGE STREAM stream1 FOR ALL;
+FOR rec IN (SELECT 1 AS val) DO
+    SELECT rec.val;
+END FOR;
+SELECT 6;`,
+			expectedStmts: []string{
+				"CREATE CHANGE STREAM stream1 FOR ALL",
+				"FOR rec IN (SELECT 1 AS val) DO\n    SELECT rec.val;\nEND FOR",
+				"SELECT 6",
+			},
+		},
+		{
+			name: "DROP MODEL IF EXISTS and CREATE CHANGE STREAM together",
+			sql: `DROP MODEL IF EXISTS model_x;
+CREATE CHANGE STREAM stream_x FOR ALL;
+SELECT 7;`,
+			expectedStmts: []string{
+				"DROP MODEL IF EXISTS model_x",
+				"CREATE CHANGE STREAM stream_x FOR ALL",
+				"SELECT 7",
+			},
+		},
+	}
+
+	p := NewBigQueryParser()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmts := p.SplitStatements(tt.sql)
+			if len(stmts) != len(tt.expectedStmts) {
+				t.Fatalf("expected %d statements, got %d: %#v", len(tt.expectedStmts), len(stmts), stmts)
+			}
+			for i, stmt := range stmts {
+				if stmt.SQL != tt.expectedStmts[i] {
+					t.Errorf("stmt %d SQL mismatch:\ngot:  %q\nwant: %q", i, stmt.SQL, tt.expectedStmts[i])
+				}
+			}
+		})
+	}
+}
+

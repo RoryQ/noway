@@ -132,10 +132,6 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 		return ""
 	}
 
-	isNextWordSystemTime := func(pos int) bool {
-		return strings.EqualFold(getNextWord(pos), "SYSTEM_TIME")
-	}
-
 	isScalarIF := func(pos int) bool {
 		k := skipWhitespaceAndComments(pos)
 		if k >= n || runes[k] != '(' {
@@ -281,6 +277,273 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 		return true
 	}
 
+	isProceduralIF := func(pos int) bool {
+		if isScalarIF(pos) {
+			return false
+		}
+
+		pDepth := 0
+		caseDepth := 0
+		scanPos := pos
+
+		for scanPos < n {
+			r := runes[scanPos]
+
+			// Single-line comment: -- or #
+			if (r == '-' && scanPos+1 < n && runes[scanPos+1] == '-') || r == '#' {
+				scanPos++
+				for scanPos < n && runes[scanPos] != '\n' {
+					scanPos++
+				}
+				continue
+			}
+
+			// Multi-line comment: /* ... */
+			if r == '/' && scanPos+1 < n && runes[scanPos+1] == '*' {
+				scanPos += 2
+				for scanPos < n {
+					if runes[scanPos] == '*' && scanPos+1 < n && runes[scanPos+1] == '/' {
+						scanPos += 2
+						break
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Raw/byte string prefix: r', r", b', b", rb', br', etc.
+			if (r == 'r' || r == 'R' || r == 'b' || r == 'B') && scanPos+1 < n {
+				next := runes[scanPos+1]
+				if next == '\'' || next == '"' {
+					scanPos++
+					r = runes[scanPos]
+				} else if (next == 'b' || next == 'B' || next == 'r' || next == 'R') && scanPos+2 < n &&
+					(runes[scanPos+2] == '\'' || runes[scanPos+2] == '"') {
+					scanPos += 2
+					r = runes[scanPos]
+				}
+			}
+
+			// Triple quotes: ''' or """
+			if (r == '\'' && scanPos+2 < n && runes[scanPos+1] == '\'' && runes[scanPos+2] == '\'') ||
+				(r == '"' && scanPos+2 < n && runes[scanPos+1] == '"' && runes[scanPos+2] == '"') {
+				q := runes[scanPos]
+				scanPos += 3
+				for scanPos < n {
+					if runes[scanPos] == q && scanPos+2 < n && runes[scanPos+1] == q && runes[scanPos+2] == q {
+						scanPos += 3
+						break
+					}
+					if runes[scanPos] == '\\' && scanPos+1 < n {
+						scanPos += 2
+						continue
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Standard string literals or backticks: '...', "...", `...`
+			if r == '\'' || r == '"' || r == '`' {
+				quote := r
+				scanPos++
+				for scanPos < n {
+					if runes[scanPos] == '\\' && scanPos+1 < n {
+						scanPos += 2
+						continue
+					}
+					if runes[scanPos] == quote {
+						if scanPos+1 < n && runes[scanPos+1] == quote {
+							scanPos += 2
+							continue
+						}
+						scanPos++
+						break
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Parentheses tracking
+			if r == '(' {
+				pDepth++
+				scanPos++
+				continue
+			} else if r == ')' {
+				if pDepth > 0 {
+					pDepth--
+				}
+				scanPos++
+				continue
+			}
+
+			// Semicolon statement delimiter at depth 0
+			if r == ';' && pDepth == 0 && caseDepth == 0 {
+				return false
+			}
+
+			// Identifiers and keywords
+			if unicode.IsLetter(r) || r == '_' {
+				wStart := scanPos
+				for scanPos < n && (unicode.IsLetter(runes[scanPos]) || unicode.IsDigit(runes[scanPos]) || runes[scanPos] == '_') {
+					scanPos++
+				}
+				w := string(runes[wStart:scanPos])
+				if pDepth == 0 {
+					if strings.EqualFold(w, "CASE") {
+						caseDepth++
+					} else if strings.EqualFold(w, "END") {
+						if caseDepth > 0 {
+							caseDepth--
+						}
+					} else if caseDepth == 0 && strings.EqualFold(w, "THEN") {
+						return true
+					}
+				}
+				continue
+			}
+
+			scanPos++
+		}
+
+		return false
+	}
+
+	isProceduralFOR := func(pos int) bool {
+		pDepth := 0
+		caseDepth := 0
+		hasIn := false
+		scanPos := pos
+
+		for scanPos < n {
+			r := runes[scanPos]
+
+			// Single-line comment: -- or #
+			if (r == '-' && scanPos+1 < n && runes[scanPos+1] == '-') || r == '#' {
+				scanPos++
+				for scanPos < n && runes[scanPos] != '\n' {
+					scanPos++
+				}
+				continue
+			}
+
+			// Multi-line comment: /* ... */
+			if r == '/' && scanPos+1 < n && runes[scanPos+1] == '*' {
+				scanPos += 2
+				for scanPos < n {
+					if runes[scanPos] == '*' && scanPos+1 < n && runes[scanPos+1] == '/' {
+						scanPos += 2
+						break
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Raw/byte string prefix: r', r", b', b", rb', br', etc.
+			if (r == 'r' || r == 'R' || r == 'b' || r == 'B') && scanPos+1 < n {
+				next := runes[scanPos+1]
+				if next == '\'' || next == '"' {
+					scanPos++
+					r = runes[scanPos]
+				} else if (next == 'b' || next == 'B' || next == 'r' || next == 'R') && scanPos+2 < n &&
+					(runes[scanPos+2] == '\'' || runes[scanPos+2] == '"') {
+					scanPos += 2
+					r = runes[scanPos]
+				}
+			}
+
+			// Triple quotes: ''' or """
+			if (r == '\'' && scanPos+2 < n && runes[scanPos+1] == '\'' && runes[scanPos+2] == '\'') ||
+				(r == '"' && scanPos+2 < n && runes[scanPos+1] == '"' && runes[scanPos+2] == '"') {
+				q := runes[scanPos]
+				scanPos += 3
+				for scanPos < n {
+					if runes[scanPos] == q && scanPos+2 < n && runes[scanPos+1] == q && runes[scanPos+2] == q {
+						scanPos += 3
+						break
+					}
+					if runes[scanPos] == '\\' && scanPos+1 < n {
+						scanPos += 2
+						continue
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Standard string literals or backticks: '...', "...", `...`
+			if r == '\'' || r == '"' || r == '`' {
+				quote := r
+				scanPos++
+				for scanPos < n {
+					if runes[scanPos] == '\\' && scanPos+1 < n {
+						scanPos += 2
+						continue
+					}
+					if runes[scanPos] == quote {
+						if scanPos+1 < n && runes[scanPos+1] == quote {
+							scanPos += 2
+							continue
+						}
+						scanPos++
+						break
+					}
+					scanPos++
+				}
+				continue
+			}
+
+			// Parentheses tracking
+			if r == '(' {
+				pDepth++
+				scanPos++
+				continue
+			} else if r == ')' {
+				if pDepth > 0 {
+					pDepth--
+				}
+				scanPos++
+				continue
+			}
+
+			// Semicolon statement delimiter at depth 0
+			if r == ';' && pDepth == 0 && caseDepth == 0 {
+				return false
+			}
+
+			// Identifiers and keywords
+			if unicode.IsLetter(r) || r == '_' {
+				wStart := scanPos
+				for scanPos < n && (unicode.IsLetter(runes[scanPos]) || unicode.IsDigit(runes[scanPos]) || runes[scanPos] == '_') {
+					scanPos++
+				}
+				w := string(runes[wStart:scanPos])
+				if pDepth == 0 {
+					if strings.EqualFold(w, "CASE") {
+						caseDepth++
+					} else if strings.EqualFold(w, "END") {
+						if caseDepth > 0 {
+							caseDepth--
+						}
+					} else if caseDepth == 0 {
+						if strings.EqualFold(w, "IN") {
+							hasIn = true
+						} else if strings.EqualFold(w, "DO") && hasIn {
+							return true
+						}
+					}
+				}
+				continue
+			}
+
+			scanPos++
+		}
+
+		return false
+	}
+
 	recordKeyword := func(kw string, pos int) {
 		upper := strings.ToUpper(kw)
 
@@ -299,16 +562,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 				pushBlock("CASE")
 			}
 		case "IF":
-			// Procedural IF vs DDL IF [NOT] EXISTS vs scalar IF(...)
-			isDDLOrClosing := prevKeyword == "TABLE" || prevKeyword == "VIEW" || prevKeyword == "SCHEMA" ||
-				prevKeyword == "DATASET" || prevKeyword == "INDEX" || prevKeyword == "DROP" ||
-				prevKeyword == "CREATE" || prevKeyword == "FUNCTION" || prevKeyword == "PROCEDURE" ||
-				prevKeyword == "COLUMN" || prevKeyword == "POLICY" || prevKeyword == "CONSTRAINT" ||
-				prevKeyword == "KEY" || prevKeyword == "OR" || prevKeyword == "END"
-
-			isScalarOrExpr := parensDepth > 0 || isScalarIF(pos)
-
-			if !isDDLOrClosing && !isScalarOrExpr {
+			if prevKeyword != "END" && parensDepth == 0 && isProceduralIF(pos) {
 				pushBlock("IF")
 			}
 		case "LOOP", "WHILE":
@@ -321,9 +575,7 @@ func (p *BigQueryParser) SplitStatements(script string) []Statement {
 				pushBlock("REPEAT")
 			}
 		case "FOR":
-			// Procedural FOR record IN (...) DO ... END FOR vs FOR SYSTEM_TIME AS OF ...
-			if prevKeyword != "END" && prevKeyword != "CREATE" && prevKeyword != "REPLACE" &&
-				parensDepth == 0 && !isNextWordSystemTime(pos) {
+			if prevKeyword != "END" && parensDepth == 0 && isProceduralFOR(pos) {
 				pushBlock("FOR")
 			}
 		case "END":
