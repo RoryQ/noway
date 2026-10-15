@@ -404,9 +404,19 @@ func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveRe
 	return r.parseAndAddMigration(dir, filename, fullPath, string(data), nil, result, seen)
 }
 
-func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool) (int64, error) {
+func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool) (int64, *int64, error) {
+	rawCs, err := checksum.CalculateString(content)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	if !isRepeatable {
+		return rawCs, nil, nil
+	}
+
+	eqCs := rawCs
 	calcContent := content
-	if isRepeatable && r.config.Replacer != nil {
+	if r.config.Replacer != nil {
 		shouldReplace := r.config.Replacer.IsEnabled()
 		if r.config.PlaceholderReplacement != nil {
 			shouldReplace = *r.config.PlaceholderReplacement
@@ -417,12 +427,16 @@ func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, 
 		if shouldReplace {
 			replaced, err := r.config.Replacer.ReplaceContent(content, r.config.Builtins)
 			if err != nil {
-				return 0, fmt.Errorf("failed to replace placeholders in repeatable migration: %w", err)
+				return 0, nil, fmt.Errorf("failed to replace placeholders in repeatable migration: %w", err)
 			}
 			calcContent = replaced
 		}
 	}
-	return checksum.CalculateString(calcContent)
+	cs, err := checksum.CalculateString(calcContent)
+	if err != nil {
+		return 0, nil, err
+	}
+	return cs, &eqCs, nil
 }
 
 func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string, fileSys fs.FS, result *ResolveResult, seen *seenTracking) error {
@@ -491,7 +505,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 		}
 		seen.repeatables[desc] = fullPath
 
-		cs, err := r.calculateChecksum(content, migConfig, true)
+		cs, eqCs, err := r.calculateChecksum(content, migConfig, true)
 		if err != nil {
 			return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 		}
@@ -502,16 +516,17 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 		}
 
 		result.RepeatableMigrations = append(result.RepeatableMigrations, ResolvedMigration{
-			Version:          nil,
-			Description:      desc,
-			Script:           filename,
-			Checksum:         cs,
-			Type:             repType,
-			Content:          content,
-			PhysicalLocation: fullPath,
-			IsRepeatable:     true,
-			IsScript:         isScript,
-			Config:           migConfig,
+			Version:            nil,
+			Description:        desc,
+			Script:             filename,
+			Checksum:           cs,
+			EquivalentChecksum: eqCs,
+			Type:               repType,
+			Content:            content,
+			PhysicalLocation:   fullPath,
+			IsRepeatable:       true,
+			IsScript:           isScript,
+			Config:             migConfig,
 		})
 		return nil
 	}
@@ -532,7 +547,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			desc := strings.ReplaceAll(parts[1], "_", " ")
 			ver, err := version.Parse(verStr)
 			if err == nil {
-				cs, err := r.calculateChecksum(content, migConfig, false)
+				cs, _, err := r.calculateChecksum(content, migConfig, false)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
@@ -580,7 +595,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 				}
 				seen.baselineVersions[canonicalVer] = fullPath
 
-				cs, err := r.calculateChecksum(content, migConfig, false)
+				cs, _, err := r.calculateChecksum(content, migConfig, false)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
@@ -633,7 +648,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			}
 			seen.versions[canonicalVer] = fullPath
 
-			cs, err := r.calculateChecksum(content, migConfig, false)
+			cs, _, err := r.calculateChecksum(content, migConfig, false)
 			if err != nil {
 				return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 			}

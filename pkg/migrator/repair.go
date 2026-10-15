@@ -213,7 +213,22 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 				res, found = resolvedRepeatableByScript[app.Script]
 			}
 			if found {
-				if app.Checksum == nil || *app.Checksum != res.Checksum || app.Description != res.Description || app.Type != string(res.Type) {
+				// Flyway parity: Do NOT align checksums for edited repeatable migrations!
+				// Repeatable migrations are executed on migrate when their checksum changes.
+				// Aligning the checksum during repair writes the new checksum into the history table first,
+				// which prevents migrate from running the edited repeatable migration.
+				//
+				// We only align if:
+				// 1. The repeatable was marked DELETE in history, but has been restored to disk.
+				// 2. The repeatable matches without being identical (checksum calculated without replacement matches database, but replacement checksum differs).
+				shouldAlign := false
+				if app.Type == "DELETE" {
+					shouldAlign = true
+				} else if res.ChecksumMatchesWithoutBeingIdentical(app.Checksum) {
+					shouldAlign = true
+				}
+
+				if shouldAlign {
 					rec := database.HistoryRecord{
 						InstalledRank: app.InstalledRank,
 						Version:       nil,

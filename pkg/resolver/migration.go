@@ -58,18 +58,28 @@ type MigrationConfig struct {
 
 // ResolvedMigration is a migration found on disk or classpath.
 type ResolvedMigration struct {
-	Version          *version.Version
-	Description      string
-	Script           string
-	Checksum         int64
-	Type             MigrationType
-	Content          string
-	PhysicalLocation string
-	IsRepeatable     bool
-	IsUndo           bool
-	IsBaseline       bool
-	IsScript         bool
-	Config           MigrationConfig
+	Version            *version.Version
+	Description        string
+	Script             string
+	Checksum           int64
+	EquivalentChecksum *int64
+	Type               MigrationType
+	Content            string
+	PhysicalLocation   string
+	IsRepeatable       bool
+	IsUndo             bool
+	IsBaseline         bool
+	IsScript           bool
+	Config             MigrationConfig
+}
+
+// ChecksumMatchesWithoutBeingIdentical returns true if appliedChecksum matches the equivalent checksum
+// (e.g. raw content without placeholder replacement) while differing from the actual checksum (with replacement).
+func (r *ResolvedMigration) ChecksumMatchesWithoutBeingIdentical(appliedChecksum *int64) bool {
+	if appliedChecksum == nil || r.EquivalentChecksum == nil {
+		return false
+	}
+	return *appliedChecksum == *r.EquivalentChecksum && *appliedChecksum != r.Checksum
 }
 
 // AppliedMigration is a migration read from the schema history table.

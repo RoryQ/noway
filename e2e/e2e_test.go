@@ -946,7 +946,7 @@ func TestTier1_F16_F17_F18_RepairOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("F16_RepairRealignsRepeatableChecksum", func(t *testing.T) {
+	t.Run("F16_RepairDoesNotSuppressEditedRepeatable", func(t *testing.T) {
 		fs := fstest.MapFS{
 			"migrations/R__view.sql": &fstest.MapFile{
 				Data: []byte("CREATE VIEW v AS SELECT 1;"),
@@ -956,30 +956,43 @@ func TestTier1_F16_F17_F18_RepairOperations(t *testing.T) {
 		nw, db := setupNoway(t, fs)
 		_, _ = nw.Migrate(ctx)
 
+		historyOrig, _ := db.FetchHistory(ctx, "e2e_dataset", "flyway_schema_history")
+		origCs := *historyOrig[0].Checksum
+
 		// Modify repeatable locally
 		fs["migrations/R__view.sql"] = &fstest.MapFile{
 			Data: []byte("CREATE VIEW v AS SELECT 2;"),
 		}
 
-		_, err := nw.Repair(ctx)
+		repRes, err := nw.Repair(ctx)
 		if err != nil {
 			t.Fatalf("Repair failed: %v", err)
+		}
+		if len(repRes.AlignedChecksums) != 0 {
+			t.Errorf("expected 0 aligned checksums for edited repeatable, got %d", len(repRes.AlignedChecksums))
 		}
 
 		history, _ := db.FetchHistory(ctx, "e2e_dataset", "flyway_schema_history")
 		if len(history) == 0 || history[0].Checksum == nil {
 			t.Fatalf("expected schema history with checksum")
 		}
-		expectedCs, _ := checksum.CalculateString("CREATE VIEW v AS SELECT 2;")
-		if *history[0].Checksum != expectedCs {
-			t.Errorf("expected aligned checksum %d, got %d", expectedCs, *history[0].Checksum)
+		if *history[0].Checksum != origCs {
+			t.Errorf("expected checksum to remain %d, got %d", origCs, *history[0].Checksum)
 		}
+
+		// Subsequent Migrate must execute the edited repeatable
 		migRes, err := nw.Migrate(ctx)
 		if err != nil {
 			t.Fatalf("Migrate after repair failed: %v", err)
 		}
-		if migRes.MigrationsExecuted != 0 {
-			t.Errorf("expected 0 migrations executed after repair, got %d", migRes.MigrationsExecuted)
+		if migRes.MigrationsExecuted != 1 {
+			t.Errorf("expected 1 migration executed after repair, got %d", migRes.MigrationsExecuted)
+		}
+
+		expectedCs, _ := checksum.CalculateString("CREATE VIEW v AS SELECT 2;")
+		historyFinal, _ := db.FetchHistory(ctx, "e2e_dataset", "flyway_schema_history")
+		if len(historyFinal) != 2 || *historyFinal[1].Checksum != expectedCs {
+			t.Errorf("expected latest checksum %d, got %+v", expectedCs, historyFinal)
 		}
 	})
 

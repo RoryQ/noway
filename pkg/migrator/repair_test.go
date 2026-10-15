@@ -11,7 +11,7 @@ import (
 	"github.com/roryq/noway/pkg/database/mock"
 )
 
-func TestRepairRepeatableChecksumAlignment(t *testing.T) {
+func TestRepairDoesNotSuppressEditedRepeatableMigration(t *testing.T) {
 	ctx := context.Background()
 
 	fs := fstest.MapFS{
@@ -49,35 +49,41 @@ func TestRepairRepeatableChecksumAlignment(t *testing.T) {
 	}
 	expectedCs, _ := checksum.CalculateString("CREATE VIEW v AS SELECT 2;")
 
-	// 3. Run Repair
+	// 3. Run Repair - must NOT align the checksum of an edited repeatable migration!
 	repairRes, err := m.Repair(ctx)
 	if err != nil {
 		t.Fatalf("Repair failed: %v", err)
 	}
-	if len(repairRes.AlignedChecksums) != 1 {
-		t.Errorf("expected 1 aligned checksum, got %d", len(repairRes.AlignedChecksums))
+	if len(repairRes.AlignedChecksums) != 0 {
+		t.Errorf("expected 0 aligned checksums for edited repeatable, got %d: %+v", len(repairRes.AlignedChecksums), repairRes.AlignedChecksums)
 	}
 
-	// 4. Verify updated checksum in database
+	// 4. Verify checksum in database history was NOT overwritten
 	historyAfter, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
 	if err != nil || len(historyAfter) != 1 {
 		t.Fatalf("FetchHistory failed, len=%d", len(historyAfter))
 	}
-	if *historyAfter[0].Checksum == initialCs {
-		t.Errorf("expected checksum to change from %d, but remained identical", initialCs)
-	}
-	if *historyAfter[0].Checksum != expectedCs {
-		t.Errorf("expected checksum %d, got %d", expectedCs, *historyAfter[0].Checksum)
+	if *historyAfter[0].Checksum != initialCs {
+		t.Errorf("expected checksum to remain %d, but changed to %d", initialCs, *historyAfter[0].Checksum)
 	}
 
-	// 5. Subsequent Migrate must not re-run because checksums are aligned
+	// 5. Subsequent Migrate MUST execute the edited repeatable migration
 	m2, _ := New(cfg, db)
 	migRes2, err := m2.Migrate(ctx)
 	if err != nil {
 		t.Fatalf("second Migrate failed: %v", err)
 	}
-	if migRes2.MigrationsExecuted != 0 {
-		t.Errorf("expected 0 migrations executed after repair alignment, got %d", migRes2.MigrationsExecuted)
+	if migRes2.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed after repair, got %d", migRes2.MigrationsExecuted)
+	}
+
+	// 6. Verify history table now has the newly executed migration record with expectedCs
+	historyFinal, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+	if err != nil || len(historyFinal) != 2 {
+		t.Fatalf("expected 2 history records after second migrate, got %d", len(historyFinal))
+	}
+	if *historyFinal[1].Checksum != expectedCs {
+		t.Errorf("expected latest history checksum %d, got %d", expectedCs, *historyFinal[1].Checksum)
 	}
 }
 

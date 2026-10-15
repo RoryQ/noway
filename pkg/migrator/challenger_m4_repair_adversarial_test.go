@@ -20,7 +20,7 @@ import (
 func TestChallenger_RepairRepeatableChecksumRealignment_SingleAndMultiple(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("SingleRepeatable_ModifiedDisk_AlignedInHistory_NoReexecution", func(t *testing.T) {
+	t.Run("SingleRepeatable_ModifiedDisk_NotAlignedByRepair_MigrateExecutes", func(t *testing.T) {
 		fs := fstest.MapFS{
 			"migrations/R__view.sql": &fstest.MapFile{
 				Data: []byte("CREATE VIEW v AS SELECT 100;"),
@@ -57,31 +57,37 @@ func TestChallenger_RepairRepeatableChecksumRealignment_SingleAndMultiple(t *tes
 		}
 		expectedNewCs, _ := checksum.CalculateString(newSQL)
 
-		// Run Repair
+		// Run Repair - must NOT align the checksum of an edited repeatable migration!
 		repairRes, err := m.Repair(ctx)
 		if err != nil {
 			t.Fatalf("Repair failed: %v", err)
 		}
-		if len(repairRes.AlignedChecksums) != 1 {
-			t.Errorf("expected 1 aligned checksum, got %+v", repairRes.AlignedChecksums)
+		if len(repairRes.AlignedChecksums) != 0 {
+			t.Errorf("expected 0 aligned checksums for edited repeatable, got %+v", repairRes.AlignedChecksums)
 		}
 
-		// Verify history table has updated checksum
+		// Verify history table checksum remains untouched (origCs)
 		afterHistory, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
 		if err != nil || len(afterHistory) != 1 {
 			t.Fatalf("FetchHistory after repair failed, len=%d", len(afterHistory))
 		}
-		if *afterHistory[0].Checksum != expectedNewCs {
-			t.Errorf("expected aligned checksum %d, got %d (orig was %d)", expectedNewCs, *afterHistory[0].Checksum, origCs)
+		if *afterHistory[0].Checksum != origCs {
+			t.Errorf("expected checksum to remain %d, got %d", origCs, *afterHistory[0].Checksum)
 		}
 
-		// Subsequent Migrate must NOT re-execute
+		// Subsequent Migrate MUST execute the edited repeatable migration
 		migRes2, err := m.Migrate(ctx)
 		if err != nil {
 			t.Fatalf("Migrate after repair failed: %v", err)
 		}
-		if migRes2.MigrationsExecuted != 0 {
-			t.Errorf("expected 0 migrations executed after repair alignment, got %d", migRes2.MigrationsExecuted)
+		if migRes2.MigrationsExecuted != 1 {
+			t.Errorf("expected 1 migration executed after repair, got %d", migRes2.MigrationsExecuted)
+		}
+
+		// Verify history table now has new record with expectedNewCs
+		finalHistory, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+		if len(finalHistory) != 2 || *finalHistory[1].Checksum != expectedNewCs {
+			t.Errorf("expected second history record with checksum %d, got %+v", expectedNewCs, finalHistory)
 		}
 	})
 
@@ -109,63 +115,59 @@ func TestChallenger_RepairRepeatableChecksumRealignment_SingleAndMultiple(t *tes
 		}
 
 		origHistory, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-		var v2Cs int64
+		var v1Cs, v2Cs, v3Cs int64
 		for _, h := range origHistory {
-			if h.Script == "R__view2.sql" {
+			switch h.Script {
+			case "R__view1.sql":
+				v1Cs = *h.Checksum
+			case "R__view2.sql":
 				v2Cs = *h.Checksum
+			case "R__view3.sql":
+				v3Cs = *h.Checksum
 			}
 		}
 
 		// Modify view1 and view3, leave view2 unchanged
 		fs["migrations/R__view1.sql"] = &fstest.MapFile{Data: []byte("CREATE VIEW v1 AS SELECT 111;")}
 		fs["migrations/R__view3.sql"] = &fstest.MapFile{Data: []byte("CREATE VIEW v3 AS SELECT 333;")}
-		expectedV1Cs, _ := checksum.CalculateString("CREATE VIEW v1 AS SELECT 111;")
-		expectedV3Cs, _ := checksum.CalculateString("CREATE VIEW v3 AS SELECT 333;")
 
 		repairRes, err := m.Repair(ctx)
 		if err != nil {
 			t.Fatalf("Repair failed: %v", err)
 		}
-		if len(repairRes.AlignedChecksums) != 2 {
-			t.Fatalf("expected 2 aligned checksums, got %d: %+v", len(repairRes.AlignedChecksums), repairRes.AlignedChecksums)
+		// Repair must NOT align modified repeatables
+		if len(repairRes.AlignedChecksums) != 0 {
+			t.Fatalf("expected 0 aligned checksums, got %d: %+v", len(repairRes.AlignedChecksums), repairRes.AlignedChecksums)
 		}
 
-		// Verify history
+		// Verify history unchanged
 		historyAfter, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
 		for _, h := range historyAfter {
 			switch h.Script {
 			case "R__view1.sql":
-				if *h.Checksum != expectedV1Cs {
-					t.Errorf("R__view1 checksum mismatch: got %d, want %d", *h.Checksum, expectedV1Cs)
+				if *h.Checksum != v1Cs {
+					t.Errorf("R__view1 checksum changed unexpectedly: got %d, want %d", *h.Checksum, v1Cs)
 				}
 			case "R__view2.sql":
 				if *h.Checksum != v2Cs {
 					t.Errorf("R__view2 checksum changed unexpectedly: got %d, want %d", *h.Checksum, v2Cs)
 				}
 			case "R__view3.sql":
-				if *h.Checksum != expectedV3Cs {
-					t.Errorf("R__view3 checksum mismatch: got %d, want %d", *h.Checksum, expectedV3Cs)
+				if *h.Checksum != v3Cs {
+					t.Errorf("R__view3 checksum changed unexpectedly: got %d, want %d", *h.Checksum, v3Cs)
 				}
 			}
 		}
 
-		// Migrate() executes 0 migrations because all are aligned
+		// Migrate() executes the 2 modified repeatable migrations (view1 and view3)
 		m2, _ := New(cfg, db)
 		migRes2, err := m2.Migrate(ctx)
-		if err != nil || migRes2.MigrationsExecuted != 0 {
-			t.Errorf("expected 0 executed migrations after repair, got %d, err=%v", migRes2.MigrationsExecuted, err)
-		}
-
-		// Now modify view2 WITHOUT Repair(): Migrate() must re-execute only view2
-		fs["migrations/R__view2.sql"] = &fstest.MapFile{Data: []byte("CREATE VIEW v2 AS SELECT 222;")}
-		m3, _ := New(cfg, db)
-		migRes3, err := m3.Migrate(ctx)
-		if err != nil || migRes3.MigrationsExecuted != 1 {
-			t.Errorf("expected exactly 1 migration executed for modified view2, got %d, err=%v", migRes3.MigrationsExecuted, err)
+		if err != nil || migRes2.MigrationsExecuted != 2 {
+			t.Errorf("expected 2 executed migrations after repair, got %d, err=%v", migRes2.MigrationsExecuted, err)
 		}
 	})
 
-	t.Run("RepeatableWithPlaceholders_ReplacedChecksumAligned", func(t *testing.T) {
+	t.Run("RepeatableWithPlaceholders_EquivalentChecksumAligned", func(t *testing.T) {
 		fs := fstest.MapFS{
 			"migrations/R__placeholder.sql": &fstest.MapFile{
 				Data: []byte("CREATE VIEW v AS SELECT '${app_env}';"),
@@ -184,23 +186,28 @@ func TestChallenger_RepairRepeatableChecksumRealignment_SingleAndMultiple(t *tes
 			t.Fatalf("failed to create migrator: %v", err)
 		}
 
-		_, err = m.Migrate(ctx)
-		if err != nil {
-			t.Fatalf("Migrate failed: %v", err)
-		}
+		// Insert history record with raw equivalent checksum (simulating legacy Flyway record without replacement)
+		rawCs, _ := checksum.CalculateString("CREATE VIEW v AS SELECT '${app_env}';")
+		expectedReplacedCs, _ := checksum.CalculateString("CREATE VIEW v AS SELECT 'production';")
+		_ = db.EnsureSchema(ctx, "test_ds")
+		_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+		_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+			InstalledRank: 1,
+			Version:       nil,
+			Description:   "placeholder",
+			Type:          "SQL",
+			Script:        "R__placeholder.sql",
+			Checksum:      &rawCs,
+			Success:       true,
+		})
 
-		// Modify SQL on disk
-		fs["migrations/R__placeholder.sql"] = &fstest.MapFile{
-			Data: []byte("CREATE VIEW v AS SELECT '${app_env}', 42;"),
-		}
-		expectedReplacedCs, _ := checksum.CalculateString("CREATE VIEW v AS SELECT 'production', 42;")
-
+		// Repair should align equivalent checksum to replaced checksum
 		repairRes, err := m.Repair(ctx)
 		if err != nil {
 			t.Fatalf("Repair failed: %v", err)
 		}
 		if len(repairRes.AlignedChecksums) != 1 {
-			t.Fatalf("expected 1 aligned checksum, got %d", len(repairRes.AlignedChecksums))
+			t.Fatalf("expected 1 aligned checksum for equivalent placeholder upgrade, got %d", len(repairRes.AlignedChecksums))
 		}
 
 		history, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
@@ -208,7 +215,7 @@ func TestChallenger_RepairRepeatableChecksumRealignment_SingleAndMultiple(t *tes
 			t.Errorf("expected history checksum %d, got %v", expectedReplacedCs, history[0].Checksum)
 		}
 
-		// Subsequent Migrate executes 0 migrations
+		// Subsequent Migrate executes 0 migrations because the script itself was not modified
 		m2, _ := New(cfg, db)
 		migRes2, err := m2.Migrate(ctx)
 		if err != nil || migRes2.MigrationsExecuted != 0 {
@@ -218,7 +225,7 @@ func TestChallenger_RepairRepeatableChecksumRealignment_SingleAndMultiple(t *tes
 
 	t.Run("Idempotency_SuccessiveRepairRunsDoNotDuplicateOrAlter", func(t *testing.T) {
 		fs := fstest.MapFS{
-			"migrations/R__v.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
+			"migrations/V1__v.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
 		}
 
 		db := mock.NewMockDatabase()
@@ -230,16 +237,16 @@ func TestChallenger_RepairRepeatableChecksumRealignment_SingleAndMultiple(t *tes
 		m, _ := New(cfg, db)
 		_, _ = m.Migrate(ctx)
 
-		// Modify
-		fs["migrations/R__v.sql"] = &fstest.MapFile{Data: []byte("SELECT 2;")}
+		// Modify versioned migration on disk
+		fs["migrations/V1__v.sql"] = &fstest.MapFile{Data: []byte("SELECT 2;")}
 
-		// First repair
+		// First repair aligns V1 checksum
 		rep1, err := m.Repair(ctx)
 		if err != nil || len(rep1.AlignedChecksums) != 1 {
 			t.Fatalf("first repair failed: %v, aligned=%d", err, len(rep1.AlignedChecksums))
 		}
 
-		// Second repair
+		// Second repair is idempotent (0 aligned)
 		rep2, err := m.Repair(ctx)
 		if err != nil {
 			t.Fatalf("second repair failed: %v", err)
@@ -879,9 +886,9 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 	if len(expectedDeleted) != 0 {
 		t.Errorf("missing expected deleted migrations: %+v", expectedDeleted)
 	}
-	// - R2 checksum aligned
-	if len(repairRes.AlignedChecksums) != 1 || repairRes.AlignedChecksums[0] != "R__r2_mod.sql" {
-		t.Errorf("expected AlignedChecksums to contain R__r2_mod.sql, got %+v", repairRes.AlignedChecksums)
+	// - R2 is an edited repeatable, so repair must NOT align its checksum
+	if len(repairRes.AlignedChecksums) != 0 {
+		t.Errorf("expected 0 AlignedChecksums (edited repeatable R2 must not be aligned), got %+v", repairRes.AlignedChecksums)
 	}
 
 	// 6. Inspect database history records directly
@@ -890,6 +897,7 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 		t.Fatalf("FetchHistory failed: %v", err)
 	}
 
+	origR2Cs, _ := checksum.CalculateString("CREATE VIEW r2 AS SELECT 2;")
 	for _, h := range historyAfter {
 		switch h.Script {
 		case "V1__base.sql":
@@ -907,8 +915,8 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 				t.Errorf("R1 in unexpected state: type=%s, success=%v", h.Type, h.Success)
 			}
 		case "R__r2_mod.sql":
-			if *h.Checksum != expectedR2Cs {
-				t.Errorf("R2 checksum mismatch: got %d, want %d", *h.Checksum, expectedR2Cs)
+			if *h.Checksum != origR2Cs {
+				t.Errorf("R2 checksum should not be aligned by repair: got %d, want %d", *h.Checksum, origR2Cs)
 			}
 		case "R__r3_del.sql":
 			if h.Type != "DELETE" {
@@ -933,17 +941,31 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 		t.Fatalf("expected Validate to be valid after repair, got errors:\n%s", valAfter.Error())
 	}
 
-	// 9. Migrate(): MUST execute ONLY V3!
+	// 9. Migrate(): MUST execute V3 AND re-execute modified repeatable R2!
 	// - V1, V2: already applied / retired
 	// - R1: untouched
-	// - R2: checksum was aligned by repair, so it must NOT re-execute!
+	// - R2: modified on disk, so Migrate must execute it!
 	// - R3: deleted
 	migResFinal, err := mClean.Migrate(ctx)
 	if err != nil {
 		t.Fatalf("final Migrate failed: %v", err)
 	}
-	if migResFinal.MigrationsExecuted != 1 {
-		t.Errorf("expected EXACTLY 1 migration executed (only fixed V3), got %d", migResFinal.MigrationsExecuted)
+	if migResFinal.MigrationsExecuted != 2 {
+		t.Errorf("expected 2 migrations executed (fixed V3 and edited R2), got %d", migResFinal.MigrationsExecuted)
+	}
+
+	historyFinal, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory final failed: %v", err)
+	}
+	var r2NewCsFound bool
+	for _, h := range historyFinal {
+		if h.Script == "R__r2_mod.sql" && h.Checksum != nil && *h.Checksum == expectedR2Cs {
+			r2NewCsFound = true
+		}
+	}
+	if !r2NewCsFound {
+		t.Errorf("expected R2 to be recorded in history with new checksum %d", expectedR2Cs)
 	}
 }
 
@@ -1027,7 +1049,7 @@ func TestChallenger_RepairCallbacksAndLocking(t *testing.T) {
 
 	t.Run("ConcurrentRepairInvocationsSafelyLock", func(t *testing.T) {
 		fs := fstest.MapFS{
-			"migrations/R__view.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
+			"migrations/V1__view.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
 		}
 
 		db := mock.NewMockDatabase()
@@ -1039,7 +1061,7 @@ func TestChallenger_RepairCallbacksAndLocking(t *testing.T) {
 		m, _ := New(cfg, db)
 		_, _ = m.Migrate(ctx)
 
-		fs["migrations/R__view.sql"] = &fstest.MapFile{Data: []byte("SELECT 2;")}
+		fs["migrations/V1__view.sql"] = &fstest.MapFile{Data: []byte("SELECT 2;")}
 
 		var wg sync.WaitGroup
 		errs := make(chan error, 5)
