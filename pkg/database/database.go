@@ -45,7 +45,8 @@ type Database interface {
 	DropSchema(ctx context.Context, schema string) error
 
 	// CleanSchema drops all tables, views, routines in the schema without dropping the schema itself.
-	CleanSchema(ctx context.Context, schema string) error
+	// If excludeTables are specified, those tables are preserved and their migration records cleared.
+	CleanSchema(ctx context.Context, schema string, excludeTables ...string) error
 
 	// EnsureHistoryTable creates the schema history table if it doesn't exist.
 	EnsureHistoryTable(ctx context.Context, schema, table string) error

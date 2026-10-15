@@ -17,13 +17,18 @@ type CleanResult struct {
 
 // Clean drops all objects (tables, views, materialized views, routines) in the configured schemas.
 func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
+	return m.cleanInternal(ctx, "")
+}
+
+// cleanInternal cleans the schemas, optionally preserving a specified table (e.g. the schema history table to retain the active lock).
+func (m *Migrator) cleanInternal(ctx context.Context, preserveTable string) (*CleanResult, error) {
 	if m.config.CleanDisabled {
 		return nil, fmt.Errorf("clean failed: flyway.cleanDisabled is set to true. Set cleanDisabled=false in config or -cleanDisabled=false on CLI to enable clean")
 	}
 
+	defaultSchema := m.config.GetDefaultSchema()
 	schemas := m.config.Schemas
 	if len(schemas) == 0 {
-		defaultSchema := m.config.GetDefaultSchema()
 		if defaultSchema != "" {
 			schemas = []string{defaultSchema}
 		}
@@ -54,9 +59,15 @@ func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
 			continue
 		}
 
-		if err := m.db.CleanSchema(ctx, schema); err != nil {
+		var cleanErr error
+		if preserveTable != "" && schema == defaultSchema {
+			cleanErr = m.db.CleanSchema(ctx, schema, preserveTable)
+		} else {
+			cleanErr = m.db.CleanSchema(ctx, schema)
+		}
+		if cleanErr != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterCleanError")
-			return nil, fmt.Errorf("failed cleaning schema '%s': %w", schema, err)
+			return nil, fmt.Errorf("failed cleaning schema '%s': %w", schema, cleanErr)
 		}
 		result.SchemasCleaned = append(result.SchemasCleaned, schema)
 	}

@@ -240,7 +240,15 @@ func (db *SpannerDatabase) DropSchema(ctx context.Context, schema string) error 
 }
 
 // CleanSchema drops all user tables, views, and indexes in the database.
-func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string) error {
+// If excludeTables are provided, those tables are preserved and their migration records cleared.
+func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, excludeTables ...string) error {
+	excludeMap := make(map[string]bool)
+	for _, ext := range excludeTables {
+		if ext != "" {
+			excludeMap[ext] = true
+		}
+	}
+
 	var ddlStatements []string
 
 	// 1. Foreign key constraints
@@ -301,6 +309,7 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string) error
 	}
 	iter.Stop()
 
+	preservedTables := make(map[string]bool)
 	// 4. Base tables
 	tblSQL := `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = ''`
 	iter = db.client.Single().Query(ctx, spanner.NewStatement(tblSQL))
@@ -314,6 +323,10 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string) error
 		}
 		var tName string
 		if err := row.Column(0, &tName); err == nil {
+			if excludeMap[tName] {
+				preservedTables[tName] = true
+				continue
+			}
 			ddlStatements = append(ddlStatements, fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
 		}
 	}
@@ -331,6 +344,14 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string) error
 			return fmt.Errorf("failed executing schema clean DDL: %w", err)
 		}
 	}
+
+	for pt := range preservedTables {
+		delSQL := fmt.Sprintf("DELETE FROM %s WHERE `installed_rank` >= 0 OR `description` != 'flyway-lock'", db.Quote(pt))
+		if err := db.ExecuteStatement(ctx, delSQL); err != nil {
+			return fmt.Errorf("failed to clean preserved table %s: %w", pt, err)
+		}
+	}
+
 	return nil
 }
 

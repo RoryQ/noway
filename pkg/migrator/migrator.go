@@ -384,7 +384,10 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		}
 		if !valRes.Valid {
 			if m.config.CleanOnValidationError && !m.config.CleanDisabled {
-				_, _ = m.Clean(ctx)
+				if _, err := m.cleanInternal(ctx, table); err != nil {
+					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+					return nil, fmt.Errorf("cleanOnValidationError failed: %w", err)
+				}
 				applied = nil
 			} else {
 				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")

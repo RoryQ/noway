@@ -1155,6 +1155,135 @@ func TestChallenger_M5_CleanOnValidationError(t *testing.T) {
 			t.Errorf("expected checksum mismatch validation error, got: %v", err)
 		}
 	})
+
+	t.Run("CleanOnValidationError_PreservesLockAndBlocksConcurrentMigrators", func(t *testing.T) {
+		baseDB := mock.NewMockDatabase()
+		fs := fstest.MapFS{
+			"migrations/V1__init.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+		}
+
+		cfg := config.NewDefaultConfiguration()
+		cfg.DefaultSchema = "test_clean_lock"
+		cfg.FS = fs
+		cfg.Locations = []string{"migrations"}
+
+		m1, _ := New(cfg, baseDB)
+		_, err := m1.Migrate(ctx)
+		if err != nil {
+			t.Fatalf("initial migrate failed: %v", err)
+		}
+
+		// Ensure table t1 and history table exist
+		historyTableExists, _ := baseDB.HistoryTableExists(ctx, "test_clean_lock", "flyway_schema_history")
+		if !historyTableExists {
+			t.Fatalf("history table should exist")
+		}
+
+		// Tamper with local file to trigger checksum mismatch
+		fs["migrations/V1__init.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64, modified STRING);")}
+
+		// Set CleanOnValidationError = true, CleanDisabled = false
+		cfgClean := *cfg
+		cfgClean.CleanOnValidationError = true
+		cfgClean.CleanDisabled = false
+
+		var checkedCleanDuringMigrate bool
+		hookedDB := &cleanInspectorDB{
+			MockDatabase: baseDB,
+			onCleanSchema: func(schema string, excludeTables ...string) {
+				checkedCleanDuringMigrate = true
+				// 1. History table must be excluded from drop
+				if len(excludeTables) == 0 || excludeTables[0] != "flyway_schema_history" {
+					t.Errorf("expected flyway_schema_history in excludeTables, got %v", excludeTables)
+				}
+				// 2. Database must be actively locked
+				if !baseDB.IsLocked() {
+					t.Errorf("expected database to be locked during cleanOnValidationError")
+				}
+				// 3. A concurrent migrator MUST fail to acquire the lock
+				concurrentUnlock, err := baseDB.Lock(ctx, schema, "flyway_schema_history")
+				if err == nil {
+					_ = concurrentUnlock(ctx)
+					t.Errorf("expected concurrent migrator to be blocked by active lock during cleanOnValidationError")
+				}
+				// 4. Raw history MUST contain the lock row
+				raw := baseDB.RawHistory(schema, "flyway_schema_history")
+				var foundLock bool
+				for _, r := range raw {
+					if r.Description == "flyway-lock" {
+						foundLock = true
+						break
+					}
+				}
+				if !foundLock {
+					t.Errorf("expected lock row to exist in history table during cleanOnValidationError")
+				}
+			},
+		}
+
+		m2, err := New(&cfgClean, hookedDB)
+		if err != nil {
+			t.Fatalf("migrator init failed: %v", err)
+		}
+
+		migRes, err := m2.Migrate(ctx)
+		if err != nil {
+			t.Fatalf("Migrate failed: %v", err)
+		}
+		if !migRes.Success || migRes.MigrationsExecuted != 1 {
+			t.Errorf("expected 1 migration re-executed after cleanOnValidationError, got %d", migRes.MigrationsExecuted)
+		}
+		if !checkedCleanDuringMigrate {
+			t.Errorf("expected CleanSchema hook to be called during cleanOnValidationError")
+		}
+
+		// After Migrate completes, lock should be released
+		if baseDB.IsLocked() {
+			t.Errorf("expected lock to be released after migration finishes")
+		}
+
+		// Standalone Clean() drops the history table
+		cfgCleanStandalone := *cfg
+		cfgCleanStandalone.CleanDisabled = false
+		mClean, _ := New(&cfgCleanStandalone, baseDB)
+		_, err = mClean.Clean(ctx)
+		if err != nil {
+			t.Fatalf("standalone Clean failed: %v", err)
+		}
+		historyAfterClean, _ := baseDB.HistoryTableExists(ctx, "test_clean_lock", "flyway_schema_history")
+		if historyAfterClean {
+			t.Errorf("expected history table to be dropped by standalone Clean()")
+		}
+	})
+}
+
+type cleanInspectorDB struct {
+	*mock.MockDatabase
+	onCleanSchema func(schema string, excludeTables ...string)
+}
+
+func (c *cleanInspectorDB) Lock(ctx context.Context, schema, table string) (database.UnlockFunc, error) {
+	unlock, err := c.MockDatabase.Lock(ctx, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	_ = c.MockDatabase.InsertHistory(ctx, schema, table, database.HistoryRecord{
+		InstalledRank: -100,
+		Description:   "flyway-lock",
+		Type:          "SQL",
+		Success:       true,
+	})
+	return func(uCtx context.Context) error {
+		_ = c.MockDatabase.DeleteHistory(uCtx, schema, table, -100)
+		return unlock(uCtx)
+	}, nil
+}
+
+func (c *cleanInspectorDB) CleanSchema(ctx context.Context, schema string, excludeTables ...string) error {
+	if c.onCleanSchema != nil {
+		c.onCleanSchema(schema, excludeTables...)
+	}
+	return c.MockDatabase.CleanSchema(ctx, schema, excludeTables...)
 }
 
 // =================================================================================================

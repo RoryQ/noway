@@ -228,7 +228,15 @@ func (db *BigQueryDatabase) DropSchema(ctx context.Context, schema string) error
 }
 
 // CleanSchema drops all tables, views, and routines from the dataset.
-func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string) error {
+// If excludeTables are provided, those tables are preserved and their migration records cleared.
+func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string, excludeTables ...string) error {
+	excludeMap := make(map[string]bool)
+	for _, ext := range excludeTables {
+		if ext != "" {
+			excludeMap[ext] = true
+		}
+	}
+
 	// Drop views and materialized views before base tables to avoid dependency issues
 	types := []struct {
 		tableType string
@@ -242,6 +250,7 @@ func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string) erro
 		{"EXTERNAL", "EXTERNAL TABLE"},
 	}
 
+	preservedTables := make(map[string]bool)
 	for _, t := range types {
 		sql := fmt.Sprintf("SELECT table_name FROM %s.INFORMATION_SCHEMA.TABLES WHERE table_type = @table_type", db.Quote(schema))
 		q := db.client.Query(sql)
@@ -269,10 +278,22 @@ func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string) erro
 				return err
 			}
 
+			if excludeMap[row.TableName] {
+				preservedTables[row.TableName] = true
+				continue
+			}
+
 			dropStmt := fmt.Sprintf("DROP %s IF EXISTS %s", t.dropType, db.Quote(schema, row.TableName))
 			if err := db.ExecuteStatement(ctx, dropStmt); err != nil {
 				return fmt.Errorf("failed to drop %s %s: %w", t.dropType, row.TableName, err)
 			}
+		}
+	}
+
+	for pt := range preservedTables {
+		delSQL := fmt.Sprintf("DELETE FROM %s WHERE `installed_rank` >= 0 OR `description` != 'flyway-lock'", db.Quote(schema, pt))
+		if err := db.ExecuteStatement(ctx, delSQL); err != nil {
+			return fmt.Errorf("failed to clean preserved table %s: %w", pt, err)
 		}
 	}
 

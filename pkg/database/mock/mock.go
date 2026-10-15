@@ -115,15 +115,58 @@ func (m *MockDatabase) DropSchema(ctx context.Context, schema string) error {
 	defer m.mu.Unlock()
 	delete(m.schemas, schema)
 	delete(m.tables, schema)
-	delete(m.history, schema)
+	for k := range m.history {
+		if strings.HasPrefix(k, schema+".") {
+			delete(m.history, k)
+		}
+	}
 	return nil
 }
 
-func (m *MockDatabase) CleanSchema(ctx context.Context, schema string) error {
+func (m *MockDatabase) CleanSchema(ctx context.Context, schema string, excludeTables ...string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.tables[schema] = make(map[string]bool)
-	delete(m.history, schema)
+
+	excludeMap := make(map[string]bool)
+	for _, ext := range excludeTables {
+		if ext != "" {
+			excludeMap[ext] = true
+		}
+	}
+
+	if len(excludeMap) > 0 {
+		newTables := make(map[string]bool)
+		for t := range m.tables[schema] {
+			if excludeMap[t] {
+				newTables[t] = true
+			}
+		}
+		m.tables[schema] = newTables
+
+		for k, records := range m.history {
+			if strings.HasPrefix(k, schema+".") {
+				tablePart := strings.TrimPrefix(k, schema+".")
+				if excludeMap[tablePart] {
+					var preserved []resolver.AppliedMigration
+					for _, rec := range records {
+						if rec.InstalledRank < 0 && rec.Description == "flyway-lock" {
+							preserved = append(preserved, rec)
+						}
+					}
+					m.history[k] = preserved
+				} else {
+					delete(m.history, k)
+				}
+			}
+		}
+	} else {
+		m.tables[schema] = make(map[string]bool)
+		for k := range m.history {
+			if strings.HasPrefix(k, schema+".") {
+				delete(m.history, k)
+			}
+		}
+	}
 	return nil
 }
 
@@ -231,6 +274,24 @@ func (m *MockDatabase) Lock(ctx context.Context, schema, table string) (database
 		m.mu.Unlock()
 		return nil
 	}, nil
+}
+
+// IsLocked checks whether the database is currently locked.
+func (m *MockDatabase) IsLocked() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.isLocked
+}
+
+// RawHistory returns all raw records in the history table including internal lock rows.
+func (m *MockDatabase) RawHistory(schema, table string) []resolver.AppliedMigration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	key := schema + "." + table
+	records := m.history[key]
+	copied := make([]resolver.AppliedMigration, len(records))
+	copy(copied, records)
+	return copied
 }
 
 func (m *MockDatabase) ExecuteStatement(ctx context.Context, sql string) error {
