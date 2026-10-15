@@ -1188,3 +1188,69 @@ func TestInfoWithTargetNext(t *testing.T) {
 	}
 }
 
+func TestMigrateDoesNotCountFailedUndoneDeletedAsApplied(t *testing.T) {
+	ctx := context.Background()
+
+	fs := fstest.MapFS{
+		"migrations/V1__one.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+		"migrations/V2__two.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t2 (id INT64);")},
+		"migrations/V3__three.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t3 (id INT64);")},
+		"migrations/V4__four.sql":  &fstest.MapFile{Data: []byte("CREATE TABLE t4 (id INT64);")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+
+	// 1. Migrate V1 and V2
+	cfg.Target = "2"
+	m1, _ := New(cfg, db)
+	res1, err := m1.Migrate(ctx)
+	if err != nil || res1.MigrationsExecuted != 2 {
+		t.Fatalf("first migrate failed: %v, exec=%d", err, res1.MigrationsExecuted)
+	}
+
+	// 2. Induce failure on V3
+	cfg.Target = "latest"
+	db.SetFailOnExecute("FAIL_V3")
+	fs["migrations/V3__three.sql"] = &fstest.MapFile{Data: []byte("FAIL_V3;")}
+	m2, _ := New(cfg, db)
+	_, err = m2.Migrate(ctx)
+	if err == nil {
+		t.Fatalf("expected V3 to fail")
+	}
+
+	// Verify history has V3 in failed state
+	history, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+	if len(history) != 3 || history[2].Success != false {
+		t.Fatalf("expected 3 history records with V3 failed, got %+v", history)
+	}
+
+	// 3. Clear failure condition and fix V3 SQL
+	db.SetFailOnExecute("")
+	fs["migrations/V3__three.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE t3 (id INT64);")}
+
+	// With validateOnMigrate=false, Migrate must NOT skip V3 and apply V4!
+	// It must execute V3 first, because failed rows are NOT counted as applied.
+	cfg.ValidateOnMigrate = false
+	m3, _ := New(cfg, db)
+	res3, err := m3.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("migrate with validateOnMigrate=false failed: %v", err)
+	}
+
+	// V3 and V4 must both be executed (2 migrations), NOT just V4!
+	if res3.MigrationsExecuted != 2 {
+		t.Errorf("expected 2 migrations executed (V3 and V4), got %d", res3.MigrationsExecuted)
+	}
+	if len(res3.Migrations) != 2 {
+		t.Fatalf("expected 2 executed summaries, got %d", len(res3.Migrations))
+	}
+	if res3.Migrations[0].Version != "3" || res3.Migrations[1].Version != "4" {
+		t.Errorf("expected V3 then V4 executed, got: %s, %s", res3.Migrations[0].Version, res3.Migrations[1].Version)
+	}
+}
+
+

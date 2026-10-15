@@ -1014,11 +1014,14 @@ func TestTier1_F16_F17_F18_RepairOperations(t *testing.T) {
 
 		_, _ = nw.Repair(ctx)
 		history, _ := db.FetchHistory(ctx, "e2e_dataset", "flyway_schema_history")
-		if len(history) == 0 {
-			t.Fatalf("expected schema history record to remain")
+		if len(history) != 2 {
+			t.Fatalf("expected 2 schema history records (original SQL + inserted DELETE), got %d", len(history))
 		}
-		if history[0].Type != "DELETE" {
-			t.Errorf("expected history record type 'DELETE', got %q", history[0].Type)
+		if history[0].Type != "SQL" {
+			t.Errorf("expected original record type 'SQL', got %q", history[0].Type)
+		}
+		if history[1].Type != "DELETE" {
+			t.Errorf("expected separate history record type 'DELETE', got %q", history[1].Type)
 		}
 	})
 }

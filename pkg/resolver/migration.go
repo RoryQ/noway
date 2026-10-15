@@ -94,6 +94,8 @@ type AppliedMigration struct {
 	InstalledOn   time.Time
 	ExecutionTime int64
 	Success       bool
+	Deleted       bool
+	Undone        bool
 }
 
 // MigrationInfo provides comprehensive state information about a resolved or applied migration.

@@ -1019,12 +1019,21 @@ func TestChallenger_M5_CorruptedHistoryRecords(t *testing.T) {
 			t.Fatalf("initial migrate failed: %v", err)
 		}
 
-		// 1. Delete V1 from disk and run Repair -> V1 marked as DELETE
+		// 1. Delete V1 from disk and run Repair -> separate DELETE record inserted
 		delete(fs, "migrations/V1__one.sql")
 		mRep1, _ := New(cfg, db)
 		repRes1, err := mRep1.Repair(ctx)
 		if err != nil || len(repRes1.DeletedMigrations) != 1 {
 			t.Fatalf("expected V1 marked as DELETE, got %+v, err=%v", repRes1.DeletedMigrations, err)
+		}
+
+		// Verify separate DELETE record was inserted in history
+		historyAfterDel, _ := db.FetchHistory(ctx, "test_restore_v", "flyway_schema_history")
+		if len(historyAfterDel) != 3 {
+			t.Fatalf("expected 3 history records (2 SQL + 1 DELETE), got %d", len(historyAfterDel))
+		}
+		if historyAfterDel[2].Type != "DELETE" || historyAfterDel[2].Script != "V1__one.sql" {
+			t.Errorf("expected separate DELETE record for V1, got %+v", historyAfterDel[2])
 		}
 
 		valDeleted, err := mRep1.Validate(ctx)
@@ -1033,33 +1042,25 @@ func TestChallenger_M5_CorruptedHistoryRecords(t *testing.T) {
 		}
 
 		// 2. Restore V1 to disk with new content
-		fs["migrations/V1__one.sql"] = &fstest.MapFile{Data: []byte("SELECT 100;") }
+		fs["migrations/V1__one.sql"] = &fstest.MapFile{Data: []byte("SELECT 100;")}
 
-		// 3. Repair again -> aligns V1 and restores Type to SQL
-		mRep2, _ := New(cfg, db)
-		repRes2, err := mRep2.Repair(ctx)
-		if err != nil {
-			t.Fatalf("second Repair failed: %v", err)
-		}
-		if len(repRes2.AlignedChecksums) != 1 {
-			t.Errorf("expected 1 aligned checksum for restored V1, got %+v", repRes2.AlignedChecksums)
+		// 3. Migrate with OutOfOrder -> executes restored V1!
+		cfg.OutOfOrder = true
+		mMig, _ := New(cfg, db)
+		migRes, err := mMig.Migrate(ctx)
+		if err != nil || migRes.MigrationsExecuted != 1 {
+			t.Fatalf("expected Migrate to execute restored V1, got exec=%d, err=%v", migRes.MigrationsExecuted, err)
 		}
 
-		history, _ := db.FetchHistory(ctx, "test_restore_v", "flyway_schema_history")
-		var v1Type string
-		for _, h := range history {
-			if h.Script == "V1__one.sql" {
-				v1Type = h.Type
-			}
-		}
-		if v1Type != "SQL" {
-			t.Errorf("expected restored V1 Type to be 'SQL', got %q", v1Type)
+		historyFinal, _ := db.FetchHistory(ctx, "test_restore_v", "flyway_schema_history")
+		if len(historyFinal) != 4 || historyFinal[3].Type != "SQL" {
+			t.Errorf("expected new SQL record in history, got %+v", historyFinal)
 		}
 
 		// 4. Validate passes
-		valRestored, err := mRep2.Validate(ctx)
+		valRestored, err := mMig.Validate(ctx)
 		if err != nil || !valRestored.Valid {
-			t.Errorf("expected Validate to pass after restoring V1, got errors: %s", valRestored.Error())
+			t.Errorf("expected Validate to pass after restoring and migrating V1, got errors: %s", valRestored.Error())
 		}
 	})
 }

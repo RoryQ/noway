@@ -396,32 +396,14 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 		}
 	}
 
-	// Determine installed rank sequence and current highest version
-	nextInstalledRank := 1
-	var maxAppliedVersion *version.Version
-	var baselineVersion *version.Version
-	appliedByVersion := make(map[string]resolver.AppliedMigration)
-	appliedRepeatables := make(map[string]resolver.AppliedMigration) // script -> last applied
+	// Process applied history: failed, undone, and deleted migrations are NOT counted as applied
+	history := processAppliedHistory(applied)
 
-	for _, app := range applied {
-		if app.InstalledRank >= nextInstalledRank {
-			nextInstalledRank = app.InstalledRank + 1
-		}
-		if app.Type == "SCHEMA" {
-			continue
-		}
-		if app.Type == "BASELINE" && app.Version != nil {
-			baselineVersion = app.Version
-		}
-		if app.Version != nil && !app.Version.IsEmpty() {
-			appliedByVersion[app.Version.Normalized()] = app
-			if maxAppliedVersion == nil || app.Version.IsNewerThan(*maxAppliedVersion) {
-				maxAppliedVersion = app.Version
-			}
-		} else {
-			appliedRepeatables[app.Script] = app
-		}
-	}
+	nextInstalledRank := history.NextInstalledRank
+	maxAppliedVersion := history.MaxAppliedVersion
+	baselineVersion := history.BaselineVersion
+	appliedByVersion := history.AppliedVersioned
+	appliedRepeatables := history.AppliedRepeatables
 
 	if isDryRun && !historyExists && len(nonEmptySchemas) > 0 && m.config.BaselineOnMigrate {
 		bVerStr := m.config.BaselineVersion

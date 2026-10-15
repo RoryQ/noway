@@ -115,22 +115,10 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 		}
 	}
 
-	// Determine effective target version
-	var maxAppliedVersion *version.Version
-	var baselineVersion *version.Version
-	appliedByVersion := make(map[string]resolver.AppliedMigration)
-
-	for _, app := range applied {
-		if app.Type == "BASELINE" && app.Version != nil {
-			baselineVersion = app.Version
-		}
-		if app.Version != nil && !app.Version.IsEmpty() {
-			appliedByVersion[app.Version.Normalized()] = app
-			if maxAppliedVersion == nil || app.Version.IsNewerThan(*maxAppliedVersion) {
-				maxAppliedVersion = app.Version
-			}
-		}
-	}
+	history := processAppliedHistory(applied)
+	maxAppliedVersion := history.MaxAppliedVersion
+	baselineVersion := history.BaselineVersion
+	appliedByVersion := history.AppliedVersioned
 
 	effectiveTargetVersion := m.determineEffectiveTarget(
 		maxAppliedVersion,
@@ -262,21 +250,15 @@ func computeMigrationInfos(
 
 	appliedRepeatables := make(map[string][]resolver.AppliedMigration) // script -> applied runs
 
-	var maxAppliedVersion *version.Version
-	var baselineVersion *version.Version
+	history := processAppliedHistory(applied)
+	maxAppliedVersion := history.MaxAppliedVersion
+	baselineVersion := history.BaselineVersion
 
-	for _, app := range applied {
-		if app.Type == "SCHEMA" {
+	for _, app := range history.Records {
+		if app.Type == "SCHEMA" || app.Type == "DELETE" {
 			continue
 		}
-		if app.Type == "BASELINE" && app.Version != nil {
-			baselineVersion = app.Version
-		}
-		if app.Version != nil && !app.Version.IsEmpty() {
-			if maxAppliedVersion == nil || app.Version.IsNewerThan(*maxAppliedVersion) {
-				maxAppliedVersion = app.Version
-			}
-		} else {
+		if app.Version == nil || app.Version.IsEmpty() {
 			appliedRepeatables[app.Script] = append(appliedRepeatables[app.Script], app)
 		}
 	}
@@ -296,7 +278,7 @@ func computeMigrationInfos(
 	seenResolved := make(map[string]bool)
 	var prevMaxVer *version.Version
 
-	for _, app := range applied {
+	for _, app := range history.Records {
 		if app.Type == "SCHEMA" {
 			appCopy := app
 			instOn := app.InstalledOn
@@ -321,6 +303,10 @@ func computeMigrationInfos(
 			continue
 		}
 
+		if app.Type == "DELETE" {
+			continue
+		}
+
 		if app.Version == nil || app.Version.IsEmpty() {
 			continue
 		}
@@ -330,7 +316,11 @@ func computeMigrationInfos(
 		res, exists := resolvedByVersion[verKey]
 
 		state := resolver.StateSuccess
-		if !app.Success {
+		if app.Deleted {
+			state = resolver.StateDeleted
+		} else if app.Undone {
+			state = resolver.StateUndone
+		} else if !app.Success {
 			if !exists {
 				if maxResolvedVersion != nil && appVer.IsNewerThan(*maxResolvedVersion) {
 					state = resolver.StateFutureFailed
@@ -509,7 +499,9 @@ func computeMigrationInfos(
 			appCopy := run
 
 			state := resolver.StateMissingSuccess
-			if !run.Success {
+			if run.Deleted {
+				state = resolver.StateDeleted
+			} else if !run.Success {
 				state = resolver.StateMissingFailed
 			} else if i < len(runs)-1 {
 				state = resolver.StateSuperseded

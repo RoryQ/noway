@@ -201,28 +201,21 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 	}
 
 	// Extract metadata from history: maxAppliedVersion and baselineVersion
+	history := processAppliedHistory(applied)
+	maxAppliedVersion := history.MaxAppliedVersion
+	baselineVersion := history.BaselineVersion
+	appliedByVersion := history.AppliedVersioned
 	appliedVersions := make(map[string]bool)
-	appliedByVersion := make(map[string]resolver.AppliedMigration)
-	var maxAppliedVersion *version.Version
-	var baselineVersion *version.Version
-	for _, app := range applied {
-		if app.Type == "BASELINE" && app.Version != nil {
-			baselineVersion = app.Version
-		}
-		if app.Type != "DELETE" && app.Version != nil && !app.Version.IsEmpty() {
-			appliedVersions[app.Version.Normalized()] = true
-			appliedByVersion[app.Version.Normalized()] = app
-			if app.Success {
-				if maxAppliedVersion == nil || app.Version.IsNewerThan(*maxAppliedVersion) {
-					maxAppliedVersion = app.Version
-				}
-			}
-		}
+	for verKey := range appliedByVersion {
+		appliedVersions[verKey] = true
 	}
 
 	// Check each applied migration
-	for _, app := range applied {
+	for _, app := range history.Records {
 		if !app.Success {
+			if app.Deleted || app.Undone {
+				continue
+			}
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
 				Version:     app.Version,
@@ -233,8 +226,8 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			continue
 		}
 
-		// Feature 14: Ignore BASELINE, SCHEMA, and DELETE history records
-		if app.Type == "BASELINE" || app.Type == "SCHEMA" || app.Type == "DELETE" {
+		// Feature 14: Ignore BASELINE, SCHEMA, and DELETE history records, and records marked Deleted or Undone
+		if app.Type == "BASELINE" || app.Type == "SCHEMA" || app.Type == "DELETE" || app.Deleted || app.Undone {
 			continue
 		}
 

@@ -137,13 +137,16 @@ func TestRepairMarksMissingVersionedMigrationAsDeleted(t *testing.T) {
 		t.Errorf("expected DeletedMigrations to contain V1__init.sql, got %+v", repairRes.DeletedMigrations)
 	}
 
-	// 5. Verify record has type DELETE in history
+	// 5. Verify separate DELETE record in history
 	history, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-	if err != nil || len(history) != 1 {
-		t.Fatalf("expected 1 history record, got %d", len(history))
+	if err != nil || len(history) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(history))
 	}
-	if history[0].Type != "DELETE" {
-		t.Errorf("expected history record type 'DELETE', got %q", history[0].Type)
+	if history[0].Type != "SQL" {
+		t.Errorf("expected original history record type 'SQL', got %q", history[0].Type)
+	}
+	if history[1].Type != "DELETE" {
+		t.Errorf("expected separate history record type 'DELETE', got %q", history[1].Type)
 	}
 
 	// 6. After repair, Validate should succeed because DELETE records are ignored (F14)
@@ -197,13 +200,16 @@ func TestRepairMarksMissingRepeatableMigrationAsDeleted(t *testing.T) {
 		t.Errorf("expected DeletedMigrations to contain R__view.sql, got %+v", repairRes.DeletedMigrations)
 	}
 
-	// 4. Verify record in history has type DELETE
+	// 4. Verify separate DELETE record in history
 	history, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-	if err != nil || len(history) != 1 {
-		t.Fatalf("expected 1 history record, got %d", len(history))
+	if err != nil || len(history) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(history))
 	}
-	if history[0].Type != "DELETE" {
-		t.Errorf("expected history record type 'DELETE', got %q", history[0].Type)
+	if history[0].Type != "SQL" {
+		t.Errorf("expected original history record type 'SQL', got %q", history[0].Type)
+	}
+	if history[1].Type != "DELETE" {
+		t.Errorf("expected separate history record type 'DELETE', got %q", history[1].Type)
 	}
 
 	// 5. Validate after repair succeeds

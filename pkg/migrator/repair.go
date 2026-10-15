@@ -112,7 +112,32 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 		resolvedRepeatableByScript[res.Script] = res
 	}
 
-	for _, app := range applied {
+	user := m.config.InstalledBy
+	if user == "" {
+		currentUser, _ := m.db.GetCurrentUser(ctx)
+		if currentUser != "" {
+			user = currentUser
+		} else {
+			user = "flyway"
+		}
+	}
+
+	history := processAppliedHistory(applied)
+	nextRank := history.NextInstalledRank
+
+	deletedVersions := make(map[string]bool)
+	deletedRepeatableDescs := make(map[string]bool)
+	for _, rec := range history.Records {
+		if rec.Type == "DELETE" && rec.Success {
+			if rec.Version != nil && !rec.Version.IsEmpty() {
+				deletedVersions[rec.Version.Normalized()] = true
+			} else {
+				deletedRepeatableDescs[rec.Description] = true
+			}
+		}
+	}
+
+	for _, app := range history.Records {
 		// 1. Remove failed migration
 		if !app.Success {
 			if err := m.db.DeleteHistory(ctx, defaultSchema, table, app.InstalledRank); err != nil {
@@ -132,7 +157,7 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 			continue
 		}
 
-		if app.Type == "BASELINE" || app.Type == "SCHEMA" {
+		if app.Type == "BASELINE" || app.Type == "SCHEMA" || app.Type == "DELETE" || app.Deleted || app.Undone {
 			continue
 		}
 
@@ -175,25 +200,30 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 					})
 				}
 			} else {
-				// Feature 18: Missing versioned migration on disk -> Mark as DELETE
-				if app.Type != "DELETE" {
+				// Feature 18: Missing versioned migration on disk -> Insert separate DELETE record
+				if !deletedVersions[verKey] {
+					deletedVersions[verKey] = true
 					var verStr *string
 					if app.Version != nil {
 						s := app.Version.String()
 						verStr = &s
 					}
 					rec := database.HistoryRecord{
-						InstalledRank: app.InstalledRank,
+						InstalledRank: nextRank,
 						Version:       verStr,
 						Description:   app.Description,
 						Type:          "DELETE",
 						Script:        app.Script,
 						Checksum:      app.Checksum,
+						InstalledBy:   user,
+						ExecutionTime: 0,
+						Success:       true,
 					}
-					if err := m.db.UpdateHistory(ctx, defaultSchema, table, rec); err != nil {
+					if err := m.db.InsertHistory(ctx, defaultSchema, table, rec); err != nil {
 						_ = m.callbackRunner.Fire(ctx, "afterRepairError")
-						return nil, fmt.Errorf("failed to mark deleted migration %s: %w", app.Script, err)
+						return nil, fmt.Errorf("failed to insert delete record for migration %s: %w", app.Script, err)
 					}
+					nextRank++
 					result.DeletedMigrations = append(result.DeletedMigrations, app.Script)
 					vStr := ""
 					if app.Version != nil {
@@ -214,21 +244,8 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 			}
 			if found {
 				// Flyway parity: Do NOT align checksums for edited repeatable migrations!
-				// Repeatable migrations are executed on migrate when their checksum changes.
-				// Aligning the checksum during repair writes the new checksum into the history table first,
-				// which prevents migrate from running the edited repeatable migration.
-				//
-				// We only align if:
-				// 1. The repeatable was marked DELETE in history, but has been restored to disk.
-				// 2. The repeatable matches without being identical (checksum calculated without replacement matches database, but replacement checksum differs).
-				shouldAlign := false
-				if app.Type == "DELETE" {
-					shouldAlign = true
-				} else if res.ChecksumMatchesWithoutBeingIdentical(app.Checksum) {
-					shouldAlign = true
-				}
-
-				if shouldAlign {
+				// Only align if equivalent checksum matches (raw content matches, replaced differs)
+				if res.ChecksumMatchesWithoutBeingIdentical(app.Checksum) {
 					rec := database.HistoryRecord{
 						InstalledRank: app.InstalledRank,
 						Version:       nil,
@@ -249,20 +266,25 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 					})
 				}
 			} else {
-				// Feature 18: Missing repeatable migration on disk -> Mark as DELETE
-				if app.Type != "DELETE" {
+				// Feature 18: Missing repeatable migration on disk -> Insert separate DELETE record
+				if !deletedRepeatableDescs[app.Description] {
+					deletedRepeatableDescs[app.Description] = true
 					rec := database.HistoryRecord{
-						InstalledRank: app.InstalledRank,
+						InstalledRank: nextRank,
 						Version:       nil,
 						Description:   app.Description,
 						Type:          "DELETE",
 						Script:        app.Script,
 						Checksum:      app.Checksum,
+						InstalledBy:   user,
+						ExecutionTime: 0,
+						Success:       true,
 					}
-					if err := m.db.UpdateHistory(ctx, defaultSchema, table, rec); err != nil {
+					if err := m.db.InsertHistory(ctx, defaultSchema, table, rec); err != nil {
 						_ = m.callbackRunner.Fire(ctx, "afterRepairError")
-						return nil, fmt.Errorf("failed to mark deleted migration %s: %w", app.Script, err)
+						return nil, fmt.Errorf("failed to insert delete record for repeatable migration %s: %w", app.Script, err)
 					}
+					nextRank++
 					result.DeletedMigrations = append(result.DeletedMigrations, app.Script)
 					result.MigrationsDeleted = append(result.MigrationsDeleted, RepairOutput{
 						Version:     "",

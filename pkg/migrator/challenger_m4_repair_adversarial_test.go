@@ -307,16 +307,19 @@ func TestChallenger_RepairMissingVersionedMigration_MarkedDeleteAndValidatePasse
 			t.Fatalf("expected DeletedMigrations to have V1__init.sql, got %+v", repairRes.DeletedMigrations)
 		}
 
-		// Verify record has Type == "DELETE"
+		// Verify separate DELETE record in history
 		history, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-		if err != nil || len(history) != 1 {
-			t.Fatalf("FetchHistory failed, len=%d", len(history))
+		if err != nil || len(history) != 2 {
+			t.Fatalf("expected 2 history records (original SQL + inserted DELETE), len=%d", len(history))
 		}
-		if history[0].Type != "DELETE" {
-			t.Errorf("expected record type 'DELETE', got %q", history[0].Type)
+		if history[0].Type != "SQL" {
+			t.Errorf("expected original record type 'SQL', got %q", history[0].Type)
 		}
-		if history[0].Version == nil || history[0].Version.String() != "1" {
-			t.Errorf("expected version 1 preserved, got %v", history[0].Version)
+		if history[1].Type != "DELETE" {
+			t.Errorf("expected separate record type 'DELETE', got %q", history[1].Type)
+		}
+		if history[1].Version == nil || history[1].Version.String() != "1" {
+			t.Errorf("expected version 1 preserved in delete record, got %v", history[1].Version)
 		}
 
 		// After Repair: Validate MUST pass
@@ -373,6 +376,10 @@ func TestChallenger_RepairMissingVersionedMigration_MarkedDeleteAndValidatePasse
 		}
 
 		history, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+		if len(history) != 4 {
+			t.Fatalf("expected 4 history records (3 original SQL + 1 inserted DELETE), got %d", len(history))
+		}
+		var v2DeleteFound bool
 		for _, h := range history {
 			switch h.Script {
 			case "V1__first.sql":
@@ -380,14 +387,17 @@ func TestChallenger_RepairMissingVersionedMigration_MarkedDeleteAndValidatePasse
 					t.Errorf("expected V1 Type to remain 'SQL', got %q", h.Type)
 				}
 			case "V2__middle.sql":
-				if h.Type != "DELETE" {
-					t.Errorf("expected V2 Type to be 'DELETE', got %q", h.Type)
+				if h.Type == "DELETE" {
+					v2DeleteFound = true
 				}
 			case "V3__latest.sql":
 				if h.Type != "SQL" {
 					t.Errorf("expected V3 Type to remain 'SQL', got %q", h.Type)
 				}
 			}
+		}
+		if !v2DeleteFound {
+			t.Errorf("expected to find V2 DELETE record in history")
 		}
 
 		// Validate passes
@@ -486,13 +496,16 @@ func TestChallenger_RepairMissingRepeatableMigration_MarkedDeleteAndValidatePass
 			t.Fatalf("expected R__view.sql in DeletedMigrations, got %+v", repairRes.DeletedMigrations)
 		}
 
-		// Verify record has Type == "DELETE"
+		// Verify separate DELETE record in history
 		history, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-		if err != nil || len(history) != 1 {
+		if err != nil || len(history) != 2 {
 			t.Fatalf("FetchHistory failed, len=%d", len(history))
 		}
-		if history[0].Type != "DELETE" {
-			t.Errorf("expected record type 'DELETE', got %q", history[0].Type)
+		if history[0].Type != "SQL" {
+			t.Errorf("expected original record type 'SQL', got %q", history[0].Type)
+		}
+		if history[1].Type != "DELETE" {
+			t.Errorf("expected separate record type 'DELETE', got %q", history[1].Type)
 		}
 
 		// After Repair: Validate MUST pass
@@ -540,13 +553,20 @@ func TestChallenger_RepairMissingRepeatableMigration_MarkedDeleteAndValidatePass
 		}
 
 		history, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+		if len(history) != 3 {
+			t.Fatalf("expected 3 history records (2 original SQL + 1 inserted DELETE), got %d", len(history))
+		}
+		var r1DeleteFound bool
 		for _, h := range history {
-			if h.Script == "R__view1.sql" && h.Type != "DELETE" {
-				t.Errorf("expected R__view1 to be DELETE, got %q", h.Type)
+			if h.Script == "R__view1.sql" && h.Type == "DELETE" {
+				r1DeleteFound = true
 			}
 			if h.Script == "R__view2.sql" && h.Type == "DELETE" {
 				t.Errorf("expected R__view2 NOT to be DELETE")
 			}
+		}
+		if !r1DeleteFound {
+			t.Errorf("expected R__view1 to have a separate DELETE record in history")
 		}
 
 		valAfter, err := m.Validate(ctx)
@@ -898,6 +918,7 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 	}
 
 	origR2Cs, _ := checksum.CalculateString("CREATE VIEW r2 AS SELECT 2;")
+	var v2DeleteFound, r3DeleteFound bool
 	for _, h := range historyAfter {
 		switch h.Script {
 		case "V1__base.sql":
@@ -905,8 +926,10 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 				t.Errorf("V1 in unexpected state: type=%s, success=%v", h.Type, h.Success)
 			}
 		case "V2__delete.sql":
-			if h.Type != "DELETE" {
-				t.Errorf("V2 expected type 'DELETE', got %q", h.Type)
+			if h.Type == "DELETE" {
+				v2DeleteFound = true
+			} else if h.Type != "SQL" {
+				t.Errorf("V2 expected type 'SQL' or 'DELETE', got %q", h.Type)
 			}
 		case "V3__failing.sql":
 			t.Errorf("V3 should have been deleted from history, but still present!")
@@ -919,12 +942,20 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 				t.Errorf("R2 checksum should not be aligned by repair: got %d, want %d", *h.Checksum, origR2Cs)
 			}
 		case "R__r3_del.sql":
-			if h.Type != "DELETE" {
-				t.Errorf("R3 expected type 'DELETE', got %q", h.Type)
+			if h.Type == "DELETE" {
+				r3DeleteFound = true
+			} else if h.Type != "SQL" {
+				t.Errorf("R3 expected type 'SQL' or 'DELETE', got %q", h.Type)
 			}
 		default:
 			t.Errorf("unexpected history record: %s", h.Script)
 		}
+	}
+	if !v2DeleteFound {
+		t.Errorf("expected V2 DELETE record in history")
+	}
+	if !r3DeleteFound {
+		t.Errorf("expected R3 DELETE record in history")
 	}
 
 	// 7. Fix V3 on disk with valid SQL and clear trigger
@@ -1252,43 +1283,34 @@ func TestChallenger_RepairRestoredRepeatableMigrationReactivates(t *testing.T) {
 	m, _ := New(cfg, db)
 	_, _ = m.Migrate(ctx)
 
-	// 1. Delete from disk and Repair -> marked DELETE
+	// 1. Delete from disk and Repair -> inserts separate DELETE record
 	delete(fs, "migrations/R__view.sql")
 	_, _ = m.Repair(ctx)
 
 	history, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-	if len(history) != 1 || history[0].Type != "DELETE" {
-		t.Fatalf("expected record to be marked DELETE, got: %+v", history)
+	if len(history) != 2 || history[1].Type != "DELETE" {
+		t.Fatalf("expected separate record to be marked DELETE, got: %+v", history)
 	}
 
 	// 2. Restore file on disk (same description)
 	fs["migrations/R__view.sql"] = &fstest.MapFile{Data: []byte("CREATE VIEW v AS SELECT 1;")}
 
-	// 3. Repair again -> restores Type to SQL
+	// 3. Migrate re-executes the restored repeatable migration!
 	m2, _ := New(cfg, db)
-	repRes, err := m2.Repair(ctx)
-	if err != nil {
-		t.Fatalf("Repair failed: %v", err)
-	}
-	if len(repRes.AlignedChecksums) != 1 {
-		t.Errorf("expected 1 aligned checksum for restored repeatable, got %+v", repRes.AlignedChecksums)
+	migRes, err := m2.Migrate(ctx)
+	if err != nil || migRes.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 executed migration for restored repeatable, got %d, err=%v", migRes.MigrationsExecuted, err)
 	}
 
 	historyAfter, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-	if len(historyAfter) != 1 || historyAfter[0].Type != "SQL" {
-		t.Errorf("expected record restored to SQL, got %q", historyAfter[0].Type)
+	if len(historyAfter) != 3 || historyAfter[2].Type != "SQL" {
+		t.Errorf("expected new record executed as SQL, got %+v", historyAfter)
 	}
 
 	// 4. Validate passes
 	valRes, err := m2.Validate(ctx)
 	if err != nil || !valRes.Valid {
 		t.Errorf("expected Validate to pass, valid=%v, err=%v", valRes.Valid, err)
-	}
-
-	// 5. Migrate executes 0 migrations (checksum matches)
-	migRes, err := m2.Migrate(ctx)
-	if err != nil || migRes.MigrationsExecuted != 0 {
-		t.Errorf("expected 0 executed migrations, got %d, err=%v", migRes.MigrationsExecuted, err)
 	}
 }
 

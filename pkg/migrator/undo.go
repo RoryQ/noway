@@ -68,12 +68,14 @@ func (m *Migrator) Undo(ctx context.Context) (*UndoResult, error) {
 		return nil, fmt.Errorf("failed fetching schema history: %w", err)
 	}
 
+	history := processAppliedHistory(applied)
+
 	// Find the latest applied versioned migration
 	var latestApplied *resolver.AppliedMigration
-	for i := len(applied) - 1; i >= 0; i-- {
-		app := applied[i]
-		if app.Version != nil && !app.Version.IsEmpty() && app.Success && app.Type == "SQL" {
-			latestApplied = &applied[i]
+	for i := len(history.Records) - 1; i >= 0; i-- {
+		app := history.Records[i]
+		if app.Version != nil && !app.Version.IsEmpty() && app.Success && app.Type == "SQL" && !app.Deleted && !app.Undone {
+			latestApplied = &history.Records[i]
 			break
 		}
 	}
