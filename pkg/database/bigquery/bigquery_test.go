@@ -3,9 +3,11 @@ package bigquery
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"cloud.google.com/go/bigquery"
 	"google.golang.org/api/googleapi"
@@ -302,6 +304,115 @@ func TestPollJobStatus(t *testing.T) {
 		})
 		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected context timeout/cancellation, got %v", err)
+		}
+	})
+}
+
+func TestSubmitAndPollJob(t *testing.T) {
+	db := &BigQueryDatabase{
+		retryInitialBackoff: 1 * time.Millisecond,
+		retryMaxBackoff:     5 * time.Millisecond,
+	}
+
+	t.Run("StatusPollingErrorDoesNotResubmitJob", func(t *testing.T) {
+		submitCount := 0
+		submitJob := func(ctx context.Context) (*bigquery.Job, error) {
+			submitCount++
+			return &bigquery.Job{}, nil
+		}
+
+		pollCount := 0
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			pollCount++
+			return nil, errors.New("rateLimitExceeded: status query error")
+		}
+
+		_, err := submitAndPollJob(context.Background(), db.retry, submitJob, waitForJob)
+		if err == nil {
+			t.Fatalf("expected error from waitForJob, got nil")
+		}
+		if submitCount != 1 {
+			t.Errorf("job was submitted %d times; expected exactly 1 submission", submitCount)
+		}
+		if pollCount != 1 {
+			t.Errorf("poll was called %d times; expected 1", pollCount)
+		}
+	})
+
+	t.Run("JobExecutionFailureDoesNotResubmitJob", func(t *testing.T) {
+		submitCount := 0
+		submitJob := func(ctx context.Context) (*bigquery.Job, error) {
+			submitCount++
+			return &bigquery.Job{}, nil
+		}
+
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			s := &bigquery.JobStatus{State: bigquery.Done}
+			val := reflect.ValueOf(s).Elem().FieldByName("err")
+			reflect.NewAt(val.Type(), unsafe.Pointer(val.UnsafeAddr())).Elem().Set(reflect.ValueOf(errors.New("job internal failure")))
+			return s, nil
+		}
+
+		_, err := submitAndPollJob(context.Background(), db.retry, submitJob, waitForJob)
+		if err == nil || !strings.Contains(err.Error(), "query execution failed") {
+			t.Fatalf("expected query execution failed error, got %v", err)
+		}
+		if submitCount != 1 {
+			t.Errorf("job was submitted %d times; expected exactly 1 submission", submitCount)
+		}
+	})
+
+	t.Run("SubmissionRetriedOnTransientSubmissionFailure", func(t *testing.T) {
+		submitCount := 0
+		submitJob := func(ctx context.Context) (*bigquery.Job, error) {
+			submitCount++
+			if submitCount < 3 {
+				return nil, errors.New("backendError: submission failed")
+			}
+			return &bigquery.Job{}, nil
+		}
+
+		pollCount := 0
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			pollCount++
+			return &bigquery.JobStatus{State: bigquery.Done}, nil
+		}
+
+		status, err := submitAndPollJob(context.Background(), db.retry, submitJob, waitForJob)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if !status.Done() {
+			t.Errorf("expected status.Done() to be true")
+		}
+		if submitCount != 3 {
+			t.Errorf("expected 3 submissions, got %d", submitCount)
+		}
+		if pollCount != 1 {
+			t.Errorf("expected 1 poll, got %d", pollCount)
+		}
+	})
+
+	t.Run("SuccessSingleAttempt", func(t *testing.T) {
+		submitCount := 0
+		submitJob := func(ctx context.Context) (*bigquery.Job, error) {
+			submitCount++
+			return &bigquery.Job{}, nil
+		}
+
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			return &bigquery.JobStatus{State: bigquery.Done}, nil
+		}
+
+		status, err := submitAndPollJob(context.Background(), db.retry, submitJob, waitForJob)
+		if err != nil {
+			t.Fatalf("expected nil error, got %v", err)
+		}
+		if !status.Done() {
+			t.Errorf("expected status.Done() to be true")
+		}
+		if submitCount != 1 {
+			t.Errorf("expected 1 submission, got %d", submitCount)
 		}
 	})
 }

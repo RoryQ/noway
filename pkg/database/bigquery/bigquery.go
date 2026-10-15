@@ -523,34 +523,20 @@ func (db *BigQueryDatabase) InsertHistory(ctx context.Context, schema, table str
 		csNull.Valid = true
 	}
 
-	return db.retry(ctx, func() error {
-		q := db.client.Query(sql)
-		q.Parameters = []bigquery.QueryParameter{
-			{Name: "installed_rank", Value: int64(rec.InstalledRank)},
-			{Name: "version", Value: verNull},
-			{Name: "description", Value: rec.Description},
-			{Name: "type", Value: rec.Type},
-			{Name: "script", Value: rec.Script},
-			{Name: "checksum", Value: csNull},
-			{Name: "installed_by", Value: rec.InstalledBy},
-			{Name: "execution_time", Value: rec.ExecutionTime},
-			{Name: "success", Value: rec.Success},
-		}
+	q := db.client.Query(sql)
+	q.Parameters = []bigquery.QueryParameter{
+		{Name: "installed_rank", Value: int64(rec.InstalledRank)},
+		{Name: "version", Value: verNull},
+		{Name: "description", Value: rec.Description},
+		{Name: "type", Value: rec.Type},
+		{Name: "script", Value: rec.Script},
+		{Name: "checksum", Value: csNull},
+		{Name: "installed_by", Value: rec.InstalledBy},
+		{Name: "execution_time", Value: rec.ExecutionTime},
+		{Name: "success", Value: rec.Success},
+	}
 
-		job, err := q.Run(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to insert history record: %w", err)
-		}
-
-		status, err := db.waitForJob(ctx, job)
-		if err != nil {
-			return fmt.Errorf("failed waiting for history insert job: %w", err)
-		}
-		if err := status.Err(); err != nil {
-			return fmt.Errorf("history insert failed: %w", err)
-		}
-		return nil
-	})
+	return db.executeQuery(ctx, q)
 }
 
 // UpdateHistory updates an existing migration record.
@@ -567,55 +553,27 @@ func (db *BigQueryDatabase) UpdateHistory(ctx context.Context, schema, table str
 		csNull.Valid = true
 	}
 
-	return db.retry(ctx, func() error {
-		q := db.client.Query(sql)
-		q.Parameters = []bigquery.QueryParameter{
-			{Name: "checksum", Value: csNull},
-			{Name: "description", Value: rec.Description},
-			{Name: "type", Value: rec.Type},
-			{Name: "installed_rank", Value: int64(rec.InstalledRank)},
-		}
+	q := db.client.Query(sql)
+	q.Parameters = []bigquery.QueryParameter{
+		{Name: "checksum", Value: csNull},
+		{Name: "description", Value: rec.Description},
+		{Name: "type", Value: rec.Type},
+		{Name: "installed_rank", Value: int64(rec.InstalledRank)},
+	}
 
-		job, err := q.Run(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to update history record: %w", err)
-		}
-
-		status, err := db.waitForJob(ctx, job)
-		if err != nil {
-			return fmt.Errorf("failed waiting for history update job: %w", err)
-		}
-		if err := status.Err(); err != nil {
-			return fmt.Errorf("history update failed: %w", err)
-		}
-		return nil
-	})
+	return db.executeQuery(ctx, q)
 }
 
 // DeleteHistory deletes a migration record.
 func (db *BigQueryDatabase) DeleteHistory(ctx context.Context, schema, table string, installedRank int) error {
 	sql := fmt.Sprintf("DELETE FROM %s WHERE `installed_rank` = @installed_rank", db.Quote(schema, table))
 
-	return db.retry(ctx, func() error {
-		q := db.client.Query(sql)
-		q.Parameters = []bigquery.QueryParameter{
-			{Name: "installed_rank", Value: int64(installedRank)},
-		}
+	q := db.client.Query(sql)
+	q.Parameters = []bigquery.QueryParameter{
+		{Name: "installed_rank", Value: int64(installedRank)},
+	}
 
-		job, err := q.Run(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to delete history record: %w", err)
-		}
-
-		status, err := db.waitForJob(ctx, job)
-		if err != nil {
-			return fmt.Errorf("failed waiting for history delete job: %w", err)
-		}
-		if err := status.Err(); err != nil {
-			return fmt.Errorf("history delete failed: %w", err)
-		}
-		return nil
-	})
+	return db.executeQuery(ctx, q)
 }
 
 // Lock acquires a Flyway-compatible row lock in the history table.
@@ -774,27 +732,70 @@ func (db *BigQueryDatabase) ExecuteStatement(ctx context.Context, sql string) er
 		return nil
 	}
 
-	err := db.retry(ctx, func() error {
-		q := db.client.Query(trimmed)
-		job, err := q.Run(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to run query: %w", err)
-		}
-
-		status, err := db.waitForJob(ctx, job)
-		if err != nil {
-			return fmt.Errorf("query execution wait failed: %w", err)
-		}
-		if err := status.Err(); err != nil {
-			return fmt.Errorf("query execution failed: %w", err)
-		}
-		return nil
-	})
-
-	if err != nil {
+	q := db.client.Query(trimmed)
+	if err := db.executeQuery(ctx, q); err != nil {
 		return fmt.Errorf("%w\nSQL: %s", err, trimmed)
 	}
 	return nil
+}
+
+// executeQuery submits a query job with retry on submission failures, and then waits for the submitted job
+// to complete outside of the submission retry loop. This ensures a job is never submitted twice if status
+// polling fails or encounters a transient error.
+func (db *BigQueryDatabase) executeQuery(ctx context.Context, q *bigquery.Query) error {
+	if q.JobIDConfig.JobID == "" {
+		q.JobIDConfig.JobID = "noway-" + uuid.New().String()
+	}
+
+	_, err := submitAndPollJob(
+		ctx,
+		db.retry,
+		func(submitCtx context.Context) (*bigquery.Job, error) {
+			job, err := q.Run(submitCtx)
+			if err != nil {
+				errLower := strings.ToLower(err.Error())
+				if strings.Contains(errLower, "already exists") || strings.Contains(errLower, "duplicate") || strings.Contains(err.Error(), "409") {
+					if db.client != nil {
+						if existingJob, getErr := db.client.JobFromProject(submitCtx, db.projectID, q.JobIDConfig.JobID, db.location); getErr == nil {
+							return existingJob, nil
+						}
+					}
+				}
+				return nil, err
+			}
+			return job, nil
+		},
+		db.waitForJob,
+	)
+	return err
+}
+
+// submitAndPollJob separates job submission (which may be retried on transient submission failures)
+// from job status polling (which must never cause the job to be resubmitted).
+func submitAndPollJob(
+	ctx context.Context,
+	retryOp func(context.Context, func() error) error,
+	submitJob func(context.Context) (*bigquery.Job, error),
+	waitForJob func(context.Context, *bigquery.Job) (*bigquery.JobStatus, error),
+) (*bigquery.JobStatus, error) {
+	var job *bigquery.Job
+	err := retryOp(ctx, func() error {
+		var submitErr error
+		job, submitErr = submitJob(ctx)
+		return submitErr
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to run query: %w", err)
+	}
+
+	status, err := waitForJob(ctx, job)
+	if err != nil {
+		return nil, fmt.Errorf("query execution wait failed: %w", err)
+	}
+	if err := status.Err(); err != nil {
+		return nil, fmt.Errorf("query execution failed: %w", err)
+	}
+	return status, nil
 }
 
 // waitForJob polls job.Status until completion, with backoff and retry on transient status errors.
