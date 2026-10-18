@@ -67,7 +67,7 @@ func processAppliedHistory(records []resolver.AppliedMigration) ProcessedHistory
 			} else {
 				for j := i - 1; j >= 0; j-- {
 					prev := &result.Records[j]
-					if prev.Type != "DELETE" && prev.Type != "SCHEMA" && (prev.Version == nil || prev.Version.IsEmpty()) && (prev.Description == rec.Description || prev.Script == rec.Script) {
+					if prev.Type != "DELETE" && prev.Type != "SCHEMA" && (prev.Version == nil || prev.Version.IsEmpty()) && prev.Description == rec.Description {
 						prev.Deleted = true
 					}
 				}
@@ -113,7 +113,11 @@ func processAppliedHistory(records []resolver.AppliedMigration) ProcessedHistory
 				result.MaxAppliedVersion = rec.Version
 			}
 		} else {
-			result.AppliedRepeatables[rec.Script] = rec
+			key := rec.Description
+			if key == "" {
+				key = rec.Script
+			}
+			result.AppliedRepeatables[key] = rec
 		}
 	}
 

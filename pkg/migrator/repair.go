@@ -108,10 +108,8 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 		}
 	}
 	resolvedRepeatableByDesc := make(map[string]resolver.ResolvedMigration)
-	resolvedRepeatableByScript := make(map[string]resolver.ResolvedMigration)
 	for _, res := range resolved.RepeatableMigrations {
 		resolvedRepeatableByDesc[res.Description] = res
-		resolvedRepeatableByScript[res.Script] = res
 	}
 
 	user := m.config.InstalledBy
@@ -127,17 +125,11 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 	history := processAppliedHistory(applied)
 	nextRank := history.NextInstalledRank
 
+	// Track versions/descriptions deleted during this repair run so multiple active runs
+	// of the same migration only produce one new DELETE row. Prior DELETE rows have already
+	// marked earlier runs with app.Deleted = true via processAppliedHistory.
 	deletedVersions := make(map[string]bool)
 	deletedRepeatableDescs := make(map[string]bool)
-	for _, rec := range history.Records {
-		if rec.Type == "DELETE" && rec.Success {
-			if rec.Version != nil && !rec.Version.IsEmpty() {
-				deletedVersions[rec.Version.Normalized()] = true
-			} else {
-				deletedRepeatableDescs[rec.Description] = true
-			}
-		}
-	}
 
 	for _, app := range history.Records {
 		// 1. Remove failed migration
@@ -241,9 +233,6 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 		} else {
 			// Repeatable migration alignment
 			res, found := resolvedRepeatableByDesc[app.Description]
-			if !found {
-				res, found = resolvedRepeatableByScript[app.Script]
-			}
 			if found {
 				// Flyway parity: Do NOT align checksums for edited repeatable migrations!
 				// Only align if equivalent checksum matches (raw content matches, replaced differs)

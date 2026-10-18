@@ -1232,25 +1232,61 @@ func TestMigrateDoesNotCountFailedUndoneDeletedAsApplied(t *testing.T) {
 	db.SetFailOnExecute("")
 	fs["migrations/V3__three.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE t3 (id INT64);")}
 
-	// With validateOnMigrate=false, Migrate must NOT skip V3 and apply V4!
-	// It must execute V3 first, because failed rows are NOT counted as applied.
+	// With validateOnMigrate=false, Flyway MUST refuse to migrate while a failed migration
+	// exists in history (it must neither skip V3 to apply V4 nor re-run V3 before repair).
 	cfg.ValidateOnMigrate = false
 	m3, _ := New(cfg, db)
-	res3, err := m3.Migrate(ctx)
-	if err != nil {
-		t.Fatalf("migrate with validateOnMigrate=false failed: %v", err)
+	_, err = m3.Migrate(ctx)
+	if err == nil || !strings.Contains(err.Error(), "failed migration") {
+		t.Fatalf("expected migrate with validateOnMigrate=false to refuse failed V3, got: %v", err)
 	}
 
-	// V3 and V4 must both be executed (2 migrations), NOT just V4!
+	// Verify neither V3 nor V4 was executed
+	historyAfterRefusal, _ := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+	if len(historyAfterRefusal) != 3 {
+		t.Fatalf("expected history to remain unchanged at 3 records after refusal, got %d", len(historyAfterRefusal))
+	}
+
+	// 4. After Repair removes the failed V3, Migrate executes V3 and V4
+	if _, err := m3.Repair(ctx); err != nil {
+		t.Fatalf("Repair failed: %v", err)
+	}
+	res3, err := m3.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("migrate after repair failed: %v", err)
+	}
 	if res3.MigrationsExecuted != 2 {
 		t.Errorf("expected 2 migrations executed (V3 and V4), got %d", res3.MigrationsExecuted)
 	}
-	if len(res3.Migrations) != 2 {
-		t.Fatalf("expected 2 executed summaries, got %d", len(res3.Migrations))
+	if len(res3.Migrations) != 2 || res3.Migrations[0].Version != "3" || res3.Migrations[1].Version != "4" {
+		t.Errorf("expected V3 then V4 executed, got: %+v", res3.Migrations)
 	}
-	if res3.Migrations[0].Version != "3" || res3.Migrations[1].Version != "4" {
-		t.Errorf("expected V3 then V4 executed, got: %s, %s", res3.Migrations[0].Version, res3.Migrations[1].Version)
+
+	// 5. Verify UNDO_SQL and DELETE audit rows are not counted as applied
+	v4Str := "4"
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 5,
+		Version:       &v4Str,
+		Description:   "undo four",
+		Type:          "UNDO_SQL",
+		Script:        "U4__four.sql",
+		Success:       true,
+	})
+	v3Str := "3"
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 6,
+		Version:       &v3Str,
+		Description:   "three",
+		Type:          "DELETE",
+		Script:        "V3__three.sql",
+		Success:       true,
+	})
+
+	res4, err := m3.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("migrate after UNDO_SQL/DELETE rows failed: %v", err)
+	}
+	if res4.MigrationsExecuted != 2 {
+		t.Fatalf("expected 2 migrations re-executed (deleted V3 and undone V4), got %d", res4.MigrationsExecuted)
 	}
 }
-
-

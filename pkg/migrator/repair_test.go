@@ -264,3 +264,127 @@ func TestRepairRemovesFailedMigrationRecord(t *testing.T) {
 		t.Errorf("expected 0 history records after removing failed migration, got %d", len(history))
 	}
 }
+
+func TestRepairInsertsNewDeleteRowAfterRestoreAndSecondRemoval(t *testing.T) {
+	ctx := context.Background()
+
+	fs := fstest.MapFS{
+		"migrations/V1__one.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+		"migrations/V2__two.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t2 (id INT64);")},
+		"migrations/V3__three.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t3 (id INT64);")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	// 1. Apply V1, V2, V3
+	if _, err := m.Migrate(ctx); err != nil {
+		t.Fatalf("initial Migrate failed: %v", err)
+	}
+
+	// 2. Delete V3 from disk and run Repair (first DELETE row inserted)
+	delete(fs, "migrations/V3__three.sql")
+	repairRes1, err := m.Repair(ctx)
+	if err != nil {
+		t.Fatalf("first Repair failed: %v", err)
+	}
+	if len(repairRes1.MigrationsDeleted) != 1 || repairRes1.MigrationsDeleted[0].Version != "3" {
+		t.Fatalf("expected first Repair to mark V3 deleted, got %+v", repairRes1.MigrationsDeleted)
+	}
+
+	// 3. Restore V3 on disk and run Migrate (V3 applied a second time)
+	fs["migrations/V3__three.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE t3 (id INT64);")}
+	migRes2, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate after restoring V3 failed: %v", err)
+	}
+	if migRes2.MigrationsExecuted != 1 {
+		t.Fatalf("expected restored V3 to be applied again, got %d", migRes2.MigrationsExecuted)
+	}
+
+	// 4. Remove V3 from disk a second time and run Repair
+	delete(fs, "migrations/V3__three.sql")
+	repairRes2, err := m.Repair(ctx)
+	if err != nil {
+		t.Fatalf("second Repair failed: %v", err)
+	}
+	if len(repairRes2.MigrationsDeleted) != 1 || repairRes2.MigrationsDeleted[0].Version != "3" {
+		t.Fatalf("expected second Repair to insert a new DELETE row for V3, got %+v", repairRes2.MigrationsDeleted)
+	}
+
+	// 5. Validate must succeed (must NOT report V3 as missing)
+	valRes, err := m.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate after second Repair failed: %v", err)
+	}
+	if !valRes.Valid {
+		t.Fatalf("expected Validate to pass after second Repair, got errors: %s", valRes.Error())
+	}
+}
+
+func TestRepeatableDeleteRowMatchesByDescriptionOnly(t *testing.T) {
+	ctx := context.Background()
+
+	db := mock.NewMockDatabase()
+	_ = db.EnsureSchema(ctx, "test_ds")
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+
+	csActive, _ := checksum.CalculateString("CREATE VIEW active_view AS SELECT 1;")
+	csOld, _ := checksum.CalculateString("CREATE VIEW old_view AS SELECT 1;")
+
+	// Rank 1: Repeatable migration with description "active_view" and script "R__view.sql"
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       nil,
+		Description:   "active_view",
+		Type:          "SQL",
+		Script:        "R__view.sql",
+		Checksum:      &csActive,
+		Success:       true,
+	})
+	// Rank 2: Another repeatable migration with description "old_view" that shared the same script name "R__view.sql"
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 2,
+		Version:       nil,
+		Description:   "old_view",
+		Type:          "SQL",
+		Script:        "R__view.sql",
+		Checksum:      &csOld,
+		Success:       true,
+	})
+	// Rank 3: DELETE row for "old_view" (with script "R__view.sql")
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 3,
+		Version:       nil,
+		Description:   "old_view",
+		Type:          "DELETE",
+		Script:        "R__view.sql",
+		Checksum:      &csOld,
+		Success:       true,
+	})
+
+	applied, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory failed: %v", err)
+	}
+
+	processed := processAppliedHistory(applied)
+	if processed.Records[0].Deleted {
+		t.Errorf("expected Rank 1 (description 'active_view') NOT to be marked deleted by DELETE row for 'old_view'")
+	}
+	if !processed.Records[1].Deleted {
+		t.Errorf("expected Rank 2 (description 'old_view') to be marked deleted by DELETE row for 'old_view'")
+	}
+	if _, ok := processed.AppliedRepeatables["active_view"]; !ok {
+		t.Errorf("expected 'active_view' to remain in AppliedRepeatables")
+	}
+}
+

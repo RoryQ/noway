@@ -140,7 +140,7 @@ func TestChallengerRepeatableReexecutionOnChecksumChange(t *testing.T) {
 		}
 	})
 
-	t.Run("repeatable re-executes if prior run failed even without checksum change", func(t *testing.T) {
+	t.Run("repeatable refuses before repair and re-executes after repair removes failed run", func(t *testing.T) {
 		mockFS := fstest.MapFS{
 			"sql/R__flaky.sql": &fstest.MapFile{Data: []byte("FAIL_THIS_STATEMENT;")},
 		}
@@ -168,10 +168,18 @@ func TestChallengerRepeatableReexecutionOnChecksumChange(t *testing.T) {
 		cfg.ValidateOnMigrate = false
 		mRetry, _ := New(cfg, db)
 
-		// Migrate should re-attempt the failed repeatable
+		// Flyway refuses to migrate while an unrepaired failed migration is in history
+		if _, err := mRetry.Migrate(ctx); err == nil {
+			t.Fatalf("expected Migrate to refuse while failed repeatable record exists in history")
+		}
+
+		// After Repair removes the failed record, Migrate re-attempts the repeatable migration
+		if _, err := mRetry.Repair(ctx); err != nil {
+			t.Fatalf("Repair failed: %v", err)
+		}
 		res2, err := mRetry.Migrate(ctx)
 		if err != nil {
-			t.Fatalf("second Migrate run failed: %v", err)
+			t.Fatalf("second Migrate run after repair failed: %v", err)
 		}
 		if res2.MigrationsExecuted != 1 {
 			t.Fatalf("expected 1 migration executed on retry, got %d", res2.MigrationsExecuted)

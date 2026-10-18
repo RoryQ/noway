@@ -401,6 +401,20 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	// Process applied history: failed, undone, and deleted migrations are NOT counted as applied
 	history := processAppliedHistory(applied)
 
+	// Flyway parity: refuse to migrate if schema history contains an unrepaired failed migration
+	// (even when validateOnMigrate=false), because non-transactional DDL databases (BigQuery, Spanner)
+	// would re-apply partial changes or apply later migrations on top of a broken state.
+	if len(history.FailedMigrations) > 0 {
+		if !isDryRun {
+			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+		}
+		failed := history.FailedMigrations[0]
+		if failed.Version != nil && !failed.Version.IsEmpty() {
+			return nil, fmt.Errorf("Schema %s contains a failed migration to version %s (%s)! Please run repair to fix the schema history.", defaultSchema, failed.Version.String(), failed.Script)
+		}
+		return nil, fmt.Errorf("Schema %s contains a failed repeatable migration (%s)! Please run repair to fix the schema history.", defaultSchema, failed.Script)
+	}
+
 	nextInstalledRank := history.NextInstalledRank
 	maxAppliedVersion := history.MaxAppliedVersion
 	baselineVersion := history.BaselineVersion
@@ -486,7 +500,11 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	// 9. Find pending / modified repeatable migrations
 	var pendingRepeatable []resolver.ResolvedMigration
 	for _, res := range resolved.RepeatableMigrations {
-		lastRun, wasApplied := appliedRepeatables[res.Script]
+		key := res.Description
+		if key == "" {
+			key = res.Script
+		}
+		lastRun, wasApplied := appliedRepeatables[key]
 		if !wasApplied {
 			pendingRepeatable = append(pendingRepeatable, res)
 		} else if lastRun.Checksum == nil || *lastRun.Checksum != res.Checksum || !lastRun.Success {
