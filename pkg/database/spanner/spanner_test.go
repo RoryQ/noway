@@ -767,5 +767,153 @@ func TestSpannerHeartbeatRetriesOnTransientError(t *testing.T) {
 	}
 }
 
+func TestSpannerHeartbeatFailsUntilDeadline(t *testing.T) {
+	_, client := setupSpannerTestClient(t)
+	ctx := context.Background()
 
+	var attemptCount int64
+	var lastErr atomic.Value
 
+	db := &SpannerDatabase{
+		client:            client,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 20 * time.Millisecond,
+		lockTTL:           100 * time.Millisecond, // With safety margin = ttl/2 = 50ms deadline
+		heartbeatAttemptInterceptor: func() error {
+			atomic.AddInt64(&attemptCount, 1)
+			return status.Error(codes.Unavailable, "persistent network unavailable")
+		},
+		onHeartbeat: func(err error) {
+			if err != nil {
+				lastErr.Store(err)
+			}
+		},
+	}
+
+	unlock, err := db.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+
+	// Wait for heartbeat to exceed TTL safety margin deadline
+	time.Sleep(150 * time.Millisecond)
+
+	if attempts := atomic.LoadInt64(&attemptCount); attempts < 2 {
+		t.Errorf("expected multiple failed attempts, got %d", attempts)
+	}
+
+	// Active lock error MUST be set because heartbeat exceeded deadline
+	if err := db.checkActiveLockErr(); err == nil {
+		t.Errorf("expected activeLockErr to be set after exceeding deadline, got nil")
+	}
+
+	// Unlock must return the heartbeat failure error
+	unlockErr := unlock(ctx)
+	if unlockErr == nil {
+		t.Errorf("expected unlock to return error after heartbeat failed until deadline, got nil")
+	} else if !strings.Contains(unlockErr.Error(), "lock heartbeat failed") {
+		t.Errorf("expected unlock error to contain 'lock heartbeat failed', got: %v", unlockErr)
+	}
+}
+
+func TestSpannerHeartbeatTickTimeout(t *testing.T) {
+	_, client := setupSpannerTestClient(t)
+	ctx := context.Background()
+
+	var attemptCount int64
+
+	db := &SpannerDatabase{
+		client:            client,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 25 * time.Millisecond,
+		lockTTL:           2 * time.Second,
+		heartbeatAttemptInterceptor: func() error {
+			n := atomic.AddInt64(&attemptCount, 1)
+			if n == 1 {
+				// Simulate tick timeout
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+	}
+
+	unlock, err := db.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+	defer func() { _ = unlock(ctx) }()
+
+	time.Sleep(120 * time.Millisecond)
+
+	if attempts := atomic.LoadInt64(&attemptCount); attempts < 2 {
+		t.Errorf("expected retry after tick timeout, got %d attempts", attempts)
+	}
+}
+
+func TestSpannerCleanSchema_InterleavedTables(t *testing.T) {
+	_, db := setupSpannerTestDB(t)
+	ctx := context.Background()
+
+	// Create 3-level interleaved tables: parents -> children -> grandchildren
+	createStmts := []string{
+		"CREATE TABLE parents (parent_id INT64 NOT NULL, name STRING(50)) PRIMARY KEY (parent_id)",
+		"CREATE TABLE children (parent_id INT64 NOT NULL, child_id INT64 NOT NULL, name STRING(50)) PRIMARY KEY (parent_id, child_id), INTERLEAVE IN PARENT parents ON DELETE CASCADE",
+		"CREATE TABLE grandchildren (parent_id INT64 NOT NULL, child_id INT64 NOT NULL, gc_id INT64 NOT NULL) PRIMARY KEY (parent_id, child_id, gc_id), INTERLEAVE IN PARENT children ON DELETE CASCADE",
+	}
+
+	for _, stmt := range createStmts {
+		if err := db.ExecuteStatement(ctx, stmt); err != nil {
+			t.Fatalf("failed executing DDL %q: %v", stmt, err)
+		}
+	}
+
+	// Verify tables exist before clean
+	for _, tbl := range []string{"parents", "children", "grandchildren"} {
+		exists, err := db.HistoryTableExists(ctx, "", tbl)
+		if err != nil || !exists {
+			t.Fatalf("expected table %s to exist before clean, exists=%v err=%v", tbl, exists, err)
+		}
+	}
+
+	// Clean schema: must drop grandchildren, children, parents in that order
+	if err := db.CleanSchema(ctx, ""); err != nil {
+		t.Fatalf("CleanSchema failed on interleaved tables: %v", err)
+	}
+
+	// Verify all tables were dropped
+	for _, tbl := range []string{"parents", "children", "grandchildren"} {
+		exists, err := db.HistoryTableExists(ctx, "", tbl)
+		if err != nil {
+			t.Fatalf("checking table %s existence failed: %v", tbl, err)
+		}
+		if exists {
+			t.Errorf("expected table %s to be dropped by CleanSchema", tbl)
+		}
+	}
+}
+
+func TestSpannerCleanSchema_ViewsDependencyOrder(t *testing.T) {
+	views := []string{"root_view", "middle_view", "leaf_view", "standalone_view"}
+	viewDefs := map[string]string{
+		"root_view":       "SELECT 1 AS num",
+		"middle_view":     "SELECT num + 1 AS num FROM root_view",
+		"leaf_view":       "SELECT num * 2 AS res FROM middle_view",
+		"standalone_view": "SELECT 'hello' AS greeting",
+	}
+
+	sorted := sortViewsDependenciesFirst(views, viewDefs)
+
+	pos := make(map[string]int)
+	for i, v := range sorted {
+		pos[v] = i
+	}
+
+	// leaf_view must be dropped before middle_view
+	if pos["leaf_view"] >= pos["middle_view"] {
+		t.Errorf("expected leaf_view before middle_view in drop order, got: %v", sorted)
+	}
+	// middle_view must be dropped before root_view
+	if pos["middle_view"] >= pos["root_view"] {
+		t.Errorf("expected middle_view before root_view in drop order, got: %v", sorted)
+	}
+}

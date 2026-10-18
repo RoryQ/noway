@@ -2,8 +2,10 @@ package spanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +25,14 @@ import (
 	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/resolver"
 	"github.com/roryq/noway/pkg/version"
+)
+
+var (
+	// ErrLockRowMissing indicates that the lock row was deleted from the schema history table during heartbeat.
+	ErrLockRowMissing = errors.New("lock row missing during heartbeat")
+
+	// ErrLockOwnershipLost indicates that lock ownership was taken by another process during heartbeat.
+	ErrLockOwnershipLost = errors.New("lock ownership lost during heartbeat")
 )
 
 // SpannerDatabase implements database.Database for Google Cloud Spanner.
@@ -52,21 +62,39 @@ type SpannerDatabase struct {
 	activeLockMu  sync.Mutex
 	activeLockErr error
 
-	supportsCurrentTSOnce sync.Once
-	supportsCurrentTS     bool
+	supportsCurrentTS bool
+	currentTSWarned   bool
 }
 
 func (db *SpannerDatabase) checkSupportsCurrentTS(ctx context.Context) bool {
-	db.supportsCurrentTSOnce.Do(func() {
-		if db.client == nil {
-			return
-		}
-		iter := db.client.Single().Query(ctx, spanner.NewStatement("SELECT CURRENT_TIMESTAMP()"))
-		defer iter.Stop()
-		_, err := iter.Next()
-		db.supportsCurrentTS = (err == nil)
-	})
-	return db.supportsCurrentTS
+	db.mu.Lock()
+	if db.supportsCurrentTS {
+		db.mu.Unlock()
+		return true
+	}
+	db.mu.Unlock()
+
+	if db.client == nil {
+		return false
+	}
+
+	iter := db.client.Single().Query(ctx, spanner.NewStatement("SELECT CURRENT_TIMESTAMP()"))
+	defer iter.Stop()
+	_, err := iter.Next()
+	if err == nil {
+		db.mu.Lock()
+		db.supportsCurrentTS = true
+		db.mu.Unlock()
+		return true
+	}
+
+	db.mu.Lock()
+	if !db.currentTSWarned {
+		db.currentTSWarned = true
+		fmt.Fprintf(os.Stderr, "Warning: Spanner CURRENT_TIMESTAMP() probe failed: %v. Falling back to client clock.\n", err)
+	}
+	db.mu.Unlock()
+	return false
 }
 
 var _ database.Database = (*SpannerDatabase)(nil)
@@ -233,11 +261,100 @@ type spannerDDLConstraint struct {
 }
 
 type spannerDDLObjects struct {
-	tables       []string
-	views        []string
-	indexes      []string
-	constraints  []spannerDDLConstraint
-	tableParents map[string]string
+	changeStreams []string
+	tables        []string
+	views         []string
+	viewDefs      map[string]string
+	models        []string
+	sequences     []string
+	indexes       []string
+	constraints   []spannerDDLConstraint
+	tableParents  map[string]string
+}
+
+func viewReferences(viewDef, targetView string) bool {
+	if viewDef == "" || targetView == "" {
+		return false
+	}
+	pattern := `(?i)(?:^|[^a-zA-Z0-9_` + "`" + `])` + regexp.QuoteMeta(targetView) + `(?:$|[^a-zA-Z0-9_` + "`" + `])`
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return strings.Contains(strings.ToLower(viewDef), strings.ToLower(targetView))
+	}
+	return re.MatchString(viewDef)
+}
+
+func sortViewsDependenciesFirst(views []string, viewDefs map[string]string) []string {
+	if len(views) <= 1 {
+		return views
+	}
+
+	dependencies := make(map[string][]string)
+	incomingDependents := make(map[string]int)
+
+	for _, v := range views {
+		def := ""
+		if viewDefs != nil {
+			def = viewDefs[v]
+		}
+		for _, other := range views {
+			if v != other && viewReferences(def, other) {
+				dependencies[v] = append(dependencies[v], other)
+				incomingDependents[other]++
+			}
+		}
+	}
+
+	var queue []string
+	for _, v := range views {
+		if incomingDependents[v] == 0 {
+			queue = append(queue, v)
+		}
+	}
+	sort.Strings(queue)
+
+	var result []string
+	visited := make(map[string]bool)
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+
+		if visited[curr] {
+			continue
+		}
+		visited[curr] = true
+		result = append(result, curr)
+
+		for _, dep := range dependencies[curr] {
+			incomingDependents[dep]--
+			if incomingDependents[dep] <= 0 && !visited[dep] {
+				queue = append(queue, dep)
+			}
+		}
+		sort.Strings(queue)
+	}
+
+	for _, v := range views {
+		if !visited[v] {
+			result = append(result, v)
+		}
+	}
+
+	return result
+}
+
+var (
+	createModelRegex        = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+MODEL\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+	createChangeStreamRegex = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+CHANGE\s+STREAM\s+([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+	createSequenceRegex     = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+)
+
+func cleanIdentifier(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.TrimPrefix(id, "`")
+	id = strings.TrimSuffix(id, "`")
+	return id
 }
 
 func isInformationSchemaMissingError(err error) bool {
@@ -310,64 +427,102 @@ func (db *SpannerDatabase) inspectDDL(ctx context.Context) (*spannerDDLObjects, 
 
 	objs := &spannerDDLObjects{
 		tableParents: make(map[string]string),
+		viewDefs:     make(map[string]string),
 	}
 	seenTables := make(map[string]bool)
 	seenIndexes := make(map[string]bool)
 	seenViews := make(map[string]bool)
 	seenConstraints := make(map[string]bool)
+	seenChangeStreams := make(map[string]bool)
+	seenSequences := make(map[string]bool)
+	seenModels := make(map[string]bool)
 
 	for _, stmtStr := range resp.Statements {
 		stmt, err := spansql.ParseDDLStmt(stmtStr)
-		if err != nil {
-			continue
+		if err == nil {
+			switch s := stmt.(type) {
+			case *spansql.CreateChangeStream:
+				csName := string(s.Name)
+				if !seenChangeStreams[csName] {
+					seenChangeStreams[csName] = true
+					objs.changeStreams = append(objs.changeStreams, csName)
+				}
+			case *spansql.CreateSequence:
+				seqName := string(s.Name)
+				if !seenSequences[seqName] {
+					seenSequences[seqName] = true
+					objs.sequences = append(objs.sequences, seqName)
+				}
+			case *spansql.CreateTable:
+				tName := string(s.Name)
+				if !seenTables[tName] {
+					seenTables[tName] = true
+					objs.tables = append(objs.tables, tName)
+				}
+				if s.Interleave != nil && s.Interleave.Parent != "" {
+					objs.tableParents[tName] = string(s.Interleave.Parent)
+				}
+				for _, c := range s.Constraints {
+					if _, isFK := c.Constraint.(spansql.ForeignKey); isFK && c.Name != "" {
+						cKey := tName + "." + string(c.Name)
+						if !seenConstraints[cKey] {
+							seenConstraints[cKey] = true
+							objs.constraints = append(objs.constraints, spannerDDLConstraint{
+								table:      tName,
+								constraint: string(c.Name),
+							})
+						}
+					}
+				}
+			case *spansql.CreateIndex:
+				idxName := string(s.Name)
+				if !seenIndexes[idxName] {
+					seenIndexes[idxName] = true
+					objs.indexes = append(objs.indexes, idxName)
+				}
+			case *spansql.CreateView:
+				vName := string(s.Name)
+				if !seenViews[vName] {
+					seenViews[vName] = true
+					objs.views = append(objs.views, vName)
+					objs.viewDefs[vName] = stmtStr
+				}
+			case *spansql.AlterTable:
+				tName := string(s.Name)
+				if ac, ok := s.Alteration.(spansql.AddConstraint); ok {
+					if _, isFK := ac.Constraint.Constraint.(spansql.ForeignKey); isFK && ac.Constraint.Name != "" {
+						cKey := tName + "." + string(ac.Constraint.Name)
+						if !seenConstraints[cKey] {
+							seenConstraints[cKey] = true
+							objs.constraints = append(objs.constraints, spannerDDLConstraint{
+								table:      tName,
+								constraint: string(ac.Constraint.Name),
+							})
+						}
+					}
+				}
+			}
 		}
-		switch s := stmt.(type) {
-		case *spansql.CreateTable:
-			tName := string(s.Name)
-			if !seenTables[tName] {
-				seenTables[tName] = true
-				objs.tables = append(objs.tables, tName)
+
+		if m := createModelRegex.FindStringSubmatch(stmtStr); len(m) > 1 {
+			mName := cleanIdentifier(m[1])
+			if !seenModels[mName] {
+				seenModels[mName] = true
+				objs.models = append(objs.models, mName)
 			}
-			if s.Interleave != nil && s.Interleave.Parent != "" {
-				objs.tableParents[tName] = string(s.Interleave.Parent)
+		}
+		if m := createChangeStreamRegex.FindStringSubmatch(stmtStr); len(m) > 1 {
+			csName := cleanIdentifier(m[1])
+			if !seenChangeStreams[csName] {
+				seenChangeStreams[csName] = true
+				objs.changeStreams = append(objs.changeStreams, csName)
 			}
-			for _, c := range s.Constraints {
-				if _, isFK := c.Constraint.(spansql.ForeignKey); isFK && c.Name != "" {
-					cKey := tName + "." + string(c.Name)
-					if !seenConstraints[cKey] {
-						seenConstraints[cKey] = true
-						objs.constraints = append(objs.constraints, spannerDDLConstraint{
-							table:      tName,
-							constraint: string(c.Name),
-						})
-					}
-				}
-			}
-		case *spansql.CreateIndex:
-			idxName := string(s.Name)
-			if !seenIndexes[idxName] {
-				seenIndexes[idxName] = true
-				objs.indexes = append(objs.indexes, idxName)
-			}
-		case *spansql.CreateView:
-			vName := string(s.Name)
-			if !seenViews[vName] {
-				seenViews[vName] = true
-				objs.views = append(objs.views, vName)
-			}
-		case *spansql.AlterTable:
-			tName := string(s.Name)
-			if ac, ok := s.Alteration.(spansql.AddConstraint); ok {
-				if _, isFK := ac.Constraint.Constraint.(spansql.ForeignKey); isFK && ac.Constraint.Name != "" {
-					cKey := tName + "." + string(ac.Constraint.Name)
-					if !seenConstraints[cKey] {
-						seenConstraints[cKey] = true
-						objs.constraints = append(objs.constraints, spannerDDLConstraint{
-							table:      tName,
-							constraint: string(ac.Constraint.Name),
-						})
-					}
-				}
+		}
+		if m := createSequenceRegex.FindStringSubmatch(stmtStr); len(m) > 1 {
+			seqName := cleanIdentifier(m[1])
+			if !seenSequences[seqName] {
+				seenSequences[seqName] = true
+				objs.sequences = append(objs.sequences, seqName)
 			}
 		}
 	}
@@ -444,12 +599,11 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 		}
 	}
 
-	// 1. Foreign key constraints
-	fkSQL := `SELECT CONSTRAINT_NAME, TABLE_NAME 
-	          FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS 
-	          WHERE CONSTRAINT_TYPE = 'FOREIGN KEY' AND TABLE_SCHEMA = ''`
-	iter := db.client.Single().Query(ctx, spanner.NewStatement(fkSQL))
 	var infoSchemaErr error
+
+	// 1. Change streams (must be dropped before tables)
+	csSQL := `SELECT CHANGE_STREAM_NAME FROM INFORMATION_SCHEMA.CHANGE_STREAMS WHERE CHANGE_STREAM_SCHEMA = ''`
+	iter := db.client.Single().Query(ctx, spanner.NewStatement(csSQL))
 	for {
 		row, err := iter.Next()
 		if err == iterator.Done {
@@ -459,14 +613,41 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 			infoSchemaErr = err
 			break
 		}
-		var cName, tName string
-		if err := row.Columns(&cName, &tName); err == nil {
-			addStmt(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(tName), db.Quote(cName)))
+		var csName string
+		if err := row.Column(0, &csName); err != nil {
+			infoSchemaErr = err
+			break
 		}
+		addStmt(fmt.Sprintf("DROP CHANGE STREAM %s", db.Quote(csName)))
 	}
 	iter.Stop()
 
-	// 2. Secondary indexes
+	// 2. Foreign key constraints
+	if infoSchemaErr == nil {
+		fkSQL := `SELECT CONSTRAINT_NAME, TABLE_NAME 
+		          FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS 
+		          WHERE CONSTRAINT_TYPE = 'FOREIGN KEY' AND TABLE_SCHEMA = ''`
+		iter = db.client.Single().Query(ctx, spanner.NewStatement(fkSQL))
+		for {
+			row, err := iter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				infoSchemaErr = err
+				break
+			}
+			var cName, tName string
+			if err := row.Columns(&cName, &tName); err != nil {
+				infoSchemaErr = err
+				break
+			}
+			addStmt(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(tName), db.Quote(cName)))
+		}
+		iter.Stop()
+	}
+
+	// 3. Secondary indexes
 	if infoSchemaErr == nil {
 		idxSQL := `SELECT INDEX_NAME, TABLE_NAME 
 		           FROM INFORMATION_SCHEMA.INDEXES 
@@ -482,17 +663,21 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 				break
 			}
 			var idxName, tName string
-			if err := row.Columns(&idxName, &tName); err == nil {
-				addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
+			if err := row.Columns(&idxName, &tName); err != nil {
+				infoSchemaErr = err
+				break
 			}
+			addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
 		}
 		iter.Stop()
 	}
 
-	// 3. Views
+	// 4. Views (dropped in dependency order: leaf views first)
 	if infoSchemaErr == nil {
-		viewsSQL := `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = ''`
+		viewsSQL := `SELECT TABLE_NAME, VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = ''`
 		iter = db.client.Single().Query(ctx, spanner.NewStatement(viewsSQL))
+		var viewsToDrop []string
+		viewDefs := make(map[string]string)
 		for {
 			row, err := iter.Next()
 			if err == iterator.Done {
@@ -502,16 +687,49 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 				infoSchemaErr = err
 				break
 			}
-			var vName string
-			if err := row.Column(0, &vName); err == nil {
+			var vName, vDef string
+			if err := row.Columns(&vName, &vDef); err != nil {
+				infoSchemaErr = err
+				break
+			}
+			viewsToDrop = append(viewsToDrop, vName)
+			viewDefs[vName] = vDef
+		}
+		iter.Stop()
+
+		if infoSchemaErr == nil {
+			orderedViews := sortViewsDependenciesFirst(viewsToDrop, viewDefs)
+			for _, vName := range orderedViews {
 				addStmt(fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
 			}
+		}
+	}
+
+	// 5. Machine learning models
+	if infoSchemaErr == nil {
+		modelSQL := `SELECT MODEL_NAME FROM INFORMATION_SCHEMA.MODELS WHERE MODEL_SCHEMA = ''`
+		iter = db.client.Single().Query(ctx, spanner.NewStatement(modelSQL))
+		for {
+			row, err := iter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				infoSchemaErr = err
+				break
+			}
+			var mName string
+			if err := row.Column(0, &mName); err != nil {
+				infoSchemaErr = err
+				break
+			}
+			addStmt(fmt.Sprintf("DROP MODEL %s", db.Quote(mName)))
 		}
 		iter.Stop()
 	}
 
 	preservedTables := make(map[string]bool)
-	// 4. Base tables
+	// 6. Base tables
 	if infoSchemaErr == nil {
 		tableParents := make(map[string]string)
 		var tablesToDrop []string
@@ -528,16 +746,18 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 			}
 			var tName string
 			var parentTable spanner.NullString
-			if err := row.Columns(&tName, &parentTable); err == nil {
-				if excludeMap[tName] {
-					preservedTables[tName] = true
-					continue
-				}
-				if parentTable.Valid && parentTable.StringVal != "" {
-					tableParents[tName] = parentTable.StringVal
-				}
-				tablesToDrop = append(tablesToDrop, tName)
+			if err := row.Columns(&tName, &parentTable); err != nil {
+				infoSchemaErr = err
+				break
 			}
+			if excludeMap[tName] {
+				preservedTables[tName] = true
+				continue
+			}
+			if parentTable.Valid && parentTable.StringVal != "" {
+				tableParents[tName] = parentTable.StringVal
+			}
+			tablesToDrop = append(tablesToDrop, tName)
 		}
 		iter.Stop()
 
@@ -550,6 +770,29 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 		}
 	}
 
+	// 7. Sequences (must be dropped after tables that reference them in default values)
+	if infoSchemaErr == nil {
+		seqSQL := `SELECT NAME FROM INFORMATION_SCHEMA.SEQUENCES WHERE SCHEMA = ''`
+		iter = db.client.Single().Query(ctx, spanner.NewStatement(seqSQL))
+		for {
+			row, err := iter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				infoSchemaErr = err
+				break
+			}
+			var seqName string
+			if err := row.Column(0, &seqName); err != nil {
+				infoSchemaErr = err
+				break
+			}
+			addStmt(fmt.Sprintf("DROP SEQUENCE %s", db.Quote(seqName)))
+		}
+		iter.Stop()
+	}
+
 	// Fallback to GetDatabaseDdl if INFORMATION_SCHEMA is unavailable (e.g., spannertest emulator)
 	if infoSchemaErr != nil {
 		if isInformationSchemaMissingError(infoSchemaErr) {
@@ -559,14 +802,21 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 			preservedTables = make(map[string]bool)
 
 			if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
+				for _, csName := range objs.changeStreams {
+					addStmt(fmt.Sprintf("DROP CHANGE STREAM %s", db.Quote(csName)))
+				}
 				for _, fk := range objs.constraints {
 					addStmt(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(fk.table), db.Quote(fk.constraint)))
 				}
 				for _, idxName := range objs.indexes {
 					addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
 				}
-				for _, vName := range objs.views {
+				orderedViews := sortViewsDependenciesFirst(objs.views, objs.viewDefs)
+				for _, vName := range orderedViews {
 					addStmt(fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
+				}
+				for _, mName := range objs.models {
+					addStmt(fmt.Sprintf("DROP MODEL %s", db.Quote(mName)))
 				}
 				orderedTables := sortTablesChildrenFirst(objs.tables, objs.tableParents)
 				for _, tName := range orderedTables {
@@ -575,6 +825,9 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 						continue
 					}
 					addStmt(fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
+				}
+				for _, seqName := range objs.sequences {
+					addStmt(fmt.Sprintf("DROP SEQUENCE %s", db.Quote(seqName)))
 				}
 			} else {
 				return fmt.Errorf("failed to inspect Spanner DDL for clean: %w", ddlErr)
@@ -1031,7 +1284,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 
 						row, err := iter.Next()
 						if err == iterator.Done {
-							return fmt.Errorf("lock row missing during heartbeat")
+							return ErrLockRowMissing
 						}
 						if err != nil {
 							return err
@@ -1044,7 +1297,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 						}
 						owner := extractLockOwner(verNull, instBy)
 						if owner != lockID {
-							return fmt.Errorf("lock ownership lost during heartbeat: owned by %q, expected %q", owner, lockID)
+							return fmt.Errorf("%w: owned by %q, expected %q", ErrLockOwnershipLost, owner, lockID)
 						}
 
 						m := spanner.Update(tableName,
@@ -1074,7 +1327,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 						}
 
 						// Check if the lock was lost or missing (non-transient fatal error)
-						if strings.Contains(hErr.Error(), "lock ownership lost") || strings.Contains(hErr.Error(), "lock row missing") {
+						if errors.Is(hErr, ErrLockOwnershipLost) || errors.Is(hErr, ErrLockRowMissing) {
 							setHeartbeatErr(hErr)
 							if db.onHeartbeat != nil {
 								db.onHeartbeat(hErr)
@@ -1107,7 +1360,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 								success = true
 								break
 							}
-							if strings.Contains(hErr.Error(), "lock ownership lost") || strings.Contains(hErr.Error(), "lock row missing") {
+							if errors.Is(hErr, ErrLockOwnershipLost) || errors.Is(hErr, ErrLockRowMissing) {
 								setHeartbeatErr(hErr)
 								if db.onHeartbeat != nil {
 									db.onHeartbeat(hErr)

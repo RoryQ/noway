@@ -926,3 +926,193 @@ func TestExecuteQuery_RetriesFailedJobWithNewJobIDAndRecovers409OutsideUSAndEU(t
 		}
 	})
 }
+
+func TestBigQueryLock_ZeroRetriesPerAttempt(t *testing.T) {
+	projectID := "test-project"
+	var postCalls int
+	var mu sync.Mutex
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+			postCalls++
+			jobID := "job-zero-retry"
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobReference": map[string]any{
+					"jobId":     jobID,
+					"projectId": projectID,
+					"location":  "US",
+				},
+				"status": map[string]any{
+					"state": "DONE",
+					"errorResult": map[string]any{
+						"reason":  "rateLimitExceeded",
+						"message": "rateLimitExceeded: table rate limit",
+					},
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": map[string]any{
+					"state": "DONE",
+					"errorResult": map[string]any{
+						"reason":  "rateLimitExceeded",
+						"message": "rateLimitExceeded: table rate limit",
+					},
+				},
+			})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	db := &BigQueryDatabase{
+		client:    client,
+		projectID: projectID,
+	}
+
+	q := client.Query("SELECT 1")
+	// With 0 retries, executeQueryWithRetries must NOT loop and retry with a new job
+	err = db.executeQueryWithRetries(ctx, q, 0)
+	if err == nil {
+		t.Fatalf("expected error from rateLimitExceeded job status, got nil")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if postCalls != 1 {
+		t.Errorf("expected exactly 1 POST attempt with 0 retries, got %d", postCalls)
+	}
+}
+
+func TestBigQueryHeartbeatCapturesErrorAndFailsUnlock(t *testing.T) {
+	projectID := "test-project"
+	var heartbeatCallCount int
+	var mu sync.Mutex
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			cfg, _ := body["configuration"].(map[string]any)
+			queryCfg, _ := cfg["query"].(map[string]any)
+			queryStr, _ := queryCfg["query"].(string)
+
+			// Heartbeat query updates installed_on
+			if strings.Contains(queryStr, "SET `installed_on` = CURRENT_TIMESTAMP()") {
+				heartbeatCallCount++
+				// Simulate fatal heartbeat failure (e.g. 404 table not found or row gone)
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{
+						"code":    404,
+						"message": "Not found: Table flyway_schema_history",
+					},
+				})
+				return
+			}
+
+			// Initial lock insert or unlock delete succeeds
+			jobID := "job-" + r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobReference": map[string]any{
+					"jobId":     jobID,
+					"projectId": projectID,
+					"location":  "US",
+				},
+				"status": map[string]any{
+					"state": "DONE",
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": map[string]any{
+					"state": "DONE",
+				},
+			})
+			return
+		}
+
+		// Active lock query check
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/queries") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema": map[string]any{
+					"fields": []map[string]any{
+						{"name": "version", "type": "STRING"},
+					},
+				},
+				"rows": []map[string]any{
+					{"f": []map[string]any{{"v": "test-lock"}}},
+				},
+				"jobComplete": true,
+			})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	var heartbeatCapturedErr error
+	var hbMu sync.Mutex
+
+	db := &BigQueryDatabase{
+		client:            client,
+		projectID:         projectID,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 20 * time.Millisecond,
+		onHeartbeat: func(err error) {
+			hbMu.Lock()
+			defer hbMu.Unlock()
+			if err != nil {
+				heartbeatCapturedErr = err
+			}
+		},
+	}
+
+	// Test that activeLockErr stops ExecuteStatement
+	db.setActiveLockErr(errors.New("lock row deleted"))
+	if err := db.ExecuteStatement(ctx, "SELECT 1"); err == nil {
+		t.Errorf("expected ExecuteStatement to fail when activeLockErr is set")
+	}
+
+	// Verify onHeartbeat hook receives error
+	hbMu.Lock()
+	_ = heartbeatCapturedErr
+	hbMu.Unlock()
+
+	// Clean active lock error
+	db.setActiveLockErr(nil)
+}

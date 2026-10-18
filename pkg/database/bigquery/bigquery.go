@@ -31,6 +31,11 @@ type BigQueryDatabase struct {
 	config              *config.Configuration
 	retryInitialBackoff time.Duration
 	retryMaxBackoff     time.Duration
+
+	activeLockMu      sync.Mutex
+	activeLockErr     error
+	heartbeatInterval time.Duration
+	onHeartbeat       func(err error)
 }
 
 // New creates and initializes a new BigQueryDatabase instance.
@@ -669,12 +674,13 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		default:
 		}
 
-		// Try insert lock row
+		// Try insert lock row as a single attempt (0 internal retries)
+		// Outer Lock loop manages retries every 1 second, avoiding exponential backoff inflation.
 		q := db.client.Query(insertLockSQL)
 		q.Parameters = []bigquery.QueryParameter{
 			{Name: "lock_id", Value: lockID},
 		}
-		if err := db.executeQuery(ctx, q); err == nil {
+		if err := db.executeQueryWithRetries(ctx, q, 0); err == nil {
 			// Verify if our lock is the active lock holder
 			checkQ := db.client.Query(checkActiveLockSQL)
 			it, err := checkQ.Read(ctx)
@@ -692,7 +698,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 						selfQ.Parameters = []bigquery.QueryParameter{
 							{Name: "lock_id", Value: lockID},
 						}
-						_ = db.executeQuery(ctx, selfQ)
+						_ = db.executeQueryWithRetries(ctx, selfQ, 0)
 					}
 				}
 			}
@@ -711,14 +717,31 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		return nil, fmt.Errorf("unable to obtain lock on Flyway schema history table %s.%s after %d retries", schema, table, maxRetries)
 	}
 
-	// Start background lock heartbeat to update installed_on every 3 minutes
+	// Start background lock heartbeat to update installed_on every 3 minutes (or custom heartbeatInterval)
+	interval := 3 * time.Minute
+	if db.heartbeatInterval > 0 {
+		interval = db.heartbeatInterval
+	}
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
 
+	var heartbeatErrMu sync.Mutex
+	var heartbeatErr error
+	setHeartbeatErr := func(err error) {
+		heartbeatErrMu.Lock()
+		defer heartbeatErrMu.Unlock()
+		heartbeatErr = err
+	}
+	getHeartbeatErr := func() error {
+		heartbeatErrMu.Lock()
+		defer heartbeatErrMu.Unlock()
+		return heartbeatErr
+	}
+
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(3 * time.Minute)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		updateSQL := fmt.Sprintf(`UPDATE %s 
@@ -734,7 +757,21 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 				q.Parameters = []bigquery.QueryParameter{
 					{Name: "lock_id", Value: lockID},
 				}
-				_ = db.executeQuery(heartbeatCtx, q)
+				hErr := db.executeQuery(heartbeatCtx, q)
+				if heartbeatCtx.Err() != nil {
+					return
+				}
+				if hErr != nil {
+					setHeartbeatErr(hErr)
+					db.setActiveLockErr(hErr)
+					if db.onHeartbeat != nil {
+						db.onHeartbeat(hErr)
+					}
+					return
+				}
+				if db.onHeartbeat != nil {
+					db.onHeartbeat(nil)
+				}
 			}
 		}
 	}()
@@ -743,6 +780,9 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		cancelHeartbeat()
 		wg.Wait()
 
+		hbErr := getHeartbeatErr()
+		db.setActiveLockErr(nil)
+
 		delLockSQL := fmt.Sprintf(`DELETE FROM %s 
 		WHERE `+"`version`"+` = @lock_id AND `+"`description`"+` = 'flyway-lock'`, tableName)
 
@@ -750,8 +790,12 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		q.Parameters = []bigquery.QueryParameter{
 			{Name: "lock_id", Value: lockID},
 		}
-		if err := db.executeQuery(unlockCtx, q); err != nil {
-			return fmt.Errorf("failed to release lock: %w", err)
+		delErr := db.executeQuery(unlockCtx, q)
+		if hbErr != nil {
+			return fmt.Errorf("lock heartbeat failed: %w", hbErr)
+		}
+		if delErr != nil {
+			return fmt.Errorf("failed to release lock: %w", delErr)
 		}
 		return nil
 	}
@@ -759,8 +803,26 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 	return unlock, nil
 }
 
+func (db *BigQueryDatabase) setActiveLockErr(err error) {
+	db.activeLockMu.Lock()
+	defer db.activeLockMu.Unlock()
+	db.activeLockErr = err
+}
+
+func (db *BigQueryDatabase) checkActiveLockErr() error {
+	db.activeLockMu.Lock()
+	defer db.activeLockMu.Unlock()
+	if db.activeLockErr != nil {
+		return fmt.Errorf("bigquery lock heartbeat error: %w", db.activeLockErr)
+	}
+	return nil
+}
+
 // ExecuteStatement executes a SQL statement against BigQuery.
 func (db *BigQueryDatabase) ExecuteStatement(ctx context.Context, sql string) error {
+	if err := db.checkActiveLockErr(); err != nil {
+		return err
+	}
 	trimmed := strings.TrimSpace(sql)
 	if trimmed == "" {
 		return nil
@@ -778,6 +840,14 @@ func (db *BigQueryDatabase) ExecuteStatement(ctx context.Context, sql string) er
 // created the job), status polling errors never resubmit the job, and completed jobs whose
 // status.Err() is retryable retry with a new job ID (safe because a failed job has no effect).
 func (db *BigQueryDatabase) executeQuery(ctx context.Context, q *bigquery.Query) error {
+	maxRetries := 5
+	if db.config != nil && db.config.ConnectRetries > 0 {
+		maxRetries = db.config.ConnectRetries
+	}
+	return db.executeQueryWithRetries(ctx, q, maxRetries)
+}
+
+func (db *BigQueryDatabase) executeQueryWithRetries(ctx context.Context, q *bigquery.Query, maxRetries int) error {
 	initialJobID := q.JobIDConfig.JobID
 	if initialJobID == "" {
 		initialJobID = "noway-" + uuid.New().String()
@@ -786,7 +856,9 @@ func (db *BigQueryDatabase) executeQuery(ctx context.Context, q *bigquery.Query)
 	_, err := submitAndPollJob(
 		ctx,
 		initialJobID,
-		db.retry,
+		func(retryCtx context.Context, op func() error) error {
+			return db.retryWithLimit(retryCtx, maxRetries, op)
+		},
 		func(submitCtx context.Context, jobID string) (*bigquery.Job, error) {
 			q.JobIDConfig.JobID = jobID
 			job, err := q.Run(submitCtx)
@@ -1063,6 +1135,13 @@ func (db *BigQueryDatabase) retry(ctx context.Context, op func() error) error {
 	maxRetries := 5
 	if db.config != nil && db.config.ConnectRetries > 0 {
 		maxRetries = db.config.ConnectRetries
+	}
+	return db.retryWithLimit(ctx, maxRetries, op)
+}
+
+func (db *BigQueryDatabase) retryWithLimit(ctx context.Context, maxRetries int, op func() error) error {
+	if maxRetries <= 0 {
+		return op()
 	}
 
 	initialBackoff := 2 * time.Second

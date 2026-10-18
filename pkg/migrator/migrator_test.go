@@ -1365,6 +1365,87 @@ func TestMigrate_FutureFailedMigration_WarnsWhenIgnoreFuture(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "contains a failed migration to version 5") {
 		t.Errorf("expected error refusing failed migration to version 5 when ValidateOnMigrate=false, got: %v", err)
 	}
+
+	// 4. Parity: multiple failed future migrations (e.g. V10 and V11 when local ends at V9)
+	// Flyway stops if MORE than 1 failed migration exists in history, even if both are future versions
+	fsV9 := fstest.MapFS{
+		"migrations/V9__nine.sql": &fstest.MapFile{Data: []byte("SELECT 9;")},
+	}
+	dbMultiple := mock.NewMockDatabase()
+	v9Str := "9"
+	v10Str := "10"
+	v11Str := "11"
+	_ = dbMultiple.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+	_ = dbMultiple.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1, Version: &v9Str, Description: "nine", Type: "SQL", Script: "V9__nine.sql", Success: true,
+	})
+	_ = dbMultiple.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 2, Version: &v10Str, Description: "ten", Type: "SQL", Script: "V10__ten.sql", Success: false,
+	})
+	_ = dbMultiple.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 3, Version: &v11Str, Description: "eleven", Type: "SQL", Script: "V11__eleven.sql", Success: false,
+	})
+
+	cfgMultiple := config.NewDefaultConfiguration()
+	cfgMultiple.DefaultSchema = "test_ds"
+	cfgMultiple.FS = fsV9
+	cfgMultiple.Locations = []string{"migrations"}
+	cfgMultiple.IgnoreFutureMigrations = true
+	cfgMultiple.ValidateOnMigrate = false
+
+	mMultiple, _ := New(cfgMultiple, dbMultiple)
+	_, err = mMultiple.Migrate(ctx)
+	if err == nil || !strings.Contains(err.Error(), "contains a failed migration") {
+		t.Fatalf("expected Migrate to stop when multiple failed future migrations exist, got: %v", err)
+	}
+
+	// 5. Parity: No versioned files resolve locally, exactly 1 failed versioned migration exists in history
+	// In Flyway, if no versioned files resolve, any versioned migration is in the future, so 1 failed row warns
+	fsNoVersioned := fstest.MapFS{
+		"migrations/R__repeatable.sql": &fstest.MapFile{Data: []byte("SELECT 'repeatable';")},
+	}
+	dbSingleFuture := mock.NewMockDatabase()
+	_ = dbSingleFuture.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+	_ = dbSingleFuture.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1, Version: &v10Str, Description: "ten", Type: "SQL", Script: "V10__ten.sql", Success: false,
+	})
+
+	cfgNoVersioned := config.NewDefaultConfiguration()
+	cfgNoVersioned.DefaultSchema = "test_ds"
+	cfgNoVersioned.FS = fsNoVersioned
+	cfgNoVersioned.Locations = []string{"migrations"}
+	cfgNoVersioned.IgnoreFutureMigrations = true
+	cfgNoVersioned.ValidateOnMigrate = false
+
+	mNoVersioned, _ := New(cfgNoVersioned, dbSingleFuture)
+	resNoVersioned, err := mNoVersioned.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("expected Migrate to warn and succeed when 0 versioned files resolve and 1 failed future migration exists, got: %v", err)
+	}
+	foundWarn := false
+	for _, w := range resNoVersioned.Warnings {
+		if strings.Contains(w, "failed future migration to version 10") {
+			foundWarn = true
+			break
+		}
+	}
+	if !foundWarn {
+		t.Errorf("expected warning about failed future migration to version 10, got warnings: %v", resNoVersioned.Warnings)
+	}
+	if resNoVersioned.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed (repeatable), got %d", resNoVersioned.MigrationsExecuted)
+	}
+
+	// 6. Parity: No versioned files resolve locally, but 2 failed versioned migrations exist
+	// Flyway stops because more than 1 failed migration exists
+	_ = dbSingleFuture.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 2, Version: &v11Str, Description: "eleven", Type: "SQL", Script: "V11__eleven.sql", Success: false,
+	})
+	mNoVersionedMulti, _ := New(cfgNoVersioned, dbSingleFuture)
+	_, err = mNoVersionedMulti.Migrate(ctx)
+	if err == nil || !strings.Contains(err.Error(), "contains a failed migration") {
+		t.Fatalf("expected Migrate to fail when 0 versioned files resolve and 2 failed migrations exist, got: %v", err)
+	}
 }
 
 func TestInfo_RepeatableMatchedByDescription(t *testing.T) {
