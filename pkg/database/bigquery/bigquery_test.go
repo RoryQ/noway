@@ -75,7 +75,7 @@ func TestIsRetryableBigQueryError(t *testing.T) {
 		{"metadata rate limit error message", errors.New("Exceeded rate limits: too many metadata update operations for table `test`"), true},
 		{"rateLimitExceeded error text", errors.New("googleapi: Error 403: rateLimitExceeded"), true},
 		{"jobRateLimitExceeded error text", errors.New("jobRateLimitExceeded: too many jobs"), true},
-		{"quotaExceeded error text", errors.New("quotaExceeded: table update quota exceeded"), true},
+		{"quotaExceeded error text", errors.New("quotaExceeded: table update quota exceeded"), false},
 		{"backendError text", errors.New("backendError: transient backend issue"), true},
 		{"internalError text", errors.New("internalError: internal failure"), true},
 		{"concurrentModification text", errors.New("concurrentModification: table modified concurrently"), true},
@@ -95,7 +95,7 @@ func TestIsRetryableBigQueryError(t *testing.T) {
 			Errors: []googleapi.ErrorItem{
 				{Reason: "quotaExceeded"},
 			},
-		}, true},
+		}, false},
 		{"googleapi 400 invalidQuery", &googleapi.Error{
 			Code: 400,
 			Errors: []googleapi.ErrorItem{
@@ -103,7 +103,7 @@ func TestIsRetryableBigQueryError(t *testing.T) {
 			},
 		}, false},
 		{"bigquery.Error rateLimitExceeded", &bigquery.Error{Reason: "rateLimitExceeded"}, true},
-		{"bigquery.Error quotaExceeded", &bigquery.Error{Reason: "quotaExceeded"}, true},
+		{"bigquery.Error quotaExceeded", &bigquery.Error{Reason: "quotaExceeded"}, false},
 		{"bigquery.Error notFound", &bigquery.Error{Reason: "notFound"}, false},
 	}
 
@@ -830,14 +830,14 @@ func TestExecuteQuery_RetriesFailedJobWithNewJobIDAndRecovers409OutsideUSAndEU(t
 				mu.Unlock()
 
 				if attempt == 1 {
-					// First attempt fails with retryable quotaExceeded error (after server created job)
+					// First attempt fails with retryable rateLimitExceeded error (after server created job)
 					w.WriteHeader(http.StatusForbidden)
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"error": map[string]any{
 							"code":    403,
-							"message": "Quota exceeded",
+							"message": "Rate limit exceeded",
 							"errors": []map[string]any{
-								{"reason": "quotaExceeded", "message": "Quota exceeded"},
+								{"reason": "rateLimitExceeded", "message": "Rate limit exceeded"},
 							},
 						},
 					})

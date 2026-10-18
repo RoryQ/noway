@@ -401,14 +401,34 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	// Process applied history: failed, undone, and deleted migrations are NOT counted as applied
 	history := processAppliedHistory(applied)
 
+	var maxResolvedVersion *version.Version
+	for _, res := range resolved.VersionedMigrations {
+		if res.Version != nil {
+			if maxResolvedVersion == nil || res.Version.IsNewerThan(*maxResolvedVersion) {
+				maxResolvedVersion = res.Version
+			}
+		}
+	}
+
 	// Flyway parity: refuse to migrate if schema history contains an unrepaired failed migration
 	// (even when validateOnMigrate=false), because non-transactional DDL databases (BigQuery, Spanner)
 	// would re-apply partial changes or apply later migrations on top of a broken state.
-	if len(history.FailedMigrations) > 0 {
+	// EXCEPTION: Flyway only warns if the failed migration is a future version and ignoreFutureMigrations=true.
+	var blockingFailed []resolver.AppliedMigration
+	var futureFailedWarnings []string
+	for _, failed := range history.FailedMigrations {
+		if failed.Version != nil && !failed.Version.IsEmpty() && maxResolvedVersion != nil && failed.Version.IsNewerThan(*maxResolvedVersion) && m.config.IgnoreFutureMigrations {
+			futureFailedWarnings = append(futureFailedWarnings, fmt.Sprintf("Schema %s contains a failed future migration to version %s (%s)!", defaultSchema, failed.Version.String(), failed.Script))
+		} else {
+			blockingFailed = append(blockingFailed, failed)
+		}
+	}
+
+	if len(blockingFailed) > 0 {
 		if !isDryRun {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 		}
-		failed := history.FailedMigrations[0]
+		failed := blockingFailed[0]
 		if failed.Version != nil && !failed.Version.IsEmpty() {
 			return nil, fmt.Errorf("Schema %s contains a failed migration to version %s (%s)! Please run repair to fix the schema history.", defaultSchema, failed.Version.String(), failed.Script)
 		}
@@ -538,8 +558,11 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 		Success:              true,
 		FlywayVersion:        m.FlywayVersion(),
 		Database:             m.DatabaseName(),
-		Warnings:             make([]string, 0),
+		Warnings:             futureFailedWarnings,
 		Operation:            "migrate",
+	}
+	if result.Warnings == nil {
+		result.Warnings = make([]string, 0)
 	}
 
 	currentVersion := maxAppliedVersion
@@ -732,7 +755,10 @@ func (m *Migrator) executeSQLMigration(
 
 	// Record in history table
 	if recErr := m.db.InsertHistory(ctx, schema, table, historyRec); recErr != nil {
-		return nil, fmt.Errorf("migration %s executed, but failed to insert history record: %w", mig.Script, recErr)
+		if execErr == nil {
+			return nil, fmt.Errorf("CRITICAL: migration %s SQL statements succeeded, but failed to insert schema history record (%w). The database schema has been modified, but the migration is unrecorded in %s. Manual intervention (repair or baseline) may be required before running migrate again.", mig.Script, recErr, table)
+		}
+		return nil, fmt.Errorf("migration %s executed with error (%v), and also failed to insert history record: %w", mig.Script, execErr, recErr)
 	}
 
 	if execErr != nil {
@@ -912,7 +938,10 @@ func (m *Migrator) executeScriptMigration(
 	}
 
 	if recErr := m.db.InsertHistory(ctx, schema, table, historyRec); recErr != nil {
-		return nil, fmt.Errorf("script migration %s executed, but failed to insert history record: %w", mig.Script, recErr)
+		if execErr == nil {
+			return nil, fmt.Errorf("CRITICAL: script migration %s completed successfully, but failed to insert schema history record (%w). The database schema has been modified, but the migration is unrecorded in %s. Manual intervention (repair or baseline) may be required before running migrate again.", mig.Script, recErr, table)
+		}
+		return nil, fmt.Errorf("script migration %s executed with error (%v), and also failed to insert history record: %w", mig.Script, execErr, recErr)
 	}
 
 	if execErr != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,8 +46,27 @@ type SpannerDatabase struct {
 	// onHeartbeat is an optional hook called on each heartbeat tick (used for testing).
 	onHeartbeat func(err error)
 
+	// heartbeatAttemptInterceptor is an optional test hook called on each heartbeat attempt.
+	heartbeatAttemptInterceptor func() error
+
 	activeLockMu  sync.Mutex
 	activeLockErr error
+
+	supportsCurrentTSOnce sync.Once
+	supportsCurrentTS     bool
+}
+
+func (db *SpannerDatabase) checkSupportsCurrentTS(ctx context.Context) bool {
+	db.supportsCurrentTSOnce.Do(func() {
+		if db.client == nil {
+			return
+		}
+		iter := db.client.Single().Query(ctx, spanner.NewStatement("SELECT CURRENT_TIMESTAMP()"))
+		defer iter.Stop()
+		_, err := iter.Next()
+		db.supportsCurrentTS = (err == nil)
+	})
+	return db.supportsCurrentTS
 }
 
 var _ database.Database = (*SpannerDatabase)(nil)
@@ -213,10 +233,68 @@ type spannerDDLConstraint struct {
 }
 
 type spannerDDLObjects struct {
-	tables      []string
-	views       []string
-	indexes     []string
-	constraints []spannerDDLConstraint
+	tables       []string
+	views        []string
+	indexes      []string
+	constraints  []spannerDDLConstraint
+	tableParents map[string]string
+}
+
+func isInformationSchemaMissingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	c := status.Code(err)
+	if c == codes.PermissionDenied || c == codes.Unauthenticated {
+		return false
+	}
+	if c == codes.NotFound || c == codes.Unimplemented {
+		return true
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "not found: information_schema") ||
+		strings.Contains(errStr, "unrecognized name: information_schema") ||
+		strings.Contains(errStr, "table not found") ||
+		strings.Contains(errStr, "unexpected trailing query contents")
+}
+
+func getTableDepth(table string, parents map[string]string, visited map[string]bool) int {
+	if visited[table] {
+		return 0
+	}
+	parent, hasParent := parents[table]
+	if !hasParent || parent == "" {
+		return 0
+	}
+	visited[table] = true
+	return 1 + getTableDepth(parent, parents, visited)
+}
+
+func sortTablesChildrenFirst(tables []string, parents map[string]string) []string {
+	type tableWithDepth struct {
+		name  string
+		depth int
+	}
+
+	withDepth := make([]tableWithDepth, len(tables))
+	for i, t := range tables {
+		visited := make(map[string]bool)
+		d := getTableDepth(t, parents, visited)
+		withDepth[i] = tableWithDepth{name: t, depth: d}
+	}
+
+	sort.SliceStable(withDepth, func(i, j int) bool {
+		if withDepth[i].depth != withDepth[j].depth {
+			return withDepth[i].depth > withDepth[j].depth // Higher depth (interleaved children) first
+		}
+		return withDepth[i].name < withDepth[j].name
+	})
+
+	result := make([]string, len(tables))
+	for i, td := range withDepth {
+		result[i] = td.name
+	}
+	return result
 }
 
 func (db *SpannerDatabase) inspectDDL(ctx context.Context) (*spannerDDLObjects, error) {
@@ -230,7 +308,14 @@ func (db *SpannerDatabase) inspectDDL(ctx context.Context) (*spannerDDLObjects, 
 		return nil, err
 	}
 
-	objs := &spannerDDLObjects{}
+	objs := &spannerDDLObjects{
+		tableParents: make(map[string]string),
+	}
+	seenTables := make(map[string]bool)
+	seenIndexes := make(map[string]bool)
+	seenViews := make(map[string]bool)
+	seenConstraints := make(map[string]bool)
+
 	for _, stmtStr := range resp.Statements {
 		stmt, err := spansql.ParseDDLStmt(stmtStr)
 		if err != nil {
@@ -238,26 +323,50 @@ func (db *SpannerDatabase) inspectDDL(ctx context.Context) (*spannerDDLObjects, 
 		}
 		switch s := stmt.(type) {
 		case *spansql.CreateTable:
-			objs.tables = append(objs.tables, string(s.Name))
+			tName := string(s.Name)
+			if !seenTables[tName] {
+				seenTables[tName] = true
+				objs.tables = append(objs.tables, tName)
+			}
+			if s.Interleave != nil && s.Interleave.Parent != "" {
+				objs.tableParents[tName] = string(s.Interleave.Parent)
+			}
 			for _, c := range s.Constraints {
 				if _, isFK := c.Constraint.(spansql.ForeignKey); isFK && c.Name != "" {
-					objs.constraints = append(objs.constraints, spannerDDLConstraint{
-						table:      string(s.Name),
-						constraint: string(c.Name),
-					})
+					cKey := tName + "." + string(c.Name)
+					if !seenConstraints[cKey] {
+						seenConstraints[cKey] = true
+						objs.constraints = append(objs.constraints, spannerDDLConstraint{
+							table:      tName,
+							constraint: string(c.Name),
+						})
+					}
 				}
 			}
 		case *spansql.CreateIndex:
-			objs.indexes = append(objs.indexes, string(s.Name))
+			idxName := string(s.Name)
+			if !seenIndexes[idxName] {
+				seenIndexes[idxName] = true
+				objs.indexes = append(objs.indexes, idxName)
+			}
 		case *spansql.CreateView:
-			objs.views = append(objs.views, string(s.Name))
+			vName := string(s.Name)
+			if !seenViews[vName] {
+				seenViews[vName] = true
+				objs.views = append(objs.views, vName)
+			}
 		case *spansql.AlterTable:
+			tName := string(s.Name)
 			if ac, ok := s.Alteration.(spansql.AddConstraint); ok {
 				if _, isFK := ac.Constraint.Constraint.(spansql.ForeignKey); isFK && ac.Constraint.Name != "" {
-					objs.constraints = append(objs.constraints, spannerDDLConstraint{
-						table:      string(s.Name),
-						constraint: string(ac.Constraint.Name),
-					})
+					cKey := tName + "." + string(ac.Constraint.Name)
+					if !seenConstraints[cKey] {
+						seenConstraints[cKey] = true
+						objs.constraints = append(objs.constraints, spannerDDLConstraint{
+							table:      tName,
+							constraint: string(ac.Constraint.Name),
+						})
+					}
 				}
 			}
 		}
@@ -292,13 +401,15 @@ func (db *SpannerDatabase) SchemaEmpty(ctx context.Context, schema string) (bool
 
 	row, err := iter.Next()
 	if err != nil {
-		if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
-			for _, tName := range objs.tables {
-				if tName != historyTable {
-					return false, nil
+		if isInformationSchemaMissingError(err) {
+			if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
+				for _, tName := range objs.tables {
+					if tName != historyTable {
+						return false, nil
+					}
 				}
+				return true, nil
 			}
-			return true, nil
 		}
 		return false, fmt.Errorf("failed to query tables: %w", err)
 	}
@@ -325,111 +436,151 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 	}
 
 	var ddlStatements []string
+	seenStmts := make(map[string]bool)
+	addStmt := func(s string) {
+		if s != "" && !seenStmts[s] {
+			seenStmts[s] = true
+			ddlStatements = append(ddlStatements, s)
+		}
+	}
 
 	// 1. Foreign key constraints
 	fkSQL := `SELECT CONSTRAINT_NAME, TABLE_NAME 
 	          FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS 
 	          WHERE CONSTRAINT_TYPE = 'FOREIGN KEY' AND TABLE_SCHEMA = ''`
 	iter := db.client.Single().Query(ctx, spanner.NewStatement(fkSQL))
+	var infoSchemaErr error
 	for {
 		row, err := iter.Next()
 		if err == iterator.Done {
 			break
 		}
 		if err != nil {
+			infoSchemaErr = err
 			break
 		}
 		var cName, tName string
 		if err := row.Columns(&cName, &tName); err == nil {
-			ddlStatements = append(ddlStatements, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(tName), db.Quote(cName)))
+			addStmt(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(tName), db.Quote(cName)))
 		}
 	}
 	iter.Stop()
 
 	// 2. Secondary indexes
-	idxSQL := `SELECT INDEX_NAME, TABLE_NAME 
-	           FROM INFORMATION_SCHEMA.INDEXES 
-	           WHERE INDEX_TYPE != 'PRIMARY_KEY' AND TABLE_SCHEMA = '' AND NOT IS_MANAGED`
-	iter = db.client.Single().Query(ctx, spanner.NewStatement(idxSQL))
-	for {
-		row, err := iter.Next()
-		if err == iterator.Done {
-			break
+	if infoSchemaErr == nil {
+		idxSQL := `SELECT INDEX_NAME, TABLE_NAME 
+		           FROM INFORMATION_SCHEMA.INDEXES 
+		           WHERE INDEX_TYPE != 'PRIMARY_KEY' AND TABLE_SCHEMA = '' AND NOT IS_MANAGED`
+		iter = db.client.Single().Query(ctx, spanner.NewStatement(idxSQL))
+		for {
+			row, err := iter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				infoSchemaErr = err
+				break
+			}
+			var idxName, tName string
+			if err := row.Columns(&idxName, &tName); err == nil {
+				addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
+			}
 		}
-		if err != nil {
-			break
-		}
-		var idxName, tName string
-		if err := row.Columns(&idxName, &tName); err == nil {
-			ddlStatements = append(ddlStatements, fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
-		}
+		iter.Stop()
 	}
-	iter.Stop()
 
 	// 3. Views
-	viewsSQL := `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = ''`
-	iter = db.client.Single().Query(ctx, spanner.NewStatement(viewsSQL))
-	for {
-		row, err := iter.Next()
-		if err == iterator.Done {
-			break
+	if infoSchemaErr == nil {
+		viewsSQL := `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = ''`
+		iter = db.client.Single().Query(ctx, spanner.NewStatement(viewsSQL))
+		for {
+			row, err := iter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				infoSchemaErr = err
+				break
+			}
+			var vName string
+			if err := row.Column(0, &vName); err == nil {
+				addStmt(fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
+			}
 		}
-		if err != nil {
-			break
-		}
-		var vName string
-		if err := row.Column(0, &vName); err == nil {
-			ddlStatements = append(ddlStatements, fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
-		}
+		iter.Stop()
 	}
-	iter.Stop()
 
 	preservedTables := make(map[string]bool)
 	// 4. Base tables
-	tblSQL := `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = ''`
-	iter = db.client.Single().Query(ctx, spanner.NewStatement(tblSQL))
-	var tblQueryErr error
-	for {
-		row, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			tblQueryErr = err
-			break
-		}
-		var tName string
-		if err := row.Column(0, &tName); err == nil {
-			if excludeMap[tName] {
-				preservedTables[tName] = true
-				continue
+	if infoSchemaErr == nil {
+		tableParents := make(map[string]string)
+		var tablesToDrop []string
+		tblSQL := `SELECT TABLE_NAME, PARENT_TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = ''`
+		iter = db.client.Single().Query(ctx, spanner.NewStatement(tblSQL))
+		for {
+			row, err := iter.Next()
+			if err == iterator.Done {
+				break
 			}
-			ddlStatements = append(ddlStatements, fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
-		}
-	}
-	iter.Stop()
-
-	// Fallback to GetDatabaseDdl if INFORMATION_SCHEMA is unavailable (e.g., spannertest emulator)
-	if tblQueryErr != nil {
-		if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
-			for _, fk := range objs.constraints {
-				ddlStatements = append(ddlStatements, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(fk.table), db.Quote(fk.constraint)))
+			if err != nil {
+				infoSchemaErr = err
+				break
 			}
-			for _, idxName := range objs.indexes {
-				ddlStatements = append(ddlStatements, fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
-			}
-			for _, vName := range objs.views {
-				ddlStatements = append(ddlStatements, fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
-			}
-			for _, tName := range objs.tables {
+			var tName string
+			var parentTable spanner.NullString
+			if err := row.Columns(&tName, &parentTable); err == nil {
 				if excludeMap[tName] {
 					preservedTables[tName] = true
 					continue
 				}
-				ddlStatements = append(ddlStatements, fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
+				if parentTable.Valid && parentTable.StringVal != "" {
+					tableParents[tName] = parentTable.StringVal
+				}
+				tablesToDrop = append(tablesToDrop, tName)
+			}
+		}
+		iter.Stop()
+
+		if infoSchemaErr == nil {
+			// Sort interleaved children before parents so DROP TABLE does not fail
+			tablesToDrop = sortTablesChildrenFirst(tablesToDrop, tableParents)
+			for _, tName := range tablesToDrop {
+				addStmt(fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
+			}
+		}
+	}
+
+	// Fallback to GetDatabaseDdl if INFORMATION_SCHEMA is unavailable (e.g., spannertest emulator)
+	if infoSchemaErr != nil {
+		if isInformationSchemaMissingError(infoSchemaErr) {
+			// Reset any partial statements and preserved tables collected prior to error to prevent duplicate drops
+			ddlStatements = nil
+			seenStmts = make(map[string]bool)
+			preservedTables = make(map[string]bool)
+
+			if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
+				for _, fk := range objs.constraints {
+					addStmt(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(fk.table), db.Quote(fk.constraint)))
+				}
+				for _, idxName := range objs.indexes {
+					addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
+				}
+				for _, vName := range objs.views {
+					addStmt(fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
+				}
+				orderedTables := sortTablesChildrenFirst(objs.tables, objs.tableParents)
+				for _, tName := range orderedTables {
+					if excludeMap[tName] {
+						preservedTables[tName] = true
+						continue
+					}
+					addStmt(fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
+				}
+			} else {
+				return fmt.Errorf("failed to inspect Spanner DDL for clean: %w", ddlErr)
 			}
 		} else {
-			return fmt.Errorf("failed to query Spanner tables for clean: %w", tblQueryErr)
+			return fmt.Errorf("failed to query Spanner schema for clean: %w", infoSchemaErr)
 		}
 	}
 
@@ -504,13 +655,15 @@ func (db *SpannerDatabase) HistoryTableExists(ctx context.Context, schema, table
 
 	row, err := iter.Next()
 	if err != nil {
-		if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
-			for _, tName := range objs.tables {
-				if tName == tableName {
-					return true, nil
+		if isInformationSchemaMissingError(err) {
+			if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
+				for _, tName := range objs.tables {
+					if tName == tableName {
+						return true, nil
+					}
 				}
+				return false, nil
 			}
-			return false, nil
 		}
 		return false, err
 	}
@@ -746,14 +899,19 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 		retryCount = db.config.LockRetryCount
 	}
 
+	supportsCurTS := db.checkSupportsCurrentTS(ctx)
+
 	var lastErr error
 	for attempt := 0; attempt < retryCount; attempt++ {
 		acquired := false
 		_, err := db.client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
-			// Read lock row
-			stmt := spanner.Statement{
-				SQL: fmt.Sprintf("SELECT version, installed_by, installed_on FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
+			var querySQL string
+			if supportsCurTS {
+				querySQL = fmt.Sprintf("SELECT version, installed_by, installed_on, CURRENT_TIMESTAMP() AS current_ts FROM %s WHERE installed_rank = -1", db.Quote(tableName))
+			} else {
+				querySQL = fmt.Sprintf("SELECT version, installed_by, installed_on FROM %s WHERE installed_rank = -1", db.Quote(tableName))
 			}
+			stmt := spanner.Statement{SQL: querySQL}
 			iter := txn.Query(ctx, stmt)
 			defer iter.Stop()
 
@@ -762,14 +920,24 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 				return err
 			}
 			if err != iterator.Done {
-				// Lock row exists; check if it is still within TTL
 				var verNull spanner.NullString
 				var instBy string
 				var instOn time.Time
-				if scanErr := row.Columns(&verNull, &instBy, &instOn); scanErr != nil {
-					return scanErr
+				var curTS time.Time
+				if supportsCurTS {
+					if scanErr := row.Columns(&verNull, &instBy, &instOn, &curTS); scanErr != nil {
+						return scanErr
+					}
+				} else {
+					if scanErr := row.Columns(&verNull, &instBy, &instOn); scanErr != nil {
+						return scanErr
+					}
 				}
-				if time.Since(instOn) < ttl {
+				now := curTS
+				if now.IsZero() {
+					now = time.Now()
+				}
+				if now.Sub(instOn) < ttl {
 					return fmt.Errorf("lock already held by %s", extractLockOwner(verNull, instBy))
 				}
 			}
@@ -831,55 +999,131 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 				ticker := time.NewTicker(interval)
 				defer ticker.Stop()
 
+				lastHeartbeatSuccess := time.Now()
+				safetyMargin := 2 * time.Minute
+				if ttl <= 2*time.Minute {
+					safetyMargin = ttl / 4
+				}
+				deadline := ttl - safetyMargin
+
+				attemptHeartbeat := func() error {
+					if db.heartbeatAttemptInterceptor != nil {
+						if interceptErr := db.heartbeatAttemptInterceptor(); interceptErr != nil {
+							return interceptErr
+						}
+					}
+					tickTimeout := 30 * time.Second
+					if interval < tickTimeout {
+						tickTimeout = interval / 2
+						if tickTimeout < 500*time.Millisecond {
+							tickTimeout = 500 * time.Millisecond
+						}
+					}
+					tickCtx, cancelTick := context.WithTimeout(heartbeatCtx, tickTimeout)
+					defer cancelTick()
+
+					_, hErr := db.client.ReadWriteTransaction(tickCtx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
+						stmt := spanner.Statement{
+							SQL: fmt.Sprintf("SELECT version, installed_by FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
+						}
+						iter := txn.Query(ctx, stmt)
+						defer iter.Stop()
+
+						row, err := iter.Next()
+						if err == iterator.Done {
+							return fmt.Errorf("lock row missing during heartbeat")
+						}
+						if err != nil {
+							return err
+						}
+
+						var verNull spanner.NullString
+						var instBy string
+						if err := row.Columns(&verNull, &instBy); err != nil {
+							return err
+						}
+						owner := extractLockOwner(verNull, instBy)
+						if owner != lockID {
+							return fmt.Errorf("lock ownership lost during heartbeat: owned by %q, expected %q", owner, lockID)
+						}
+
+						m := spanner.Update(tableName,
+							[]string{"installed_rank", "installed_on"},
+							[]interface{}{int64(-1), spanner.CommitTimestamp},
+						)
+						return txn.BufferWrite([]*spanner.Mutation{m})
+					})
+					return hErr
+				}
+
 				for {
 					select {
 					case <-heartbeatCtx.Done():
 						return
 					case <-ticker.C:
-						_, hErr := db.client.ReadWriteTransaction(heartbeatCtx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
-							stmt := spanner.Statement{
-								SQL: fmt.Sprintf("SELECT version, installed_by FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
-							}
-							iter := txn.Query(ctx, stmt)
-							defer iter.Stop()
-
-							row, err := iter.Next()
-							if err == iterator.Done {
-								return fmt.Errorf("lock row missing during heartbeat")
-							}
-							if err != nil {
-								return err
-							}
-
-							var verNull spanner.NullString
-							var instBy string
-							if err := row.Columns(&verNull, &instBy); err != nil {
-								return err
-							}
-							owner := extractLockOwner(verNull, instBy)
-							if owner != lockID {
-								return fmt.Errorf("lock ownership lost during heartbeat: owned by %q, expected %q", owner, lockID)
-							}
-
-							m := spanner.Update(tableName,
-								[]string{"installed_rank", "installed_on"},
-								[]interface{}{int64(-1), spanner.CommitTimestamp},
-							)
-							return txn.BufferWrite([]*spanner.Mutation{m})
-						})
-
+						hErr := attemptHeartbeat()
 						if heartbeatCtx.Err() != nil {
 							return
 						}
-						if hErr != nil {
+						if hErr == nil {
+							lastHeartbeatSuccess = time.Now()
+							if db.onHeartbeat != nil {
+								db.onHeartbeat(nil)
+							}
+							continue
+						}
+
+						// Check if the lock was lost or missing (non-transient fatal error)
+						if strings.Contains(hErr.Error(), "lock ownership lost") || strings.Contains(hErr.Error(), "lock row missing") {
 							setHeartbeatErr(hErr)
 							if db.onHeartbeat != nil {
 								db.onHeartbeat(hErr)
 							}
 							return
 						}
-						if db.onHeartbeat != nil {
-							db.onHeartbeat(nil)
+
+						// Transient error (e.g. Unavailable, network blip): retry until TTL minus safety margin
+						retryBackoff := 1 * time.Second
+						if interval < 5*time.Second {
+							retryBackoff = 20 * time.Millisecond
+						}
+						success := false
+						for time.Since(lastHeartbeatSuccess) < deadline {
+							select {
+							case <-heartbeatCtx.Done():
+								return
+							case <-time.After(retryBackoff):
+							}
+
+							hErr = attemptHeartbeat()
+							if heartbeatCtx.Err() != nil {
+								return
+							}
+							if hErr == nil {
+								lastHeartbeatSuccess = time.Now()
+								if db.onHeartbeat != nil {
+									db.onHeartbeat(nil)
+								}
+								success = true
+								break
+							}
+							if strings.Contains(hErr.Error(), "lock ownership lost") || strings.Contains(hErr.Error(), "lock row missing") {
+								setHeartbeatErr(hErr)
+								if db.onHeartbeat != nil {
+									db.onHeartbeat(hErr)
+								}
+								return
+							}
+							retryBackoff = min(retryBackoff*2, 10*time.Second)
+						}
+
+						if !success {
+							finalErr := fmt.Errorf("lock heartbeat failed to refresh within TTL safety margin (last refresh %v ago, TTL %v): %w", time.Since(lastHeartbeatSuccess), ttl, hErr)
+							setHeartbeatErr(finalErr)
+							if db.onHeartbeat != nil {
+								db.onHeartbeat(finalErr)
+							}
+							return
 						}
 					}
 				}

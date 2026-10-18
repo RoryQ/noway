@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/roryq/noway/pkg/config"
 	"github.com/roryq/noway/pkg/database"
@@ -686,6 +687,84 @@ func TestSpannerCleanSchemaAndCleanOnValidationError(t *testing.T) {
 			t.Errorf("expected Validate to pass after CleanOnValidationError re-migration, got err=%v, val=%s", err, valRes.Error())
 		}
 	})
+}
+
+func TestSortTablesChildrenFirst(t *testing.T) {
+	parents := map[string]string{
+		"order_items":       "orders",
+		"order_item_notes":  "order_items",
+		"customer_profiles": "customers",
+	}
+	tables := []string{"customers", "orders", "order_item_notes", "order_items", "standalone", "customer_profiles"}
+
+	sorted := sortTablesChildrenFirst(tables, parents)
+
+	pos := make(map[string]int)
+	for i, name := range sorted {
+		pos[name] = i
+	}
+
+	// order_item_notes must come before order_items
+	if pos["order_item_notes"] >= pos["order_items"] {
+		t.Errorf("expected order_item_notes before order_items, got %v", sorted)
+	}
+	// order_items must come before orders
+	if pos["order_items"] >= pos["orders"] {
+		t.Errorf("expected order_items before orders, got %v", sorted)
+	}
+	// customer_profiles must come before customers
+	if pos["customer_profiles"] >= pos["customers"] {
+		t.Errorf("expected customer_profiles before customers, got %v", sorted)
+	}
+}
+
+func TestSpannerHeartbeatRetriesOnTransientError(t *testing.T) {
+	_, client := setupSpannerTestClient(t)
+	ctx := context.Background()
+
+	var attemptCount int64
+	var successCount int64
+
+	db := &SpannerDatabase{
+		client:            client,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 40 * time.Millisecond,
+		lockTTL:           1 * time.Second,
+		heartbeatAttemptInterceptor: func() error {
+			n := atomic.AddInt64(&attemptCount, 1)
+			if n == 1 {
+				// First attempt fails with transient Unavailable error
+				return status.Error(codes.Unavailable, "transient network unavailable")
+			}
+			return nil
+		},
+		onHeartbeat: func(err error) {
+			if err == nil {
+				atomic.AddInt64(&successCount, 1)
+			}
+		},
+	}
+
+	unlock, err := db.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+	defer func() { _ = unlock(ctx) }()
+
+	// Wait for the heartbeat tick and retry
+	time.Sleep(150 * time.Millisecond)
+
+	if attempts := atomic.LoadInt64(&attemptCount); attempts < 2 {
+		t.Errorf("expected at least 2 attempts (1 failure + 1 retry), got %d", attempts)
+	}
+	if successes := atomic.LoadInt64(&successCount); successes < 1 {
+		t.Errorf("expected at least 1 successful heartbeat after retry, got %d", successes)
+	}
+
+	// Active lock error should NOT be set because retry succeeded within safety margin
+	if err := db.checkActiveLockErr(); err != nil {
+		t.Errorf("expected activeLockErr to be nil after successful retry, got: %v", err)
+	}
 }
 
 

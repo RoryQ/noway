@@ -50,12 +50,20 @@ func isFlociAvailable(endpoint string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+func requireOrSkipFloci(t *testing.T, endpoint string) {
+	t.Helper()
+	if !isFlociAvailable(endpoint) {
+		if os.Getenv("FLOCI_BIGQUERY_ENDPOINT") != "" || os.Getenv("REQUIRE_FLOCI") != "" {
+			t.Fatalf("floci-gcp emulator was explicitly requested (FLOCI_BIGQUERY_ENDPOINT=%q), but is not reachable at %s", os.Getenv("FLOCI_BIGQUERY_ENDPOINT"), endpoint)
+		}
+		t.Skip("floci-gcp emulator is not running; skipping floci integration tests")
+	}
+}
+
 // TestFlociGCPIntegration validates noway's BigQuery operations against floci-gcp emulator.
 func TestFlociGCPIntegration(t *testing.T) {
 	endpoint := getFlociEndpoint()
-	if !isFlociAvailable(endpoint) {
-		t.Skip("floci-gcp emulator is not running; skipping floci integration tests")
-	}
+	requireOrSkipFloci(t, endpoint)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -326,9 +334,7 @@ func TestFlociRepeatableMigrationRename(t *testing.T) {
 // TestFlociValidationParity validates Flyway validation parity features against floci-gcp.
 func TestFlociValidationParity(t *testing.T) {
 	endpoint := getFlociEndpoint()
-	if !isFlociAvailable(endpoint) {
-		t.Skip("floci-gcp emulator is not running; skipping floci integration tests")
-	}
+	requireOrSkipFloci(t, endpoint)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()

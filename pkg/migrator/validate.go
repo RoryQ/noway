@@ -216,6 +216,11 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			if app.Deleted || app.Undone {
 				continue
 			}
+			// In Flyway, if app.Version is a future version and IgnoreFutureMigrations=true,
+			// this is FUTURE_FAILED, so it does not fail validation (Flyway only warns on future failed migrations).
+			if app.Version != nil && !app.Version.IsEmpty() && maxResolvedVersion != nil && app.Version.IsNewerThan(*maxResolvedVersion) && m.config.IgnoreFutureMigrations {
+				continue
+			}
 			result.Valid = false
 			result.Errors = append(result.Errors, ValidationError{
 				Version:     app.Version,

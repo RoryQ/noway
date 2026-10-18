@@ -87,6 +87,11 @@ func (db *BigQueryDatabase) getLocation() string {
 	return db.location
 }
 
+// recordLocation records the discovered dataset or job location to use as a fallback default
+// when no explicit GCPLocation is configured in config.Configuration.
+// Note: BigQuery requires queries referencing datasets to run in the dataset's region;
+// if multiple datasets exist across different GCP regions in the same project, set GCPLocation
+// explicitly or ensure dataset-specific queries resolve location per dataset.
 func (db *BigQueryDatabase) recordLocation(loc string) {
 	if loc == "" {
 		return
@@ -669,31 +674,25 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		q.Parameters = []bigquery.QueryParameter{
 			{Name: "lock_id", Value: lockID},
 		}
-		job, err := q.Run(ctx)
-		if err == nil {
-			status, err := db.waitForJob(ctx, job)
-			if err == nil && status.Err() == nil {
-				// Verify if our lock is the active lock holder
-				checkQ := db.client.Query(checkActiveLockSQL)
-				it, err := checkQ.Read(ctx)
-				if err == nil {
-					var row struct {
-						Version string `bigquery:"version"`
-					}
-					if it.Next(&row) == nil {
-						if row.Version == lockID {
-							acquired = true
-							break
-						} else {
-							// Another process holds the lock; delete our extra attempt row
-							selfQ := db.client.Query(delSelfSQL)
-							selfQ.Parameters = []bigquery.QueryParameter{
-								{Name: "lock_id", Value: lockID},
-							}
-							if delJob, err := selfQ.Run(ctx); err == nil {
-								_, _ = db.waitForJob(ctx, delJob)
-							}
+		if err := db.executeQuery(ctx, q); err == nil {
+			// Verify if our lock is the active lock holder
+			checkQ := db.client.Query(checkActiveLockSQL)
+			it, err := checkQ.Read(ctx)
+			if err == nil {
+				var row struct {
+					Version string `bigquery:"version"`
+				}
+				if it.Next(&row) == nil {
+					if row.Version == lockID {
+						acquired = true
+						break
+					} else {
+						// Another process holds the lock; delete our extra attempt row
+						selfQ := db.client.Query(delSelfSQL)
+						selfQ.Parameters = []bigquery.QueryParameter{
+							{Name: "lock_id", Value: lockID},
 						}
+						_ = db.executeQuery(ctx, selfQ)
 					}
 				}
 			}
@@ -708,9 +707,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		cleanQ.Parameters = []bigquery.QueryParameter{
 			{Name: "lock_id", Value: lockID},
 		}
-		if cleanJob, err := cleanQ.Run(context.Background()); err == nil {
-			_, _ = db.waitForJob(context.Background(), cleanJob)
-		}
+		_ = db.executeQuery(context.Background(), cleanQ)
 		return nil, fmt.Errorf("unable to obtain lock on Flyway schema history table %s.%s after %d retries", schema, table, maxRetries)
 	}
 
@@ -737,10 +734,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 				q.Parameters = []bigquery.QueryParameter{
 					{Name: "lock_id", Value: lockID},
 				}
-				job, err := q.Run(heartbeatCtx)
-				if err == nil {
-					_, _ = db.waitForJob(heartbeatCtx, job)
-				}
+				_ = db.executeQuery(heartbeatCtx, q)
 			}
 		}
 	}()
@@ -756,15 +750,10 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		q.Parameters = []bigquery.QueryParameter{
 			{Name: "lock_id", Value: lockID},
 		}
-		job, err := q.Run(unlockCtx)
-		if err != nil {
+		if err := db.executeQuery(unlockCtx, q); err != nil {
 			return fmt.Errorf("failed to release lock: %w", err)
 		}
-		status, err := db.waitForJob(unlockCtx, job)
-		if err != nil {
-			return fmt.Errorf("failed waiting for lock release job: %w", err)
-		}
-		return status.Err()
+		return nil
 	}
 
 	return unlock, nil
@@ -1162,7 +1151,6 @@ func isRetryableBigQueryError(err error) bool {
 	errStr := strings.ToLower(err.Error())
 	if strings.Contains(errStr, "ratelimitexceeded") ||
 		strings.Contains(errStr, "jobratelimitexceeded") ||
-		strings.Contains(errStr, "quotaexceeded") ||
 		strings.Contains(errStr, "exceeded rate limits") ||
 		strings.Contains(errStr, "too many metadata update operations") ||
 		strings.Contains(errStr, "backenderror") ||
@@ -1183,10 +1171,8 @@ func isRetryableReason(reason string) bool {
 	r := strings.ToLower(reason)
 	return r == "ratelimitexceeded" ||
 		r == "jobratelimitexceeded" ||
-		r == "quotaexceeded" ||
 		r == "backenderror" ||
 		r == "internalerror" ||
 		r == "concurrentmodification" ||
-		r == "rate_limit_exceeded" ||
-		r == "quota_exceeded"
+		r == "rate_limit_exceeded"
 }

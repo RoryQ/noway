@@ -1290,3 +1290,133 @@ func TestMigrateDoesNotCountFailedUndoneDeletedAsApplied(t *testing.T) {
 		t.Fatalf("expected 2 migrations re-executed (deleted V3 and undone V4), got %d", res4.MigrationsExecuted)
 	}
 }
+
+func TestMigrate_FutureFailedMigration_WarnsWhenIgnoreFuture(t *testing.T) {
+	ctx := context.Background()
+
+	// Local files only go up to V2
+	fs := fstest.MapFS{
+		"migrations/V1__one.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"migrations/V2__two.sql": &fstest.MapFile{Data: []byte("SELECT 2;")},
+	}
+
+	db := mock.NewMockDatabase()
+	v1Str := "1"
+	v5Str := "5"
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1, Version: &v1Str, Description: "one", Type: "SQL", Script: "V1__one.sql", Success: true,
+	})
+	// V5 is a future failed migration (higher than maxResolvedVersion V2)
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 2, Version: &v5Str, Description: "five", Type: "SQL", Script: "V5__five.sql", Success: false,
+	})
+
+	// 1. With IgnoreFutureMigrations=true (default): Migrate succeeds and warns
+	cfgIgnore := config.NewDefaultConfiguration()
+	cfgIgnore.DefaultSchema = "test_ds"
+	cfgIgnore.FS = fs
+	cfgIgnore.Locations = []string{"migrations"}
+	cfgIgnore.IgnoreFutureMigrations = true
+
+	mIgnore, err := New(cfgIgnore, db)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+	res, err := mIgnore.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("expected Migrate to succeed with warning for future failed migration, got error: %v", err)
+	}
+	if res.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed (V2), got %d", res.MigrationsExecuted)
+	}
+	foundWarning := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "failed future migration to version 5") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Errorf("expected warning about failed future migration to version 5, got warnings: %v", res.Warnings)
+	}
+
+	// 2. With IgnoreFutureMigrations=false: Migrate fails (via validation error)
+	cfgStrict := config.NewDefaultConfiguration()
+	cfgStrict.DefaultSchema = "test_ds"
+	cfgStrict.FS = fs
+	cfgStrict.Locations = []string{"migrations"}
+	cfgStrict.IgnoreFutureMigrations = false
+
+	mStrict, err := New(cfgStrict, db)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+	_, err = mStrict.Migrate(ctx)
+	if err == nil || (!strings.Contains(err.Error(), "Migration V5__five.sql failed in database") && !strings.Contains(err.Error(), "contains a failed migration to version 5")) {
+		t.Errorf("expected error refusing failed migration to version 5 when IgnoreFutureMigrations=false, got: %v", err)
+	}
+
+	// 3. With IgnoreFutureMigrations=false and ValidateOnMigrate=false: Migrate refuses via history.FailedMigrations check
+	cfgStrictNoVal := *cfgStrict
+	cfgStrictNoVal.ValidateOnMigrate = false
+	mStrictNoVal, _ := New(&cfgStrictNoVal, db)
+	_, err = mStrictNoVal.Migrate(ctx)
+	if err == nil || !strings.Contains(err.Error(), "contains a failed migration to version 5") {
+		t.Errorf("expected error refusing failed migration to version 5 when ValidateOnMigrate=false, got: %v", err)
+	}
+}
+
+func TestInfo_RepeatableMatchedByDescription(t *testing.T) {
+	ctx := context.Background()
+
+	// Local file was renamed from R__seed_old.sql to R__seed_new.sql, but description is identical: 'seed'
+	fs := fstest.MapFS{
+		"migrations/R__seed_new.sql": &fstest.MapFile{Data: []byte("SELECT 'seed';")},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+
+	db := mock.NewMockDatabase()
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+
+	// Resolve local migration to compute its checksum
+	resolved, err := m.resolver.Resolve()
+	if err != nil || len(resolved.RepeatableMigrations) != 1 {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	cs := resolved.RepeatableMigrations[0].Checksum
+
+	// Database history has the old script filename with identical description and checksum
+	_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       nil,
+		Description:   resolved.RepeatableMigrations[0].Description,
+		Type:          "SQL",
+		Script:        "R__seed_old.sql",
+		Checksum:      &cs,
+		Success:       true,
+	})
+
+	infoRes, err := m.Info(ctx)
+	if err != nil {
+		t.Fatalf("Info failed: %v", err)
+	}
+
+	if len(infoRes.Migrations) != 1 {
+		t.Fatalf("expected 1 migration info item, got %d: %+v", len(infoRes.Migrations), infoRes.Migrations)
+	}
+
+	item := infoRes.Migrations[0]
+	if item.State != resolver.StateSuccess {
+		t.Errorf("expected repeatable migration to be recognized as StateSuccess by description, got state=%s", item.State)
+	}
+}

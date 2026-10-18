@@ -248,7 +248,7 @@ func computeMigrationInfos(
 ) []resolver.MigrationInfo {
 	var infos []resolver.MigrationInfo
 
-	appliedRepeatables := make(map[string][]resolver.AppliedMigration) // script -> applied runs
+	appliedRepeatables := make(map[string][]resolver.AppliedMigration) // description -> applied runs
 
 	history := processAppliedHistory(applied)
 	maxAppliedVersion := history.MaxAppliedVersion
@@ -259,7 +259,11 @@ func computeMigrationInfos(
 			continue
 		}
 		if app.Version == nil || app.Version.IsEmpty() {
-			appliedRepeatables[app.Script] = append(appliedRepeatables[app.Script], app)
+			key := app.Description
+			if key == "" {
+				key = app.Script
+			}
+			appliedRepeatables[key] = append(appliedRepeatables[key], app)
 		}
 	}
 
@@ -414,8 +418,12 @@ func computeMigrationInfos(
 	// 3. Process Repeatable migrations
 	seenRepeatables := make(map[string]bool)
 	for _, res := range resolved.RepeatableMigrations {
-		seenRepeatables[res.Script] = true
-		runs, wasApplied := appliedRepeatables[res.Script]
+		key := res.Description
+		if key == "" {
+			key = res.Script
+		}
+		seenRepeatables[key] = true
+		runs, wasApplied := appliedRepeatables[key]
 		rCopy := res
 		cs := res.Checksum
 
@@ -489,8 +497,8 @@ func computeMigrationInfos(
 	}
 
 	// 4. Process applied repeatable migrations that are missing locally
-	for script, runs := range appliedRepeatables {
-		if seenRepeatables[script] {
+	for key, runs := range appliedRepeatables {
+		if seenRepeatables[key] {
 			continue
 		}
 		for i, run := range runs {
