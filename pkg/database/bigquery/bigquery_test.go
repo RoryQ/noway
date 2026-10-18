@@ -337,7 +337,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 			return nil, errors.New("rateLimitExceeded: status query error")
 		}
 
-		_, err := submitAndPollJob(context.Background(), "noway-initial", db.retry, submitJob, waitForJob)
+		_, err := submitAndPollJob(context.Background(), "noway-initial", db.retry, submitJob, waitForJob, nil)
 		if err == nil {
 			t.Fatalf("expected error from waitForJob, got nil")
 		}
@@ -362,7 +362,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 			return s, nil
 		}
 
-		_, err := submitAndPollJob(context.Background(), "noway-initial", db.retry, submitJob, waitForJob)
+		_, err := submitAndPollJob(context.Background(), "noway-initial", db.retry, submitJob, waitForJob, nil)
 		if err == nil || !strings.Contains(err.Error(), "query execution failed") {
 			t.Fatalf("expected query execution failed error, got %v", err)
 		}
@@ -393,7 +393,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 			return s, nil
 		}
 
-		status, err := submitAndPollJob(context.Background(), "noway-job-1", db.retry, submitJob, waitForJob)
+		status, err := submitAndPollJob(context.Background(), "noway-job-1", db.retry, submitJob, waitForJob, nil)
 		if err != nil {
 			t.Fatalf("expected retry to succeed after transient status.Err() failures, got %v", err)
 		}
@@ -434,7 +434,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 			return &bigquery.JobStatus{State: bigquery.Done}, nil
 		}
 
-		status, err := submitAndPollJob(context.Background(), "noway-same-id", db.retry, submitJob, waitForJob)
+		status, err := submitAndPollJob(context.Background(), "noway-same-id", db.retry, submitJob, waitForJob, nil)
 		if err != nil {
 			t.Fatalf("expected nil error, got %v", err)
 		}
@@ -465,7 +465,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 			return &bigquery.JobStatus{State: bigquery.Done}, nil
 		}
 
-		status, err := submitAndPollJob(context.Background(), "noway-single", db.retry, submitJob, waitForJob)
+		status, err := submitAndPollJob(context.Background(), "noway-single", db.retry, submitJob, waitForJob, nil)
 		if err != nil {
 			t.Fatalf("expected nil error, got %v", err)
 		}
@@ -474,6 +474,97 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 		if submitCount != 1 {
 			t.Errorf("expected 1 submission, got %d", submitCount)
+		}
+	})
+
+	t.Run("PartiallyExecutedScriptJobWithNumChildJobsDoesNotRetry", func(t *testing.T) {
+		submitCount := 0
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
+			submitCount++
+			return &bigquery.Job{}, nil
+		}
+
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			s := &bigquery.JobStatus{
+				State: bigquery.Done,
+				Statistics: &bigquery.JobStatistics{
+					NumChildJobs: 2, // Statement 1 succeeded, statement 2 failed
+				},
+			}
+			setJobStatusError(s, &bigquery.Error{Reason: "concurrentModification", Message: "Could not serialize access"})
+			return s, nil
+		}
+
+		_, err := submitAndPollJob(context.Background(), "noway-script", db.retry, submitJob, waitForJob, nil)
+		if err == nil {
+			t.Fatalf("expected error from failed job, got nil")
+		}
+		if !strings.Contains(err.Error(), "query execution failed") || !strings.Contains(err.Error(), "concurrentModification") {
+			t.Fatalf("expected concurrentModification execution error, got: %v", err)
+		}
+		if submitCount != 1 {
+			t.Errorf("job with NumChildJobs > 1 was submitted %d times; expected exactly 1 submission (no retry)", submitCount)
+		}
+	})
+
+	t.Run("PartiallyExecutedJobWithMutatedRowsDoesNotRetry", func(t *testing.T) {
+		submitCount := 0
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
+			submitCount++
+			return &bigquery.Job{}, nil
+		}
+
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			s := &bigquery.JobStatus{
+				State: bigquery.Done,
+				Statistics: &bigquery.JobStatistics{
+					Details: &bigquery.QueryStatistics{
+						NumDMLAffectedRows: 5,
+					},
+				},
+			}
+			setJobStatusError(s, &bigquery.Error{Reason: "backendError", Message: "transient backend error"})
+			return s, nil
+		}
+
+		_, err := submitAndPollJob(context.Background(), "noway-dml", db.retry, submitJob, waitForJob, nil)
+		if err == nil {
+			t.Fatalf("expected error from failed job, got nil")
+		}
+		if submitCount != 1 {
+			t.Errorf("job with NumDMLAffectedRows > 0 was submitted %d times; expected exactly 1 submission (no retry)", submitCount)
+		}
+	})
+
+	t.Run("PartiallyExecutedJobDetectedByCallbackDoesNotRetry", func(t *testing.T) {
+		submitCount := 0
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
+			submitCount++
+			return &bigquery.Job{}, nil
+		}
+
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			s := &bigquery.JobStatus{
+				State: bigquery.Done,
+				Statistics: &bigquery.JobStatistics{
+					NumChildJobs: 1,
+				},
+			}
+			setJobStatusError(s, &bigquery.Error{Reason: "concurrentModification", Message: "Could not serialize access"})
+			return s, nil
+		}
+
+		isPartiallyExecuted := func(ctx context.Context, job *bigquery.Job, status *bigquery.JobStatus) bool {
+			// Callback inspected child jobs and found statement 1 succeeded
+			return true
+		}
+
+		_, err := submitAndPollJob(context.Background(), "noway-cb", db.retry, submitJob, waitForJob, isPartiallyExecuted)
+		if err == nil {
+			t.Fatalf("expected error from failed job, got nil")
+		}
+		if submitCount != 1 {
+			t.Errorf("job marked partially executed by callback was submitted %d times; expected exactly 1 submission (no retry)", submitCount)
 		}
 	})
 }
@@ -925,6 +1016,101 @@ func TestExecuteQuery_RetriesFailedJobWithNewJobIDAndRecovers409OutsideUSAndEU(t
 			}
 		}
 	})
+
+	t.Run("ScriptJobPartiallyExecutedWithConcurrentModificationDoesNotRetry", func(t *testing.T) {
+		var mu sync.Mutex
+		var insertedJobIDs []string
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			if r.Method == http.MethodPost && r.URL.Path == "/bigquery/v2/projects/"+projectID+"/jobs" {
+				var body struct {
+					JobReference struct {
+						ProjectID string `json:"projectId"`
+						JobID     string `json:"jobId"`
+						Location  string `json:"location"`
+					} `json:"jobReference"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+
+				mu.Lock()
+				insertedJobIDs = append(insertedJobIDs, body.JobReference.JobID)
+				mu.Unlock()
+
+				resp := map[string]any{
+					"jobReference": map[string]any{
+						"projectId": projectID,
+						"jobId":     body.JobReference.JobID,
+						"location":  region,
+					},
+					"status": map[string]any{
+						"state": "RUNNING",
+					},
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/") {
+				jobID := strings.TrimPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/")
+				resp := map[string]any{
+					"jobReference": map[string]any{
+						"projectId": projectID,
+						"jobId":     jobID,
+						"location":  region,
+					},
+					"status": map[string]any{
+						"state": "DONE",
+						"errorResult": map[string]any{
+							"reason":  "concurrentModification",
+							"message": "Could not serialize access to table due to concurrent update",
+						},
+					},
+					"statistics": map[string]any{
+						"numChildJobs": "2",
+						"query": map[string]any{
+							"statementType": "SCRIPT",
+						},
+					},
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+
+			http.NotFound(w, r)
+		}))
+		defer ts.Close()
+
+		ctx := context.Background()
+		client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+		if err != nil {
+			t.Fatalf("failed to create bigquery client: %v", err)
+		}
+		defer client.Close()
+
+		db := &BigQueryDatabase{
+			client:              client,
+			projectID:           projectID,
+			retryInitialBackoff: 1 * time.Millisecond,
+			retryMaxBackoff:     5 * time.Millisecond,
+		}
+
+		scriptSQL := "BEGIN INSERT INTO `test_ds`.`audit` (id) VALUES (1); UPDATE `test_ds`.`big_table` SET val = 2; END;"
+		err = db.ExecuteStatement(ctx, scriptSQL)
+		if err == nil {
+			t.Fatalf("expected ExecuteStatement to fail on script job error, got nil")
+		}
+		if !strings.Contains(err.Error(), "concurrentModification") {
+			t.Errorf("expected error to contain 'concurrentModification', got: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(insertedJobIDs) != 1 {
+			t.Fatalf("expected script job with numChildJobs > 1 NOT to be retried (1 job submission), but got %d submissions (%v)", len(insertedJobIDs), insertedJobIDs)
+		}
+	})
 }
 
 func TestBigQueryLock_ZeroRetriesPerAttempt(t *testing.T) {
@@ -1116,3 +1302,147 @@ func TestBigQueryHeartbeatCapturesErrorAndFailsUnlock(t *testing.T) {
 	// Clean active lock error
 	db.setActiveLockErr(nil)
 }
+
+func TestHasJobPartiallyExecuted(t *testing.T) {
+	projectID := "test-project"
+
+	t.Run("NilStatusOrStats", func(t *testing.T) {
+		db := &BigQueryDatabase{}
+		if db.hasJobPartiallyExecuted(context.Background(), nil, nil) {
+			t.Errorf("expected false for nil status")
+		}
+		if db.hasJobPartiallyExecuted(context.Background(), nil, &bigquery.JobStatus{}) {
+			t.Errorf("expected false for status with nil statistics")
+		}
+	})
+
+	t.Run("NumChildJobsGreaterThanOne", func(t *testing.T) {
+		db := &BigQueryDatabase{}
+		status := &bigquery.JobStatus{
+			Statistics: &bigquery.JobStatistics{
+				NumChildJobs: 2,
+			},
+		}
+		if !db.hasJobPartiallyExecuted(context.Background(), nil, status) {
+			t.Errorf("expected true when NumChildJobs > 1")
+		}
+	})
+
+	t.Run("DMLMutations", func(t *testing.T) {
+		db := &BigQueryDatabase{}
+		statusAffectedRows := &bigquery.JobStatus{
+			Statistics: &bigquery.JobStatistics{
+				Details: &bigquery.QueryStatistics{
+					NumDMLAffectedRows: 1,
+				},
+			},
+		}
+		if !db.hasJobPartiallyExecuted(context.Background(), nil, statusAffectedRows) {
+			t.Errorf("expected true when NumDMLAffectedRows > 0")
+		}
+
+		statusDMLStats := &bigquery.JobStatus{
+			Statistics: &bigquery.JobStatistics{
+				Details: &bigquery.QueryStatistics{
+					DMLStats: &bigquery.DMLStatistics{
+						InsertedRowCount: 3,
+					},
+				},
+			},
+		}
+		if !db.hasJobPartiallyExecuted(context.Background(), nil, statusDMLStats) {
+			t.Errorf("expected true when InsertedRowCount > 0")
+		}
+	})
+
+	t.Run("DDLOperations", func(t *testing.T) {
+		db := &BigQueryDatabase{}
+		statusDDL := &bigquery.JobStatus{
+			Statistics: &bigquery.JobStatistics{
+				Details: &bigquery.QueryStatistics{
+					DDLOperationPerformed: "CREATE",
+				},
+			},
+		}
+		if !db.hasJobPartiallyExecuted(context.Background(), nil, statusDDL) {
+			t.Errorf("expected true when DDLOperationPerformed is non-empty")
+		}
+	})
+
+	t.Run("ChildJobInspectionViaClientJobs", func(t *testing.T) {
+		parentJobID := "parent-script-job"
+		childJobID := "child-statement-job"
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			// jobs.list with parentJobId
+			if r.Method == http.MethodGet && r.URL.Path == "/bigquery/v2/projects/"+projectID+"/jobs" {
+				if r.URL.Query().Get("parentJobId") == parentJobID {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"jobs": []map[string]any{
+							{
+								"jobReference": map[string]any{
+									"projectId": projectID,
+									"jobId":     childJobID,
+									"location":  "US",
+								},
+								"status": map[string]any{
+									"state": "DONE",
+								},
+							},
+						},
+					})
+					return
+				}
+			}
+
+			// jobs.get for parent or child job
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/") {
+				jid := strings.TrimPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jobReference": map[string]any{
+						"projectId": projectID,
+						"jobId":     jid,
+						"location":  "US",
+					},
+					"status": map[string]any{
+						"state": "DONE",
+					},
+				})
+				return
+			}
+
+			http.NotFound(w, r)
+		}))
+		defer ts.Close()
+
+		ctx := context.Background()
+		client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+		defer client.Close()
+
+		db := &BigQueryDatabase{
+			client:    client,
+			projectID: projectID,
+		}
+
+		parentJob, err := client.JobFromProject(ctx, projectID, parentJobID, "US")
+		if err != nil {
+			t.Fatalf("failed to create parent job handle: %v", err)
+		}
+
+		parentStatus := &bigquery.JobStatus{
+			Statistics: &bigquery.JobStatistics{
+				NumChildJobs: 1, // Only 1 child job, but it succeeded!
+			},
+		}
+
+		if !db.hasJobPartiallyExecuted(ctx, parentJob, parentStatus) {
+			t.Errorf("expected hasJobPartiallyExecuted to return true after child job inspection found succeeded child job")
+		}
+	})
+}
+

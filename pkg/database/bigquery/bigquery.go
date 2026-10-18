@@ -838,7 +838,8 @@ func (db *BigQueryDatabase) ExecuteStatement(ctx context.Context, sql string) er
 // executeQuery submits a query job and waits for it to complete.
 // Transient submission failures retry with the same job ID (allowing 409 recovery if the server
 // created the job), status polling errors never resubmit the job, and completed jobs whose
-// status.Err() is retryable retry with a new job ID (safe because a failed job has no effect).
+// status.Err() is retryable retry with a new job ID only if the job has not partially executed (e.g. multi-statement
+// script jobs where prior statements succeeded and committed, or DML mutated rows).
 func (db *BigQueryDatabase) executeQuery(ctx context.Context, q *bigquery.Query) error {
 	maxRetries := 5
 	if db.config != nil && db.config.ConnectRetries > 0 {
@@ -877,6 +878,7 @@ func (db *BigQueryDatabase) executeQueryWithRetries(ctx context.Context, q *bigq
 			return job, nil
 		},
 		db.waitForJob,
+		db.hasJobPartiallyExecuted,
 	)
 	return err
 }
@@ -1021,13 +1023,16 @@ func (e *nonRetryableError) Unwrap() error {
 //   - Transient submission errors retry with the same job ID.
 //   - Status polling errors (waitForJob) never resubmit the job.
 //   - Completed jobs with a retryable status.Err() (e.g. rateLimitExceeded or backendError)
-//     retry with a newly generated job ID because a failed job has no effect.
+//     retry with a newly generated job ID ONLY if the job has not partially executed.
+//     If the job has partially executed (e.g. multi-statement script jobs where prior statements
+//     succeeded and committed, or DML mutated rows), retry is refused to prevent duplicate execution.
 func submitAndPollJob(
 	ctx context.Context,
 	initialJobID string,
 	retryOp func(context.Context, func() error) error,
 	submitJob func(ctx context.Context, jobID string) (*bigquery.Job, error),
 	waitForJob func(context.Context, *bigquery.Job) (*bigquery.JobStatus, error),
+	isPartiallyExecuted func(context.Context, *bigquery.Job, *bigquery.JobStatus) bool,
 ) (*bigquery.JobStatus, error) {
 	currentJobID := initialJobID
 	if currentJobID == "" {
@@ -1049,7 +1054,11 @@ func submitAndPollJob(
 
 		if jobErr := status.Err(); jobErr != nil {
 			execErr := fmt.Errorf("query execution failed: %w", jobErr)
-			if isRetryableBigQueryError(jobErr) {
+			partiallyExecuted := defaultIsPartiallyExecuted(status)
+			if !partiallyExecuted && isPartiallyExecuted != nil {
+				partiallyExecuted = isPartiallyExecuted(ctx, job, status)
+			}
+			if !partiallyExecuted && isRetryableBigQueryError(jobErr) {
 				currentJobID = "noway-" + uuid.New().String()
 				return execErr
 			}
@@ -1062,6 +1071,82 @@ func submitAndPollJob(
 		return nil, err
 	}
 	return status, nil
+}
+
+// hasJobPartiallyExecuted checks whether a BigQuery job (especially a script / multi-statement query)
+// has already executed any part of its workload (e.g. one or more child statements completed,
+// or rows were mutated). If so, retrying the entire job from the beginning is unsafe because
+// already-committed child statements or partial mutations would run a second time.
+func (db *BigQueryDatabase) hasJobPartiallyExecuted(ctx context.Context, job *bigquery.Job, status *bigquery.JobStatus) bool {
+	if status == nil {
+		return false
+	}
+	if defaultIsPartiallyExecuted(status) {
+		return true
+	}
+
+	// If the job is a script with child jobs, inspect them to see if any child statement completed successfully
+	// or mutated data before the failure occurred.
+	if db != nil && db.client != nil && job != nil && status.Statistics != nil && (status.Statistics.NumChildJobs > 0 || status.Statistics.ScriptStatistics != nil) {
+		it := db.client.Jobs(ctx)
+		it.ParentJobID = job.ID()
+		if job.ProjectID() != "" {
+			it.ProjectID = job.ProjectID()
+		} else if db.projectID != "" {
+			it.ProjectID = db.projectID
+		}
+		for {
+			if ctx.Err() != nil {
+				return false
+			}
+			childJob, err := it.Next()
+			if err != nil {
+				break
+			}
+			childStatus, err := childJob.Status(ctx)
+			if err == nil && childStatus != nil {
+				if childStatus.Done() && childStatus.Err() == nil {
+					return true
+				}
+				if childStatus.Statistics != nil {
+					if qs, ok := childStatus.Statistics.Details.(*bigquery.QueryStatistics); ok {
+						if qs.NumDMLAffectedRows > 0 {
+							return true
+						}
+						if qs.DMLStats != nil && (qs.DMLStats.InsertedRowCount > 0 || qs.DMLStats.UpdatedRowCount > 0 || qs.DMLStats.DeletedRowCount > 0) {
+							return true
+						}
+						if qs.DDLTargetTable != nil || qs.DDLOperationPerformed != "" || qs.DDLTargetRoutine != nil {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func defaultIsPartiallyExecuted(status *bigquery.JobStatus) bool {
+	if status == nil || status.Statistics == nil {
+		return false
+	}
+	if status.Statistics.NumChildJobs > 1 {
+		return true
+	}
+	if qs, ok := status.Statistics.Details.(*bigquery.QueryStatistics); ok {
+		if qs.NumDMLAffectedRows > 0 {
+			return true
+		}
+		if qs.DMLStats != nil && (qs.DMLStats.InsertedRowCount > 0 || qs.DMLStats.UpdatedRowCount > 0 || qs.DMLStats.DeletedRowCount > 0) {
+			return true
+		}
+		if qs.DDLTargetTable != nil || qs.DDLOperationPerformed != "" || qs.DDLTargetRoutine != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // waitForJob polls job.Status until completion, with backoff and retry on transient status errors.
