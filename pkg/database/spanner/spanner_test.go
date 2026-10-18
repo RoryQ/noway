@@ -5,9 +5,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"cloud.google.com/go/spanner"
+	databaseAdmin "cloud.google.com/go/spanner/admin/database/apiv1"
 	"cloud.google.com/go/spanner/spannertest"
 	"cloud.google.com/go/spanner/spansql"
 	"google.golang.org/api/option"
@@ -16,6 +18,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
+	"github.com/roryq/noway/pkg/migrator"
 )
 
 func TestQuote(t *testing.T) {
@@ -491,5 +495,198 @@ func TestSpannerLockHeartbeatErrorPropagation(t *testing.T) {
 		t.Errorf("expected intruder lock row to remain intact, got owner=%q exists=%v", ownerAfter, exists)
 	}
 }
+
+func setupSpannerTestDB(t *testing.T) (*spannertest.Server, *SpannerDatabase) {
+	t.Helper()
+	srv, err := spannertest.NewServer("localhost:0")
+	if err != nil {
+		t.Fatalf("failed to start spannertest server: %v", err)
+	}
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	conn, err := grpc.DialContext(ctx, srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial spannertest server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	dbURI := "projects/test-proj/instances/test-inst/databases/test-db"
+	client, err := spanner.NewClient(ctx, dbURI, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("failed to create spanner client: %v", err)
+	}
+	t.Cleanup(client.Close)
+
+	adminClient, err := databaseAdmin.NewDatabaseAdminClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("failed to create spanner database admin client: %v", err)
+	}
+	t.Cleanup(func() { _ = adminClient.Close() })
+
+	db := &SpannerDatabase{
+		client:      client,
+		adminClient: adminClient,
+		projectID:   "test-proj",
+		instanceID:  "test-inst",
+		databaseID:  "test-db",
+		config:      &config.Configuration{LockRetryCount: 1},
+	}
+	return srv, db
+}
+
+func TestSpannerCleanSchemaAndCleanOnValidationError(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("CleanSchemaWithExcludeTables_PreservesLockRowAndDeletesMigrationRows", func(t *testing.T) {
+		_, db := setupSpannerTestDB(t)
+
+		// Create history table and a user table via real Spanner DDL
+		if err := db.EnsureHistoryTable(ctx, "", "flyway_schema_history"); err != nil {
+			t.Fatalf("EnsureHistoryTable failed: %v", err)
+		}
+		if err := db.ExecuteStatement(ctx, "CREATE TABLE users (id INT64 NOT NULL, name STRING(100)) PRIMARY KEY (id)"); err != nil {
+			t.Fatalf("failed creating users table: %v", err)
+		}
+
+		// Acquire active lock (-1, 'flyway-lock')
+		unlock, err := db.Lock(ctx, "", "flyway_schema_history")
+		if err != nil {
+			t.Fatalf("Lock failed: %v", err)
+		}
+
+		// Insert applied migration rows (including one whose description happens to be 'flyway-lock' at rank 2)
+		v1 := "1"
+		v2 := "2"
+		cs1 := int64(111)
+		cs2 := int64(222)
+		if err := db.InsertHistory(ctx, "", "flyway_schema_history", database.HistoryRecord{
+			InstalledRank: 1,
+			Version:       &v1,
+			Description:   "create users",
+			Type:          "SQL",
+			Script:        "V1__create_users.sql",
+			Checksum:      &cs1,
+			InstalledBy:   "tester",
+			Success:       true,
+		}); err != nil {
+			t.Fatalf("InsertHistory V1 failed: %v", err)
+		}
+		if err := db.InsertHistory(ctx, "", "flyway_schema_history", database.HistoryRecord{
+			InstalledRank: 2,
+			Version:       &v2,
+			Description:   "flyway-lock",
+			Type:          "SQL",
+			Script:        "V2__flyway-lock.sql",
+			Checksum:      &cs2,
+			InstalledBy:   "tester",
+			Success:       true,
+		}); err != nil {
+			t.Fatalf("InsertHistory V2 failed: %v", err)
+		}
+
+		// Run CleanSchema excluding flyway_schema_history
+		if err := db.CleanSchema(ctx, "", "flyway_schema_history"); err != nil {
+			t.Fatalf("CleanSchema with excludeTables failed: %v", err)
+		}
+
+		// 1. User table 'users' must have been dropped
+		usersExists, err := db.HistoryTableExists(ctx, "", "users")
+		if err != nil {
+			t.Fatalf("checking users table existence failed: %v", err)
+		}
+		if usersExists {
+			t.Errorf("expected user table 'users' to be dropped by CleanSchema")
+		}
+
+		// 2. History table 'flyway_schema_history' must still exist
+		historyExists, err := db.HistoryTableExists(ctx, "", "flyway_schema_history")
+		if err != nil || !historyExists {
+			t.Fatalf("expected flyway_schema_history to be preserved, exists=%v err=%v", historyExists, err)
+		}
+
+		// 3. All migration rows (rank >= 0) must be deleted
+		applied, err := db.FetchHistory(ctx, "", "flyway_schema_history")
+		if err != nil {
+			t.Fatalf("FetchHistory failed: %v", err)
+		}
+		if len(applied) != 0 {
+			t.Errorf("expected 0 migration rows after CleanSchema, got %d: %+v", len(applied), applied)
+		}
+
+		// 4. The active lock row at installed_rank = -1 must still exist after CleanSchema
+		ownerVer, instBy, _, lockExists := readLockRow(t, ctx, db.client)
+		if !lockExists || ownerVer == "" || ownerVer != instBy {
+			t.Fatalf("expected lock row to survive CleanSchema, got exists=%v owner=%q", lockExists, ownerVer)
+		}
+
+		// 5. Unlock must succeed cleanly
+		if err := unlock(ctx); err != nil {
+			t.Fatalf("unlock after CleanSchema failed: %v", err)
+		}
+	})
+
+	t.Run("EndToEndMigrate_CleanOnValidationError_AgainstSpannerEmulator", func(t *testing.T) {
+		_, db := setupSpannerTestDB(t)
+
+		fs := fstest.MapFS{
+			"migrations/V1__create_users.sql": &fstest.MapFile{
+				Data: []byte("CREATE TABLE users (id INT64 NOT NULL) PRIMARY KEY (id);"),
+			},
+		}
+
+		cfg := config.NewDefaultConfiguration()
+		cfg.FS = fs
+		cfg.Locations = []string{"migrations"}
+		cfg.LockRetryCount = 1
+
+		m1, err := migrator.New(cfg, db)
+		if err != nil {
+			t.Fatalf("migrator.New failed: %v", err)
+		}
+
+		res1, err := m1.Migrate(ctx)
+		if err != nil {
+			t.Fatalf("initial Migrate failed: %v", err)
+		}
+		if res1.MigrationsExecuted != 1 {
+			t.Fatalf("expected 1 migration executed, got %d", res1.MigrationsExecuted)
+		}
+
+		// Modify V1 to cause a validation checksum mismatch
+		fs["migrations/V1__create_users.sql"] = &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64 NOT NULL, name STRING(50)) PRIMARY KEY (id);"),
+		}
+
+		cfgClean := *cfg
+		cfgClean.CleanOnValidationError = true
+		cfgClean.CleanDisabled = false
+
+		m2, err := migrator.New(&cfgClean, db)
+		if err != nil {
+			t.Fatalf("migrator.New for m2 failed: %v", err)
+		}
+
+		res2, err := m2.Migrate(ctx)
+		if err != nil {
+			t.Fatalf("Migrate with CleanOnValidationError against Spanner emulator failed: %v", err)
+		}
+		if !res2.Success || res2.MigrationsExecuted != 1 {
+			t.Fatalf("expected 1 migration re-executed after cleanOnValidationError, got exec=%d success=%v", res2.MigrationsExecuted, res2.Success)
+		}
+
+		// Lock row must be removed after Migrate completes
+		if _, _, _, lockExists := readLockRow(t, ctx, db.client); lockExists {
+			t.Errorf("expected lock row to be removed after Migrate completes")
+		}
+
+		// Validate must now pass
+		valRes, err := m2.Validate(ctx)
+		if err != nil || !valRes.Valid {
+			t.Errorf("expected Validate to pass after CleanOnValidationError re-migration, got err=%v, val=%s", err, valRes.Error())
+		}
+	})
+}
+
 
 

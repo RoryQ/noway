@@ -508,5 +508,39 @@ func TestFlociValidationParity(t *testing.T) {
 			t.Errorf("expected (future) error message, got: %s", valResStrict.Error())
 		}
 	})
+
+	// -------------------------------------------------------------------------
+	// 5. CleanOnValidationError Parity (preserves lock row, drops tables, re-migrates)
+	// -------------------------------------------------------------------------
+	t.Run("CleanOnValidationError", func(t *testing.T) {
+		fsTampered := fstest.MapFS{
+			"migrations/V1__init.sql": &fstest.MapFile{
+				Data: []byte("CREATE TABLE IF NOT EXISTS `" + projectID + "." + datasetName + ".t1` (id INT64, name STRING);"),
+			},
+			"migrations/.keep": &fstest.MapFile{Data: []byte("")},
+		}
+
+		cfgClean := baseCfg(fsTampered)
+		cfgClean.CleanOnValidationError = true
+		cfgClean.CleanDisabled = false
+		mClean, err := migrator.New(cfgClean, db)
+		if err != nil {
+			t.Fatalf("failed to create migrator: %v", err)
+		}
+
+		migResClean, err := mClean.Migrate(ctx)
+		if err != nil {
+			t.Fatalf("Migrate with CleanOnValidationError failed on floci-gcp: %v", err)
+		}
+		if !migResClean.Success || migResClean.MigrationsExecuted != 1 {
+			t.Fatalf("expected 1 migration re-executed after CleanOnValidationError, got exec=%d success=%v", migResClean.MigrationsExecuted, migResClean.Success)
+		}
+
+		valAfterClean, err := mClean.Validate(ctx)
+		if err != nil || !valAfterClean.Valid {
+			t.Fatalf("expected Validate to pass after CleanOnValidationError, got err=%v, val=%s", err, valAfterClean.Error())
+		}
+	})
 }
+
 

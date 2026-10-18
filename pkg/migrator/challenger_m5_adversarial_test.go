@@ -1207,17 +1207,18 @@ func TestChallenger_M5_CleanOnValidationError(t *testing.T) {
 					_ = concurrentUnlock(ctx)
 					t.Errorf("expected concurrent migrator to be blocked by active lock during cleanOnValidationError")
 				}
-				// 4. Raw history MUST contain the lock row
+				// 4. Raw history MUST still contain the lock row and have all migration rows removed after CleanSchema
 				raw := baseDB.RawHistory(schema, "flyway_schema_history")
 				var foundLock bool
 				for _, r := range raw {
-					if r.Description == "flyway-lock" {
+					if r.Description == "flyway-lock" && r.InstalledRank < 0 {
 						foundLock = true
-						break
+					} else {
+						t.Errorf("expected non-lock history row to be deleted by CleanSchema, found %+v", r)
 					}
 				}
 				if !foundLock {
-					t.Errorf("expected lock row to exist in history table during cleanOnValidationError")
+					t.Errorf("expected lock row to survive CleanSchema in history table during cleanOnValidationError")
 				}
 			},
 		}
@@ -1281,10 +1282,11 @@ func (c *cleanInspectorDB) Lock(ctx context.Context, schema, table string) (data
 }
 
 func (c *cleanInspectorDB) CleanSchema(ctx context.Context, schema string, excludeTables ...string) error {
+	err := c.MockDatabase.CleanSchema(ctx, schema, excludeTables...)
 	if c.onCleanSchema != nil {
 		c.onCleanSchema(schema, excludeTables...)
 	}
-	return c.MockDatabase.CleanSchema(ctx, schema, excludeTables...)
+	return err
 }
 
 // =================================================================================================

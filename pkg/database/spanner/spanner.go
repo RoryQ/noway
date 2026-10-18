@@ -11,6 +11,7 @@ import (
 	"cloud.google.com/go/spanner"
 	databaseAdmin "cloud.google.com/go/spanner/admin/database/apiv1"
 	"cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
+	"cloud.google.com/go/spanner/spansql"
 	"github.com/google/uuid"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -206,6 +207,64 @@ func (db *SpannerDatabase) SchemaExists(ctx context.Context, schema string) (boo
 	return false, err
 }
 
+type spannerDDLConstraint struct {
+	table      string
+	constraint string
+}
+
+type spannerDDLObjects struct {
+	tables      []string
+	views       []string
+	indexes     []string
+	constraints []spannerDDLConstraint
+}
+
+func (db *SpannerDatabase) inspectDDL(ctx context.Context) (*spannerDDLObjects, error) {
+	if db.adminClient == nil {
+		return nil, fmt.Errorf("adminClient is nil")
+	}
+	resp, err := db.adminClient.GetDatabaseDdl(ctx, &databasepb.GetDatabaseDdlRequest{
+		Database: db.databasePath(),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	objs := &spannerDDLObjects{}
+	for _, stmtStr := range resp.Statements {
+		stmt, err := spansql.ParseDDLStmt(stmtStr)
+		if err != nil {
+			continue
+		}
+		switch s := stmt.(type) {
+		case *spansql.CreateTable:
+			objs.tables = append(objs.tables, string(s.Name))
+			for _, c := range s.Constraints {
+				if _, isFK := c.Constraint.(spansql.ForeignKey); isFK && c.Name != "" {
+					objs.constraints = append(objs.constraints, spannerDDLConstraint{
+						table:      string(s.Name),
+						constraint: string(c.Name),
+					})
+				}
+			}
+		case *spansql.CreateIndex:
+			objs.indexes = append(objs.indexes, string(s.Name))
+		case *spansql.CreateView:
+			objs.views = append(objs.views, string(s.Name))
+		case *spansql.AlterTable:
+			if ac, ok := s.Alteration.(spansql.AddConstraint); ok {
+				if _, isFK := ac.Constraint.Constraint.(spansql.ForeignKey); isFK && ac.Constraint.Name != "" {
+					objs.constraints = append(objs.constraints, spannerDDLConstraint{
+						table:      string(s.Name),
+						constraint: string(ac.Constraint.Name),
+					})
+				}
+			}
+		}
+	}
+	return objs, nil
+}
+
 // SchemaEmpty checks if the database has no user tables (excluding schema history table).
 func (db *SpannerDatabase) SchemaEmpty(ctx context.Context, schema string) (bool, error) {
 	exists, err := db.SchemaExists(ctx, schema)
@@ -233,6 +292,14 @@ func (db *SpannerDatabase) SchemaEmpty(ctx context.Context, schema string) (bool
 
 	row, err := iter.Next()
 	if err != nil {
+		if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
+			for _, tName := range objs.tables {
+				if tName != historyTable {
+					return false, nil
+				}
+			}
+			return true, nil
+		}
 		return false, fmt.Errorf("failed to query tables: %w", err)
 	}
 	var count int64
@@ -321,12 +388,14 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 	// 4. Base tables
 	tblSQL := `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = ''`
 	iter = db.client.Single().Query(ctx, spanner.NewStatement(tblSQL))
+	var tblQueryErr error
 	for {
 		row, err := iter.Next()
 		if err == iterator.Done {
 			break
 		}
 		if err != nil {
+			tblQueryErr = err
 			break
 		}
 		var tName string
@@ -339,6 +408,30 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 		}
 	}
 	iter.Stop()
+
+	// Fallback to GetDatabaseDdl if INFORMATION_SCHEMA is unavailable (e.g., spannertest emulator)
+	if tblQueryErr != nil {
+		if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
+			for _, fk := range objs.constraints {
+				ddlStatements = append(ddlStatements, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(fk.table), db.Quote(fk.constraint)))
+			}
+			for _, idxName := range objs.indexes {
+				ddlStatements = append(ddlStatements, fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
+			}
+			for _, vName := range objs.views {
+				ddlStatements = append(ddlStatements, fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
+			}
+			for _, tName := range objs.tables {
+				if excludeMap[tName] {
+					preservedTables[tName] = true
+					continue
+				}
+				ddlStatements = append(ddlStatements, fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
+			}
+		} else {
+			return fmt.Errorf("failed to query Spanner tables for clean: %w", tblQueryErr)
+		}
+	}
 
 	if len(ddlStatements) > 0 {
 		op, err := db.adminClient.UpdateDatabaseDdl(ctx, &databasepb.UpdateDatabaseDdlRequest{
@@ -411,6 +504,14 @@ func (db *SpannerDatabase) HistoryTableExists(ctx context.Context, schema, table
 
 	row, err := iter.Next()
 	if err != nil {
+		if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
+			for _, tName := range objs.tables {
+				if tName == tableName {
+					return true, nil
+				}
+			}
+			return false, nil
+		}
 		return false, err
 	}
 	var count int64

@@ -29,9 +29,7 @@ func (m *Migrator) cleanInternal(ctx context.Context, preserveTable string) (*Cl
 	defaultSchema := m.config.GetDefaultSchema()
 	schemas := m.config.Schemas
 	if len(schemas) == 0 {
-		if defaultSchema != "" {
-			schemas = []string{defaultSchema}
-		}
+		schemas = []string{defaultSchema}
 	}
 
 	// 1. Fire beforeClean callbacks
