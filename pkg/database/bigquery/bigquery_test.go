@@ -2,15 +2,20 @@ package bigquery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
 
 	"cloud.google.com/go/bigquery"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 
 	"github.com/roryq/noway/pkg/config"
 )
@@ -308,6 +313,11 @@ func TestPollJobStatus(t *testing.T) {
 	})
 }
 
+func setJobStatusError(s *bigquery.JobStatus, err error) {
+	val := reflect.ValueOf(s).Elem().FieldByName("err")
+	reflect.NewAt(val.Type(), unsafe.Pointer(val.UnsafeAddr())).Elem().Set(reflect.ValueOf(err))
+}
+
 func TestSubmitAndPollJob(t *testing.T) {
 	db := &BigQueryDatabase{
 		retryInitialBackoff: 1 * time.Millisecond,
@@ -316,7 +326,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 
 	t.Run("StatusPollingErrorDoesNotResubmitJob", func(t *testing.T) {
 		submitCount := 0
-		submitJob := func(ctx context.Context) (*bigquery.Job, error) {
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
 			submitCount++
 			return &bigquery.Job{}, nil
 		}
@@ -327,7 +337,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 			return nil, errors.New("rateLimitExceeded: status query error")
 		}
 
-		_, err := submitAndPollJob(context.Background(), db.retry, submitJob, waitForJob)
+		_, err := submitAndPollJob(context.Background(), "noway-initial", db.retry, submitJob, waitForJob)
 		if err == nil {
 			t.Fatalf("expected error from waitForJob, got nil")
 		}
@@ -339,21 +349,20 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 	})
 
-	t.Run("JobExecutionFailureDoesNotResubmitJob", func(t *testing.T) {
+	t.Run("NonRetryableJobExecutionFailureDoesNotResubmitJob", func(t *testing.T) {
 		submitCount := 0
-		submitJob := func(ctx context.Context) (*bigquery.Job, error) {
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
 			submitCount++
 			return &bigquery.Job{}, nil
 		}
 
 		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
 			s := &bigquery.JobStatus{State: bigquery.Done}
-			val := reflect.ValueOf(s).Elem().FieldByName("err")
-			reflect.NewAt(val.Type(), unsafe.Pointer(val.UnsafeAddr())).Elem().Set(reflect.ValueOf(errors.New("job internal failure")))
+			setJobStatusError(s, errors.New("syntax error at [1:10]"))
 			return s, nil
 		}
 
-		_, err := submitAndPollJob(context.Background(), db.retry, submitJob, waitForJob)
+		_, err := submitAndPollJob(context.Background(), "noway-initial", db.retry, submitJob, waitForJob)
 		if err == nil || !strings.Contains(err.Error(), "query execution failed") {
 			t.Fatalf("expected query execution failed error, got %v", err)
 		}
@@ -362,11 +371,58 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 	})
 
-	t.Run("SubmissionRetriedOnTransientSubmissionFailure", func(t *testing.T) {
-		submitCount := 0
-		submitJob := func(ctx context.Context) (*bigquery.Job, error) {
-			submitCount++
-			if submitCount < 3 {
+	t.Run("RetryableJobExecutionFailureRetriesWithNewJobID", func(t *testing.T) {
+		var submittedJobIDs []string
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
+			submittedJobIDs = append(submittedJobIDs, jobID)
+			return &bigquery.Job{}, nil
+		}
+
+		pollCount := 0
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			pollCount++
+			s := &bigquery.JobStatus{State: bigquery.Done}
+			if pollCount == 1 {
+				setJobStatusError(s, &bigquery.Error{Reason: "rateLimitExceeded", Message: "Exceeded rate limits"})
+				return s, nil
+			}
+			if pollCount == 2 {
+				setJobStatusError(s, &bigquery.Error{Reason: "backendError", Message: "Transient backend error"})
+				return s, nil
+			}
+			return s, nil
+		}
+
+		status, err := submitAndPollJob(context.Background(), "noway-job-1", db.retry, submitJob, waitForJob)
+		if err != nil {
+			t.Fatalf("expected retry to succeed after transient status.Err() failures, got %v", err)
+		}
+		if !status.Done() {
+			t.Errorf("expected status.Done() to be true")
+		}
+		if len(submittedJobIDs) != 3 {
+			t.Fatalf("expected 3 job submissions, got %d (%v)", len(submittedJobIDs), submittedJobIDs)
+		}
+		if submittedJobIDs[0] != "noway-job-1" {
+			t.Errorf("expected first job ID to be noway-job-1, got %q", submittedJobIDs[0])
+		}
+		seen := make(map[string]bool)
+		for i, id := range submittedJobIDs {
+			if id == "" {
+				t.Errorf("attempt %d had empty job ID", i)
+			}
+			if seen[id] {
+				t.Errorf("expected a new job ID after failed job, but job ID %q was reused across attempts (%v)", id, submittedJobIDs)
+			}
+			seen[id] = true
+		}
+	})
+
+	t.Run("SubmissionRetriedOnTransientSubmissionFailureKeepsSameJobID", func(t *testing.T) {
+		var submittedJobIDs []string
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
+			submittedJobIDs = append(submittedJobIDs, jobID)
+			if len(submittedJobIDs) < 3 {
 				return nil, errors.New("backendError: submission failed")
 			}
 			return &bigquery.Job{}, nil
@@ -378,15 +434,20 @@ func TestSubmitAndPollJob(t *testing.T) {
 			return &bigquery.JobStatus{State: bigquery.Done}, nil
 		}
 
-		status, err := submitAndPollJob(context.Background(), db.retry, submitJob, waitForJob)
+		status, err := submitAndPollJob(context.Background(), "noway-same-id", db.retry, submitJob, waitForJob)
 		if err != nil {
 			t.Fatalf("expected nil error, got %v", err)
 		}
 		if !status.Done() {
 			t.Errorf("expected status.Done() to be true")
 		}
-		if submitCount != 3 {
-			t.Errorf("expected 3 submissions, got %d", submitCount)
+		if len(submittedJobIDs) != 3 {
+			t.Fatalf("expected 3 submissions, got %d", len(submittedJobIDs))
+		}
+		for i, id := range submittedJobIDs {
+			if id != "noway-same-id" {
+				t.Errorf("attempt %d used job ID %q; expected same job ID 'noway-same-id'", i, id)
+			}
 		}
 		if pollCount != 1 {
 			t.Errorf("expected 1 poll, got %d", pollCount)
@@ -395,7 +456,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 
 	t.Run("SuccessSingleAttempt", func(t *testing.T) {
 		submitCount := 0
-		submitJob := func(ctx context.Context) (*bigquery.Job, error) {
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
 			submitCount++
 			return &bigquery.Job{}, nil
 		}
@@ -404,7 +465,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 			return &bigquery.JobStatus{State: bigquery.Done}, nil
 		}
 
-		status, err := submitAndPollJob(context.Background(), db.retry, submitJob, waitForJob)
+		status, err := submitAndPollJob(context.Background(), "noway-single", db.retry, submitJob, waitForJob)
 		if err != nil {
 			t.Fatalf("expected nil error, got %v", err)
 		}
@@ -413,6 +474,455 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 		if submitCount != 1 {
 			t.Errorf("expected 1 submission, got %d", submitCount)
+		}
+	})
+}
+
+func TestExecuteQuery_RetriesFailedJobWithNewJobIDAndRecovers409OutsideUSAndEU(t *testing.T) {
+	const (
+		projectID = "test-project"
+		region    = "australia-southeast1"
+	)
+
+	t.Run("ExecuteQueryRetriesFailedJobWithNewJobID", func(t *testing.T) {
+		var mu sync.Mutex
+		var insertedJobIDs []string
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			if r.Method == http.MethodPost && r.URL.Path == "/bigquery/v2/projects/"+projectID+"/jobs" {
+				var body struct {
+					JobReference struct {
+						ProjectID string `json:"projectId"`
+						JobID     string `json:"jobId"`
+						Location  string `json:"location"`
+					} `json:"jobReference"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				mu.Lock()
+				insertedJobIDs = append(insertedJobIDs, body.JobReference.JobID)
+				attempt := len(insertedJobIDs)
+				mu.Unlock()
+
+				resp := map[string]any{
+					"jobReference": map[string]any{
+						"projectId": projectID,
+						"jobId":     body.JobReference.JobID,
+						"location":  region,
+					},
+					"status": map[string]any{
+						"state": "RUNNING",
+					},
+				}
+				if attempt == 1 {
+					// First job will fail with rateLimitExceeded when polled
+					_ = json.NewEncoder(w).Encode(resp)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/") {
+				jobID := strings.TrimPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/")
+				mu.Lock()
+				firstJobID := ""
+				if len(insertedJobIDs) > 0 {
+					firstJobID = insertedJobIDs[0]
+				}
+				mu.Unlock()
+
+				status := map[string]any{
+					"state": "DONE",
+				}
+				if jobID == firstJobID {
+					status["errorResult"] = map[string]any{
+						"reason":  "rateLimitExceeded",
+						"message": "Exceeded rate limits: too many table update operations",
+					}
+				}
+				resp := map[string]any{
+					"jobReference": map[string]any{
+						"projectId": projectID,
+						"jobId":     jobID,
+						"location":  region,
+					},
+					"status": status,
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			}
+
+			http.NotFound(w, r)
+		}))
+		defer ts.Close()
+
+		ctx := context.Background()
+		client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+		if err != nil {
+			t.Fatalf("failed to create bigquery client: %v", err)
+		}
+		defer client.Close()
+
+		db := &BigQueryDatabase{
+			client:              client,
+			projectID:           projectID,
+			retryInitialBackoff: 1 * time.Millisecond,
+			retryMaxBackoff:     5 * time.Millisecond,
+		}
+
+		if err := db.ExecuteStatement(ctx, "CREATE TABLE `test_ds`.`t` (id INT64)"); err != nil {
+			t.Fatalf("expected ExecuteStatement to succeed after retrying failed job, got: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(insertedJobIDs) != 2 {
+			t.Fatalf("expected 2 jobs to be inserted, got %d (%v)", len(insertedJobIDs), insertedJobIDs)
+		}
+		if insertedJobIDs[0] == insertedJobIDs[1] {
+			t.Fatalf("expected second attempt to use a new job ID, but both used %q", insertedJobIDs[0])
+		}
+	})
+
+	t.Run("409RecoveryWithoutGCPLocation_ViaDatasetMetadata", func(t *testing.T) {
+		var mu sync.Mutex
+		var getJobLocations []string
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			// Dataset metadata endpoint returns non-US/EU location
+			if r.Method == http.MethodGet && r.URL.Path == "/bigquery/v2/projects/"+projectID+"/datasets/regional_schema" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"datasetReference": map[string]any{
+						"projectId": projectID,
+						"datasetId": "regional_schema",
+					},
+					"location": region,
+				})
+				return
+			}
+
+			// Job insert returns 409 (without location in error text to test dataset metadata resolution)
+			if r.Method == http.MethodPost && r.URL.Path == "/bigquery/v2/projects/"+projectID+"/jobs" {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{
+						"code":    409,
+						"message": "Already Exists: duplicate job",
+					},
+				})
+				return
+			}
+
+			// Job get: outside US/EU, BigQuery returns 404 if location is not specified!
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/") {
+				jobID := strings.TrimPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/")
+				loc := r.URL.Query().Get("location")
+				mu.Lock()
+				getJobLocations = append(getJobLocations, loc)
+				mu.Unlock()
+
+				if loc != region {
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"error": map[string]any{
+							"code":    404,
+							"message": "Not found: Job " + projectID + ":" + jobID,
+						},
+					})
+					return
+				}
+
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jobReference": map[string]any{
+						"projectId": projectID,
+						"jobId":     jobID,
+						"location":  region,
+					},
+					"status": map[string]any{
+						"state": "DONE",
+					},
+				})
+				return
+			}
+
+			http.NotFound(w, r)
+		}))
+		defer ts.Close()
+
+		ctx := context.Background()
+		client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+		if err != nil {
+			t.Fatalf("failed to create bigquery client: %v", err)
+		}
+		defer client.Close()
+
+		// GCPLocation / db.location is intentionally left empty!
+		db := &BigQueryDatabase{
+			client:              client,
+			projectID:           projectID,
+			config:              &config.Configuration{DefaultSchema: "regional_schema"},
+			retryInitialBackoff: 1 * time.Millisecond,
+			retryMaxBackoff:     5 * time.Millisecond,
+		}
+
+		if err := db.ExecuteStatement(ctx, "CREATE TABLE `regional_schema`.`t` (id INT64)"); err != nil {
+			t.Fatalf("expected 409 recovery outside US/EU without GCPLocation to succeed, got: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(getJobLocations) == 0 {
+			t.Fatalf("expected JobFromProject / Status to be called")
+		}
+		for i, loc := range getJobLocations {
+			if loc != region {
+				t.Errorf("jobs.get call %d used location %q; want %q", i, loc, region)
+			}
+		}
+	})
+
+	t.Run("409RecoveryWithoutGCPLocation_ViaJobsListFallback", func(t *testing.T) {
+		const tokyoRegion = "asia-northeast1"
+		var mu sync.Mutex
+		var lastInsertedJobID string
+		var getJobLocations []string
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			// Job insert returns generic 409 (no location in error message, no dataset configured)
+			if r.Method == http.MethodPost && r.URL.Path == "/bigquery/v2/projects/"+projectID+"/jobs" {
+				var body struct {
+					JobReference struct {
+						JobID string `json:"jobId"`
+					} `json:"jobReference"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				mu.Lock()
+				lastInsertedJobID = body.JobReference.JobID
+				mu.Unlock()
+
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{
+						"code":    409,
+						"message": "Already Exists: duplicate job",
+					},
+				})
+				return
+			}
+
+			// Jobs.List endpoint returns the job with its asia-northeast1 location
+			if r.Method == http.MethodGet && r.URL.Path == "/bigquery/v2/projects/"+projectID+"/jobs" {
+				mu.Lock()
+				jid := lastInsertedJobID
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jobs": []map[string]any{
+						{
+							"jobReference": map[string]any{
+								"projectId": projectID,
+								"jobId":     jid,
+								"location":  tokyoRegion,
+							},
+							"status": map[string]any{
+								"state": "DONE",
+							},
+						},
+					},
+				})
+				return
+			}
+
+			// Jobs.Get requires location=asia-northeast1
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/") {
+				jobID := strings.TrimPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/")
+				loc := r.URL.Query().Get("location")
+				mu.Lock()
+				getJobLocations = append(getJobLocations, loc)
+				mu.Unlock()
+
+				if loc != tokyoRegion {
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"error": map[string]any{
+							"code":    404,
+							"message": "Not found: Job " + projectID + ":" + jobID,
+						},
+					})
+					return
+				}
+
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jobReference": map[string]any{
+						"projectId": projectID,
+						"jobId":     jobID,
+						"location":  tokyoRegion,
+					},
+					"status": map[string]any{
+						"state": "DONE",
+					},
+				})
+				return
+			}
+
+			http.NotFound(w, r)
+		}))
+		defer ts.Close()
+
+		ctx := context.Background()
+		client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+		if err != nil {
+			t.Fatalf("failed to create bigquery client: %v", err)
+		}
+		defer client.Close()
+
+		// Neither GCPLocation nor DefaultSchema is set
+		db := &BigQueryDatabase{
+			client:              client,
+			projectID:           projectID,
+			retryInitialBackoff: 1 * time.Millisecond,
+			retryMaxBackoff:     5 * time.Millisecond,
+		}
+
+		if err := db.ExecuteStatement(ctx, "CREATE TABLE `tokyo_ds`.`t` (id INT64)"); err != nil {
+			t.Fatalf("expected 409 recovery via Jobs.List fallback to succeed, got: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(getJobLocations) == 0 {
+			t.Fatalf("expected jobs.get to be called with discovered location")
+		}
+		for i, loc := range getJobLocations {
+			if loc != tokyoRegion {
+				t.Errorf("jobs.get call %d used location %q; want %q", i, loc, tokyoRegion)
+			}
+		}
+	})
+
+	t.Run("SubmissionRetryHits409AndRecoversVia409ErrorLocation", func(t *testing.T) {
+		var mu sync.Mutex
+		var postJobIDs []string
+		var getJobLocations []string
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			if r.Method == http.MethodPost && r.URL.Path == "/bigquery/v2/projects/"+projectID+"/jobs" {
+				var body struct {
+					JobReference struct {
+						JobID string `json:"jobId"`
+					} `json:"jobReference"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				mu.Lock()
+				postJobIDs = append(postJobIDs, body.JobReference.JobID)
+				attempt := len(postJobIDs)
+				mu.Unlock()
+
+				if attempt == 1 {
+					// First attempt fails with retryable quotaExceeded error (after server created job)
+					w.WriteHeader(http.StatusForbidden)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"error": map[string]any{
+							"code":    403,
+							"message": "Quota exceeded",
+							"errors": []map[string]any{
+								{"reason": "quotaExceeded", "message": "Quota exceeded"},
+							},
+						},
+					})
+					return
+				}
+
+				// Second attempt with the SAME job ID hits 409 Already Exists
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{
+						"code":    409,
+						"message": "Already Exists: Job " + projectID + ":" + region + "." + body.JobReference.JobID + ", duplicate",
+					},
+				})
+				return
+			}
+
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/") {
+				jobID := strings.TrimPrefix(r.URL.Path, "/bigquery/v2/projects/"+projectID+"/jobs/")
+				loc := r.URL.Query().Get("location")
+				mu.Lock()
+				getJobLocations = append(getJobLocations, loc)
+				mu.Unlock()
+
+				if loc != region {
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"error": map[string]any{
+							"code":    404,
+							"message": "Not found: Job " + projectID + ":" + jobID,
+						},
+					})
+					return
+				}
+
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jobReference": map[string]any{
+						"projectId": projectID,
+						"jobId":     jobID,
+						"location":  region,
+					},
+					"status": map[string]any{
+						"state": "DONE",
+					},
+				})
+				return
+			}
+
+			http.NotFound(w, r)
+		}))
+		defer ts.Close()
+
+		ctx := context.Background()
+		client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+		if err != nil {
+			t.Fatalf("failed to create bigquery client: %v", err)
+		}
+		defer client.Close()
+
+		db := &BigQueryDatabase{
+			client:              client,
+			projectID:           projectID,
+			retryInitialBackoff: 1 * time.Millisecond,
+			retryMaxBackoff:     5 * time.Millisecond,
+		}
+
+		if err := db.ExecuteStatement(ctx, "CREATE TABLE `sydney_ds`.`t` (id INT64)"); err != nil {
+			t.Fatalf("expected submission retry + 409 recovery to succeed, got: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(postJobIDs) != 2 {
+			t.Fatalf("expected 2 POST /jobs calls, got %d (%v)", len(postJobIDs), postJobIDs)
+		}
+		if postJobIDs[0] != postJobIDs[1] {
+			t.Errorf("expected submission retry to reuse job ID %q, got %q", postJobIDs[0], postJobIDs[1])
+		}
+		if len(getJobLocations) == 0 {
+			t.Fatalf("expected JobFromProject to be called")
+		}
+		for i, loc := range getJobLocations {
+			if loc != region {
+				t.Errorf("jobs.get call %d used location %q; want %q", i, loc, region)
+			}
 		}
 	})
 }

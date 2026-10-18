@@ -27,6 +27,7 @@ type BigQueryDatabase struct {
 	client              *bigquery.Client
 	projectID           string
 	location            string
+	locationMu          sync.RWMutex
 	config              *config.Configuration
 	retryInitialBackoff time.Duration
 	retryMaxBackoff     time.Duration
@@ -80,6 +81,23 @@ func New(ctx context.Context, cfg *config.Configuration) (*BigQueryDatabase, err
 	}, nil
 }
 
+func (db *BigQueryDatabase) getLocation() string {
+	db.locationMu.RLock()
+	defer db.locationMu.RUnlock()
+	return db.location
+}
+
+func (db *BigQueryDatabase) recordLocation(loc string) {
+	if loc == "" {
+		return
+	}
+	db.locationMu.Lock()
+	defer db.locationMu.Unlock()
+	if db.location == "" {
+		db.location = loc
+	}
+}
+
 // Close closes the BigQuery client.
 func (db *BigQueryDatabase) Close() error {
 	if db.client != nil {
@@ -128,7 +146,7 @@ func (db *BigQueryDatabase) EnsureSchema(ctx context.Context, schema string) err
 
 	ds := db.client.Dataset(schema)
 	meta := &bigquery.DatasetMetadata{
-		Location: db.location,
+		Location: db.getLocation(),
 	}
 	return db.retry(ctx, func() error {
 		err := ds.Create(ctx, meta)
@@ -147,8 +165,11 @@ func (db *BigQueryDatabase) EnsureSchema(ctx context.Context, schema string) err
 
 // SchemaExists checks if the dataset exists.
 func (db *BigQueryDatabase) SchemaExists(ctx context.Context, schema string) (bool, error) {
-	_, err := db.client.Dataset(schema).Metadata(ctx)
+	meta, err := db.client.Dataset(schema).Metadata(ctx)
 	if err == nil {
+		if meta != nil {
+			db.recordLocation(meta.Location)
+		}
 		return true, nil
 	}
 	errLower := strings.ToLower(err.Error())
@@ -380,8 +401,11 @@ func (db *BigQueryDatabase) EnsureHistoryTable(ctx context.Context, schema, tabl
 
 // HistoryTableExists checks if the history table exists.
 func (db *BigQueryDatabase) HistoryTableExists(ctx context.Context, schema, table string) (bool, error) {
-	_, err := db.client.Dataset(schema).Table(table).Metadata(ctx)
+	meta, err := db.client.Dataset(schema).Table(table).Metadata(ctx)
 	if err == nil {
+		if meta != nil {
+			db.recordLocation(meta.Location)
+		}
 		return true, nil
 	}
 	errLower := strings.ToLower(err.Error())
@@ -760,29 +784,34 @@ func (db *BigQueryDatabase) ExecuteStatement(ctx context.Context, sql string) er
 	return nil
 }
 
-// executeQuery submits a query job with retry on submission failures, and then waits for the submitted job
-// to complete outside of the submission retry loop. This ensures a job is never submitted twice if status
-// polling fails or encounters a transient error.
+// executeQuery submits a query job and waits for it to complete.
+// Transient submission failures retry with the same job ID (allowing 409 recovery if the server
+// created the job), status polling errors never resubmit the job, and completed jobs whose
+// status.Err() is retryable retry with a new job ID (safe because a failed job has no effect).
 func (db *BigQueryDatabase) executeQuery(ctx context.Context, q *bigquery.Query) error {
-	if q.JobIDConfig.JobID == "" {
-		q.JobIDConfig.JobID = "noway-" + uuid.New().String()
+	initialJobID := q.JobIDConfig.JobID
+	if initialJobID == "" {
+		initialJobID = "noway-" + uuid.New().String()
 	}
 
 	_, err := submitAndPollJob(
 		ctx,
+		initialJobID,
 		db.retry,
-		func(submitCtx context.Context) (*bigquery.Job, error) {
+		func(submitCtx context.Context, jobID string) (*bigquery.Job, error) {
+			q.JobIDConfig.JobID = jobID
 			job, err := q.Run(submitCtx)
 			if err != nil {
 				errLower := strings.ToLower(err.Error())
 				if strings.Contains(errLower, "already exists") || strings.Contains(errLower, "duplicate") || strings.Contains(err.Error(), "409") {
-					if db.client != nil {
-						if existingJob, getErr := db.client.JobFromProject(submitCtx, db.projectID, q.JobIDConfig.JobID, db.location); getErr == nil {
-							return existingJob, nil
-						}
+					if existingJob, getErr := db.recoverExistingJob(submitCtx, q, jobID, err); getErr == nil {
+						return existingJob, nil
 					}
 				}
 				return nil, err
+			}
+			if job != nil {
+				db.recordLocation(job.Location())
 			}
 			return job, nil
 		},
@@ -791,30 +820,185 @@ func (db *BigQueryDatabase) executeQuery(ctx context.Context, q *bigquery.Query)
 	return err
 }
 
-// submitAndPollJob separates job submission (which may be retried on transient submission failures)
-// from job status polling (which must never cause the job to be resubmitted).
-func submitAndPollJob(
-	ctx context.Context,
-	retryOp func(context.Context, func() error) error,
-	submitJob func(context.Context) (*bigquery.Job, error),
-	waitForJob func(context.Context, *bigquery.Job) (*bigquery.JobStatus, error),
-) (*bigquery.JobStatus, error) {
-	var job *bigquery.Job
-	err := retryOp(ctx, func() error {
-		var submitErr error
-		job, submitErr = submitJob(ctx)
-		return submitErr
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to run query: %w", err)
+func (db *BigQueryDatabase) recoverExistingJob(ctx context.Context, q *bigquery.Query, jobID string, submitErr error) (*bigquery.Job, error) {
+	if db.client == nil {
+		return nil, fmt.Errorf("bigquery client is nil")
 	}
 
-	status, err := waitForJob(ctx, job)
-	if err != nil {
-		return nil, fmt.Errorf("query execution wait failed: %w", err)
+	projectID := db.projectID
+	if q != nil && q.JobIDConfig.ProjectID != "" {
+		projectID = q.JobIDConfig.ProjectID
 	}
-	if err := status.Err(); err != nil {
-		return nil, fmt.Errorf("query execution failed: %w", err)
+
+	loc := ""
+	if q != nil && q.JobIDConfig.Location != "" {
+		loc = q.JobIDConfig.Location
+	}
+	if loc == "" {
+		loc = db.getLocation()
+	}
+	if loc == "" && db.client.Location != "" {
+		loc = db.client.Location
+	}
+	if loc == "" {
+		loc = extractJobLocationFromError(submitErr, jobID)
+		if loc != "" {
+			db.recordLocation(loc)
+		}
+	}
+	if loc == "" {
+		loc = db.resolveDatasetLocation(ctx, q)
+	}
+
+	if loc != "" {
+		if existingJob, err := db.client.JobFromProject(ctx, projectID, jobID, loc); err == nil {
+			db.recordLocation(existingJob.Location())
+			return existingJob, nil
+		}
+	}
+
+	// Fallback: list jobs in the project (which does not require a location parameter and returns
+	// jobs across all regions, including outside US and EU) to discover the job and its location.
+	it := db.client.Jobs(ctx)
+	if projectID != "" {
+		it.ProjectID = projectID
+	}
+	for i := 0; i < 100; i++ {
+		j, iterErr := it.Next()
+		if iterErr == iterator.Done {
+			break
+		}
+		if iterErr != nil {
+			break
+		}
+		if j != nil && j.ID() == jobID {
+			if j.Location() != "" {
+				db.recordLocation(j.Location())
+				if existingJob, getErr := db.client.JobFromProject(ctx, projectID, jobID, j.Location()); getErr == nil {
+					return existingJob, nil
+				}
+			}
+			return j, nil
+		}
+	}
+
+	return db.client.JobFromProject(ctx, projectID, jobID, loc)
+}
+
+func (db *BigQueryDatabase) resolveDatasetLocation(ctx context.Context, q *bigquery.Query) string {
+	if db.client == nil {
+		return ""
+	}
+
+	var candidates []string
+	seen := make(map[string]bool)
+	addCandidate := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" && !seen[s] {
+			seen[s] = true
+			candidates = append(candidates, s)
+		}
+	}
+
+	if q != nil && q.DefaultDatasetID != "" {
+		addCandidate(q.DefaultDatasetID)
+	}
+	if db.config != nil {
+		addCandidate(db.config.GetDefaultSchema())
+		for _, s := range db.config.Schemas {
+			addCandidate(s)
+		}
+	}
+
+	for _, schema := range candidates {
+		meta, err := db.client.Dataset(schema).Metadata(ctx)
+		if err == nil && meta != nil && meta.Location != "" {
+			db.recordLocation(meta.Location)
+			return meta.Location
+		}
+	}
+
+	return ""
+}
+
+// extractJobLocationFromError extracts the BigQuery location from a 409 duplicate job error message
+// when formatted as "Already Exists: Job <project>:<location>.<jobID>".
+func extractJobLocationFromError(err error, jobID string) string {
+	if err == nil || jobID == "" {
+		return ""
+	}
+	errStr := err.Error()
+	idx := strings.Index(errStr, "."+jobID)
+	if idx <= 0 {
+		return ""
+	}
+	prefix := errStr[:idx]
+	colonIdx := strings.LastIndex(prefix, ":")
+	if colonIdx < 0 || colonIdx+1 >= len(prefix) {
+		return ""
+	}
+	loc := strings.TrimSpace(prefix[colonIdx+1:])
+	if loc == "" || strings.ContainsAny(loc, " \t\n\r/\"'") {
+		return ""
+	}
+	return loc
+}
+
+type nonRetryableError struct {
+	err error
+}
+
+func (e *nonRetryableError) Error() string {
+	return e.err.Error()
+}
+
+func (e *nonRetryableError) Unwrap() error {
+	return e.err
+}
+
+// submitAndPollJob submits a job and polls for its completion.
+//   - Transient submission errors retry with the same job ID.
+//   - Status polling errors (waitForJob) never resubmit the job.
+//   - Completed jobs with a retryable status.Err() (e.g. rateLimitExceeded or backendError)
+//     retry with a newly generated job ID because a failed job has no effect.
+func submitAndPollJob(
+	ctx context.Context,
+	initialJobID string,
+	retryOp func(context.Context, func() error) error,
+	submitJob func(ctx context.Context, jobID string) (*bigquery.Job, error),
+	waitForJob func(context.Context, *bigquery.Job) (*bigquery.JobStatus, error),
+) (*bigquery.JobStatus, error) {
+	currentJobID := initialJobID
+	if currentJobID == "" {
+		currentJobID = "noway-" + uuid.New().String()
+	}
+
+	var status *bigquery.JobStatus
+	err := retryOp(ctx, func() error {
+		job, submitErr := submitJob(ctx, currentJobID)
+		if submitErr != nil {
+			return fmt.Errorf("failed to run query: %w", submitErr)
+		}
+
+		var waitErr error
+		status, waitErr = waitForJob(ctx, job)
+		if waitErr != nil {
+			return &nonRetryableError{err: fmt.Errorf("query execution wait failed: %w", waitErr)}
+		}
+
+		if jobErr := status.Err(); jobErr != nil {
+			execErr := fmt.Errorf("query execution failed: %w", jobErr)
+			if isRetryableBigQueryError(jobErr) {
+				currentJobID = "noway-" + uuid.New().String()
+				return execErr
+			}
+			return &nonRetryableError{err: execErr}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return status, nil
 }
@@ -933,6 +1117,10 @@ func (db *BigQueryDatabase) retry(ctx context.Context, op func() error) error {
 			continue
 		}
 
+		var nonRetryable *nonRetryableError
+		if errors.As(err, &nonRetryable) {
+			return nonRetryable.err
+		}
 		return err
 	}
 
@@ -941,6 +1129,11 @@ func (db *BigQueryDatabase) retry(ctx context.Context, op func() error) error {
 
 func isRetryableBigQueryError(err error) bool {
 	if err == nil {
+		return false
+	}
+
+	var nonRetryable *nonRetryableError
+	if errors.As(err, &nonRetryable) {
 		return false
 	}
 
