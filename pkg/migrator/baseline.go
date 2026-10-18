@@ -26,7 +26,7 @@ type BaselineResult struct {
 }
 
 // Baseline baselines an existing database, setting the baseline version marker.
-func (m *Migrator) Baseline(ctx context.Context) (*BaselineResult, error) {
+func (m *Migrator) Baseline(ctx context.Context) (res *BaselineResult, retErr error) {
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 
@@ -56,7 +56,9 @@ func (m *Migrator) Baseline(ctx context.Context) (*BaselineResult, error) {
 		return nil, fmt.Errorf("failed to acquire lock for baseline: %w", err)
 	}
 	defer func() {
-		_ = unlock(context.Background())
+		if uErr := unlock(context.Background()); uErr != nil && retErr == nil {
+			retErr = uErr
+		}
 	}()
 
 	return m.baselineInternal(ctx, defaultSchema, table)

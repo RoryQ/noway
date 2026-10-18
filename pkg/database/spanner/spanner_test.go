@@ -12,6 +12,7 @@ import (
 	"cloud.google.com/go/spanner/spansql"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/roryq/noway/pkg/config"
@@ -203,26 +204,27 @@ func TestNewValidation(t *testing.T) {
 	}
 }
 
-func TestSpannerLockAndHeartbeat(t *testing.T) {
+func setupSpannerTestClient(t *testing.T) (*spannertest.Server, *spanner.Client) {
+	t.Helper()
 	srv, err := spannertest.NewServer("localhost:0")
 	if err != nil {
 		t.Fatalf("failed to start spannertest server: %v", err)
 	}
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	ctx := context.Background()
 	conn, err := grpc.DialContext(ctx, srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("failed to dial spannertest server: %v", err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() { _ = conn.Close() })
 
 	dbURI := "projects/test-proj/instances/test-inst/databases/test-db"
 	client, err := spanner.NewClient(ctx, dbURI, option.WithGRPCConn(conn))
 	if err != nil {
 		t.Fatalf("failed to create spanner client: %v", err)
 	}
-	defer client.Close()
+	t.Cleanup(client.Close)
 
 	ddl, err := spansql.ParseDDL("schema.sql", `CREATE TABLE flyway_schema_history (
 		installed_rank INT64 NOT NULL,
@@ -243,44 +245,98 @@ func TestSpannerLockAndHeartbeat(t *testing.T) {
 		t.Fatalf("failed to update DDL in spannertest: %v", err)
 	}
 
+	return srv, client
+}
+
+func readLockRow(t *testing.T, ctx context.Context, client *spanner.Client) (ownerVersion string, installedBy string, installedOn time.Time, exists bool) {
+	t.Helper()
+	row, err := client.Single().ReadRow(ctx, "flyway_schema_history", spanner.Key{int64(-1)}, []string{"version", "installed_by", "installed_on"})
+	if err != nil {
+		if spanner.ErrCode(err) == codes.NotFound || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return "", "", time.Time{}, false
+		}
+		t.Fatalf("unexpected error reading lock row: %v", err)
+	}
+	var verNull spanner.NullString
+	if err := row.Columns(&verNull, &installedBy, &installedOn); err != nil {
+		t.Fatalf("failed to scan lock row: %v", err)
+	}
+	return verNull.StringVal, installedBy, installedOn, true
+}
+
+func TestSpannerLockAndHeartbeat(t *testing.T) {
+	_, client := setupSpannerTestClient(t)
+	ctx := context.Background()
+
 	var heartbeatCount int64
+	var heartbeatErrCount int64
 	db := &SpannerDatabase{
 		client:            client,
 		config:            &config.Configuration{LockRetryCount: 1},
 		heartbeatInterval: 30 * time.Millisecond,
 		onHeartbeat: func(err error) {
 			if err != nil {
-				t.Logf("heartbeat tick error: %v", err)
+				atomic.AddInt64(&heartbeatErrCount, 1)
+				t.Errorf("unexpected heartbeat error: %v", err)
+				return
 			}
 			atomic.AddInt64(&heartbeatCount, 1)
 		},
 	}
 
-	// 1. Acquire lock
+	// 1. Acquire lock and verify owner ID and initial installed_on timestamp
 	unlock, err := db.Lock(ctx, "", "flyway_schema_history")
 	if err != nil {
 		t.Fatalf("failed to acquire Spanner lock: %v", err)
 	}
 
-	// 2. Wait for heartbeat ticks
-	time.Sleep(100 * time.Millisecond)
+	ownerVer, instBy, initialInstalledOn, exists := readLockRow(t, ctx, client)
+	if !exists {
+		t.Fatalf("expected lock row at installed_rank = -1 to exist")
+	}
+	if ownerVer == "" || instBy == "" || ownerVer != instBy {
+		t.Fatalf("expected non-empty matching owner ID in version (%q) and installed_by (%q)", ownerVer, instBy)
+	}
+	if initialInstalledOn.IsZero() {
+		t.Fatalf("expected non-zero initial installed_on timestamp")
+	}
+
+	// 2. Wait for heartbeat ticks and verify installed_on actually advances in the database
+	time.Sleep(120 * time.Millisecond)
 	if count := atomic.LoadInt64(&heartbeatCount); count < 2 {
 		t.Errorf("expected at least 2 heartbeats, got %d", count)
 	}
+	if errCount := atomic.LoadInt64(&heartbeatErrCount); errCount > 0 {
+		t.Errorf("expected 0 heartbeat errors, got %d", errCount)
+	}
 
-	// 3. Concurrent lock attempt should fail with lock already held
+	afterOwnerVer, afterInstBy, updatedInstalledOn, exists := readLockRow(t, ctx, client)
+	if !exists {
+		t.Fatalf("expected lock row to still exist after heartbeat")
+	}
+	if afterOwnerVer != ownerVer || afterInstBy != instBy {
+		t.Errorf("expected owner ID to remain %q, got version=%q installed_by=%q", ownerVer, afterOwnerVer, afterInstBy)
+	}
+	if !updatedInstalledOn.After(initialInstalledOn) {
+		t.Errorf("expected heartbeat to advance installed_on: initial=%v, updated=%v", initialInstalledOn, updatedInstalledOn)
+	}
+
+	// 3. Concurrent lock attempt should fail with lock already held by ownerVer
 	db2 := &SpannerDatabase{
 		client: client,
 		config: &config.Configuration{LockRetryCount: 1},
 	}
 	_, err2 := db2.Lock(ctx, "", "flyway_schema_history")
-	if err2 == nil || !strings.Contains(err2.Error(), "lock already held") {
-		t.Errorf("expected 'lock already held' error on concurrent lock, got: %v", err2)
+	if err2 == nil || !strings.Contains(err2.Error(), "lock already held") || !strings.Contains(err2.Error(), ownerVer) {
+		t.Errorf("expected 'lock already held by %s' error on concurrent lock, got: %v", ownerVer, err2)
 	}
 
-	// 4. Release lock
+	// 4. Release lock and verify row is removed
 	if err := unlock(ctx); err != nil {
 		t.Fatalf("failed to unlock: %v", err)
+	}
+	if _, _, _, exists := readLockRow(t, ctx, client); exists {
+		t.Errorf("expected lock row to be deleted after unlock")
 	}
 
 	// Calling unlock again should be safe and idempotent
@@ -288,11 +344,152 @@ func TestSpannerLockAndHeartbeat(t *testing.T) {
 		t.Errorf("expected idempotent unlock, got error: %v", err)
 	}
 
-	// 5. Another lock attempt should now succeed
+	// 5. Another lock attempt should now succeed with a new owner ID
 	unlock2, err3 := db2.Lock(ctx, "", "flyway_schema_history")
 	if err3 != nil {
 		t.Fatalf("failed to acquire lock after release: %v", err3)
 	}
-	_ = unlock2(ctx)
+	owner2Ver, _, _, exists := readLockRow(t, ctx, client)
+	if !exists || owner2Ver == "" || owner2Ver == ownerVer {
+		t.Errorf("expected new lock owner ID distinct from %q, got %q (exists=%v)", ownerVer, owner2Ver, exists)
+	}
+	if err := unlock2(ctx); err != nil {
+		t.Fatalf("failed to unlock second lock: %v", err)
+	}
 }
+
+func TestSpannerLockExpiryAndTakeover(t *testing.T) {
+	_, client := setupSpannerTestClient(t)
+	ctx := context.Background()
+
+	// db1 acquires lock with a short TTL (80ms) and a long heartbeat interval (10m) so it won't refresh before expiring
+	db1 := &SpannerDatabase{
+		client:            client,
+		config:            &config.Configuration{LockRetryCount: 1},
+		lockTTL:           80 * time.Millisecond,
+		heartbeatInterval: 10 * time.Minute,
+	}
+
+	unlock1, err := db1.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("db1 failed to acquire lock: %v", err)
+	}
+
+	owner1, _, installedOn1, exists := readLockRow(t, ctx, client)
+	if !exists || owner1 == "" {
+		t.Fatalf("expected db1 lock row to exist with owner ID, got owner=%q exists=%v", owner1, exists)
+	}
+
+	// Before expiry, db2 cannot take over the lock
+	db2 := &SpannerDatabase{
+		client:            client,
+		config:            &config.Configuration{LockRetryCount: 1},
+		lockTTL:           80 * time.Millisecond,
+		heartbeatInterval: 10 * time.Minute,
+	}
+	if _, err := db2.Lock(ctx, "", "flyway_schema_history"); err == nil || !strings.Contains(err.Error(), "lock already held") {
+		t.Fatalf("expected db2 lock attempt before expiry to fail with 'lock already held', got: %v", err)
+	}
+
+	// Wait for db1's lock to expire
+	time.Sleep(120 * time.Millisecond)
+
+	// Now db2 should take over the expired lock
+	unlock2, err := db2.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("expected db2 to take over expired lock, got error: %v", err)
+	}
+
+	owner2, instBy2, installedOn2, exists := readLockRow(t, ctx, client)
+	if !exists {
+		t.Fatalf("expected lock row to exist after db2 takeover")
+	}
+	if owner2 == "" || owner2 == owner1 || instBy2 != owner2 {
+		t.Errorf("expected new owner ID after takeover (prev=%q), got version=%q installed_by=%q", owner1, owner2, instBy2)
+	}
+	if !installedOn2.After(installedOn1) {
+		t.Errorf("expected takeover installed_on (%v) to be after initial installed_on (%v)", installedOn2, installedOn1)
+	}
+
+	// Stale unlock1 must fail and MUST NOT delete db2's active lock row
+	errUnlock1 := unlock1(ctx)
+	if errUnlock1 == nil || !strings.Contains(errUnlock1.Error(), "lock owned by") {
+		t.Errorf("expected stale unlock1 to fail with ownership mismatch, got: %v", errUnlock1)
+	}
+
+	ownerAfterStaleUnlock, _, _, exists := readLockRow(t, ctx, client)
+	if !exists || ownerAfterStaleUnlock != owner2 {
+		t.Fatalf("expected db2 lock row (owner %q) to survive stale unlock1, got owner=%q exists=%v", owner2, ownerAfterStaleUnlock, exists)
+	}
+
+	// Active owner db2 unlocks cleanly
+	if err := unlock2(ctx); err != nil {
+		t.Fatalf("expected db2 unlock to succeed, got: %v", err)
+	}
+	if _, _, _, exists := readLockRow(t, ctx, client); exists {
+		t.Errorf("expected lock row to be deleted after db2 unlock")
+	}
+}
+
+func TestSpannerLockHeartbeatErrorPropagation(t *testing.T) {
+	_, client := setupSpannerTestClient(t)
+	ctx := context.Background()
+
+	errCh := make(chan error, 1)
+	db := &SpannerDatabase{
+		client:            client,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 30 * time.Millisecond,
+		onHeartbeat: func(err error) {
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		},
+	}
+
+	unlock, err := db.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("failed to acquire lock: %v", err)
+	}
+
+	// Simulate another process overwriting the lock row with a different owner ID
+	m := spanner.Update("flyway_schema_history",
+		[]string{"installed_rank", "version", "installed_by", "installed_on"},
+		[]interface{}{int64(-1), "intruder-owner-id", "intruder-owner-id", spanner.CommitTimestamp},
+	)
+	if _, err := client.Apply(ctx, []*spanner.Mutation{m}); err != nil {
+		t.Fatalf("failed to simulate lock takeover: %v", err)
+	}
+
+	// Wait for the heartbeat to detect the ownership loss
+	select {
+	case hbErr := <-errCh:
+		if !strings.Contains(hbErr.Error(), "lock ownership lost") {
+			t.Errorf("expected 'lock ownership lost' error from heartbeat, got: %v", hbErr)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for heartbeat error")
+	}
+
+	// Subsequent database operations on db must fail with the heartbeat error
+	execErr := db.ExecuteStatement(ctx, "SELECT 1")
+	if execErr == nil || !strings.Contains(execErr.Error(), "spanner lock heartbeat error") {
+		t.Errorf("expected ExecuteStatement to fail with heartbeat error, got: %v", execErr)
+	}
+
+	// Unlock must also surface the heartbeat error and NOT delete the intruder's lock row
+	unlockErr := unlock(ctx)
+	if unlockErr == nil || !strings.Contains(unlockErr.Error(), "lock heartbeat failed") {
+		t.Errorf("expected unlock to return heartbeat error, got: %v", unlockErr)
+	}
+
+	ownerAfter, _, _, exists := readLockRow(t, ctx, client)
+	if !exists || ownerAfter != "intruder-owner-id" {
+		t.Errorf("expected intruder lock row to remain intact, got owner=%q exists=%v", ownerAfter, exists)
+	}
+}
+
 

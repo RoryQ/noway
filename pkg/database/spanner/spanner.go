@@ -11,6 +11,7 @@ import (
 	"cloud.google.com/go/spanner"
 	databaseAdmin "cloud.google.com/go/spanner/admin/database/apiv1"
 	"cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
+	"github.com/google/uuid"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
@@ -36,8 +37,15 @@ type SpannerDatabase struct {
 	// If <= 0, defaults to 3 minutes.
 	heartbeatInterval time.Duration
 
+	// lockTTL is the duration after which a lock row is considered expired.
+	// If <= 0, defaults to 10 minutes.
+	lockTTL time.Duration
+
 	// onHeartbeat is an optional hook called on each heartbeat tick (used for testing).
 	onHeartbeat func(err error)
+
+	activeLockMu  sync.Mutex
+	activeLockErr error
 }
 
 var _ database.Database = (*SpannerDatabase)(nil)
@@ -499,8 +507,34 @@ func (db *SpannerDatabase) FetchHistory(ctx context.Context, schema, table strin
 	return records, nil
 }
 
+func (db *SpannerDatabase) setActiveLockErr(err error) {
+	db.activeLockMu.Lock()
+	defer db.activeLockMu.Unlock()
+	db.activeLockErr = err
+}
+
+func (db *SpannerDatabase) checkActiveLockErr() error {
+	db.activeLockMu.Lock()
+	defer db.activeLockMu.Unlock()
+	if db.activeLockErr != nil {
+		return fmt.Errorf("spanner lock heartbeat error: %w", db.activeLockErr)
+	}
+	return nil
+}
+
+func extractLockOwner(verNull spanner.NullString, instBy string) string {
+	if verNull.Valid && verNull.StringVal != "" {
+		return verNull.StringVal
+	}
+	return instBy
+}
+
 // InsertHistory inserts a new applied migration record into the history table.
 func (db *SpannerDatabase) InsertHistory(ctx context.Context, schema, table string, rec database.HistoryRecord) error {
+	if err := db.checkActiveLockErr(); err != nil {
+		return err
+	}
+
 	tableName := table
 	if tableName == "" {
 		tableName = "flyway_schema_history"
@@ -541,6 +575,10 @@ func (db *SpannerDatabase) InsertHistory(ctx context.Context, schema, table stri
 
 // UpdateHistory updates an existing migration record.
 func (db *SpannerDatabase) UpdateHistory(ctx context.Context, schema, table string, rec database.HistoryRecord) error {
+	if err := db.checkActiveLockErr(); err != nil {
+		return err
+	}
+
 	tableName := table
 	if tableName == "" {
 		tableName = "flyway_schema_history"
@@ -571,6 +609,10 @@ func (db *SpannerDatabase) UpdateHistory(ctx context.Context, schema, table stri
 
 // DeleteHistory removes a history record.
 func (db *SpannerDatabase) DeleteHistory(ctx context.Context, schema, table string, installedRank int) error {
+	if err := db.checkActiveLockErr(); err != nil {
+		return err
+	}
+
 	tableName := table
 	if tableName == "" {
 		tableName = "flyway_schema_history"
@@ -591,15 +633,16 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 		tableName = "flyway_schema_history"
 	}
 
-	// Clean expired locks older than 10 minutes
-	delExpiredSQL := fmt.Sprintf(`DELETE FROM %s 
-	WHERE `+"`installed_rank`"+` = -1 
-	  AND `+"`installed_on`"+` < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 10 MINUTE)`, db.Quote(tableName))
-	_ = db.ExecuteStatement(ctx, delExpiredSQL)
+	lockID := uuid.New().String()
 
-	retryCount := db.config.LockRetryCount
-	if retryCount <= 0 {
-		retryCount = 50
+	ttl := db.lockTTL
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+
+	retryCount := 50
+	if db.config != nil && db.config.LockRetryCount > 0 {
+		retryCount = db.config.LockRetryCount
 	}
 
 	var lastErr error
@@ -608,7 +651,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 		_, err := db.client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
 			// Read lock row
 			stmt := spanner.Statement{
-				SQL: fmt.Sprintf("SELECT installed_on FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
+				SQL: fmt.Sprintf("SELECT version, installed_by, installed_on FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
 			}
 			iter := txn.Query(ctx, stmt)
 			defer iter.Stop()
@@ -618,26 +661,29 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 				return err
 			}
 			if err != iterator.Done {
-				// Lock row exists
+				// Lock row exists; check if it is still within TTL
+				var verNull spanner.NullString
+				var instBy string
 				var instOn time.Time
-				if scanErr := row.Column(0, &instOn); scanErr == nil {
-					if time.Since(instOn) < 10*time.Minute {
-						return fmt.Errorf("lock already held")
-					}
+				if scanErr := row.Columns(&verNull, &instBy, &instOn); scanErr != nil {
+					return scanErr
+				}
+				if time.Since(instOn) < ttl {
+					return fmt.Errorf("lock already held by %s", extractLockOwner(verNull, instBy))
 				}
 			}
 
-			// Insert or update lock row
+			// Insert or take over expired lock row with our unique owner ID
 			m := spanner.InsertOrUpdate(tableName,
 				[]string{"installed_rank", "version", "description", "type", "script", "checksum", "installed_by", "installed_on", "execution_time", "success"},
 				[]interface{}{
 					int64(-1),
-					spanner.NullString{},
+					spanner.NullString{StringVal: lockID, Valid: true},
 					"flyway-lock",
 					"SCHEMA",
 					"",
 					spanner.NullInt64{},
-					"noway-lock",
+					lockID,
 					spanner.CommitTimestamp,
 					int64(0),
 					true,
@@ -651,12 +697,30 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 		})
 
 		if err == nil && acquired {
+			db.setActiveLockErr(nil)
+
 			interval := db.heartbeatInterval
 			if interval <= 0 {
 				interval = 3 * time.Minute
 			}
 
-			// Start background lock heartbeat to update installed_on every 3 minutes
+			var lockErrMu sync.Mutex
+			var heartbeatErr error
+			setHeartbeatErr := func(err error) {
+				lockErrMu.Lock()
+				if heartbeatErr == nil {
+					heartbeatErr = err
+				}
+				lockErrMu.Unlock()
+				db.setActiveLockErr(err)
+			}
+			getHeartbeatErr := func() error {
+				lockErrMu.Lock()
+				defer lockErrMu.Unlock()
+				return heartbeatErr
+			}
+
+			// Start background lock heartbeat to update installed_on every interval
 			heartbeatCtx, cancelHeartbeat := context.WithCancel(context.Background())
 			var wg sync.WaitGroup
 			wg.Add(1)
@@ -671,13 +735,50 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 					case <-heartbeatCtx.Done():
 						return
 					case <-ticker.C:
-						m := spanner.Update(tableName,
-							[]string{"installed_rank", "installed_on"},
-							[]interface{}{int64(-1), spanner.CommitTimestamp},
-						)
-						_, hErr := db.client.Apply(heartbeatCtx, []*spanner.Mutation{m})
+						_, hErr := db.client.ReadWriteTransaction(heartbeatCtx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
+							stmt := spanner.Statement{
+								SQL: fmt.Sprintf("SELECT version, installed_by FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
+							}
+							iter := txn.Query(ctx, stmt)
+							defer iter.Stop()
+
+							row, err := iter.Next()
+							if err == iterator.Done {
+								return fmt.Errorf("lock row missing during heartbeat")
+							}
+							if err != nil {
+								return err
+							}
+
+							var verNull spanner.NullString
+							var instBy string
+							if err := row.Columns(&verNull, &instBy); err != nil {
+								return err
+							}
+							owner := extractLockOwner(verNull, instBy)
+							if owner != lockID {
+								return fmt.Errorf("lock ownership lost during heartbeat: owned by %q, expected %q", owner, lockID)
+							}
+
+							m := spanner.Update(tableName,
+								[]string{"installed_rank", "installed_on"},
+								[]interface{}{int64(-1), spanner.CommitTimestamp},
+							)
+							return txn.BufferWrite([]*spanner.Mutation{m})
+						})
+
+						if heartbeatCtx.Err() != nil {
+							return
+						}
+						if hErr != nil {
+							setHeartbeatErr(hErr)
+							if db.onHeartbeat != nil {
+								db.onHeartbeat(hErr)
+							}
+							return
+						}
 						if db.onHeartbeat != nil {
-							db.onHeartbeat(hErr)
+							db.onHeartbeat(nil)
 						}
 					}
 				}
@@ -690,8 +791,43 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 					cancelHeartbeat()
 					wg.Wait()
 
-					m := spanner.Delete(tableName, spanner.Key{int64(-1)}.AsPrefix())
-					_, unlockErr = db.client.Apply(unlockCtx, []*spanner.Mutation{m})
+					hbErr := getHeartbeatErr()
+					db.setActiveLockErr(nil)
+
+					_, delErr := db.client.ReadWriteTransaction(unlockCtx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
+						stmt := spanner.Statement{
+							SQL: fmt.Sprintf("SELECT version, installed_by FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
+						}
+						iter := txn.Query(ctx, stmt)
+						defer iter.Stop()
+
+						row, err := iter.Next()
+						if err == iterator.Done {
+							return fmt.Errorf("lock row missing on unlock")
+						}
+						if err != nil {
+							return err
+						}
+
+						var verNull spanner.NullString
+						var instBy string
+						if err := row.Columns(&verNull, &instBy); err != nil {
+							return err
+						}
+						owner := extractLockOwner(verNull, instBy)
+						if owner != lockID {
+							return fmt.Errorf("cannot unlock: lock owned by %q, expected %q", owner, lockID)
+						}
+
+						m := spanner.Delete(tableName, spanner.Key{int64(-1)})
+						return txn.BufferWrite([]*spanner.Mutation{m})
+					})
+
+					if hbErr != nil {
+						unlockErr = fmt.Errorf("lock heartbeat failed: %w", hbErr)
+					} else if delErr != nil {
+						unlockErr = fmt.Errorf("failed to release Spanner lock: %w", delErr)
+					}
 				})
 				return unlockErr
 			}
@@ -711,6 +847,10 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 
 // ExecuteStatement executes a SQL statement, routing DDL to UpdateDatabaseDdl and DML/Queries to the client.
 func (db *SpannerDatabase) ExecuteStatement(ctx context.Context, sql string) error {
+	if err := db.checkActiveLockErr(); err != nil {
+		return err
+	}
+
 	trimmed := strings.TrimSpace(sql)
 	if trimmed == "" || trimmed == ";" {
 		return nil

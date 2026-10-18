@@ -35,7 +35,7 @@ type RepairResult struct {
 }
 
 // Repair repairs the schema history table by removing failed migrations and aligning checksums/descriptions.
-func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
+func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error) {
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 
@@ -65,7 +65,9 @@ func (m *Migrator) Repair(ctx context.Context) (*RepairResult, error) {
 		return nil, fmt.Errorf("failed to acquire lock for repair: %w", err)
 	}
 	defer func() {
-		_ = unlock(context.Background())
+		if uErr := unlock(context.Background()); uErr != nil && retErr == nil {
+			retErr = uErr
+		}
 	}()
 
 	// 3. Resolve local migrations

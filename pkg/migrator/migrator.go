@@ -227,7 +227,7 @@ func (m *Migrator) FlywayVersion() string {
 }
 
 // Migrate executes pending migrations.
-func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
+func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr error) {
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 	overallStart := time.Now()
@@ -337,7 +337,9 @@ func (m *Migrator) Migrate(ctx context.Context) (*MigrateResult, error) {
 			return nil, fmt.Errorf("failed to acquire database lock: %w", err)
 		}
 		defer func() {
-			_ = unlock(context.Background())
+			if uErr := unlock(context.Background()); uErr != nil && retErr == nil {
+				retErr = uErr
+			}
 		}()
 
 		// 4. Fire beforeMigrate callback

@@ -37,7 +37,7 @@ type UndoOutput struct {
 }
 
 // Undo reverts the most recently applied versioned migration.
-func (m *Migrator) Undo(ctx context.Context) (*UndoResult, error) {
+func (m *Migrator) Undo(ctx context.Context) (res *UndoResult, retErr error) {
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 	isDryRun := m.config.DryRunOutput != ""
@@ -58,7 +58,9 @@ func (m *Migrator) Undo(ctx context.Context) (*UndoResult, error) {
 			return nil, fmt.Errorf("failed to acquire lock for undo: %w", err)
 		}
 		defer func() {
-			_ = unlock(context.Background())
+			if uErr := unlock(context.Background()); uErr != nil && retErr == nil {
+				retErr = uErr
+			}
 		}()
 	}
 
