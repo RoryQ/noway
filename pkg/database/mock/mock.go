@@ -53,6 +53,13 @@ func (m *MockDatabase) ExecutedStatements() []string {
 	return copied
 }
 
+func (m *MockDatabase) ClearExecutedStatements() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.executedSQL = make([]string, 0)
+}
+
+
 func (m *MockDatabase) Quote(identifiers ...string) string {
 	quoted := make([]string, len(identifiers))
 	for i, id := range identifiers {

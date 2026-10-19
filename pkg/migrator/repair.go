@@ -39,6 +39,8 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 
+	m.ensureUser(ctx)
+
 	// 1. Ensure history table exists
 	exists, err := m.db.HistoryTableExists(ctx, defaultSchema, table)
 	if err != nil {

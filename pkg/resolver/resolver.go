@@ -76,6 +76,12 @@ func NewResolver(cfg ResolverConfig) *Resolver {
 	return &Resolver{config: cfg}
 }
 
+// SetBuiltins updates the builtin placeholders.
+func (r *Resolver) SetBuiltins(builtins parser.BuiltinPlaceholders) {
+	r.config.Builtins = builtins
+}
+
+
 // ResolveResult contains discovered migrations and callbacks.
 type ResolveResult struct {
 	VersionedMigrations  []ResolvedMigration
@@ -188,13 +194,14 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 		}
 
 		if info.IsDir() {
-			err := r.scanDir(cleanLoc, result, seen)
+			err := r.scanDir(cleanLoc, cleanLoc, result, seen)
 			if err != nil {
 				return nil, err
 			}
 		} else {
 			// Single file
-			err := r.processFile(filepath.Dir(cleanLoc), info.Name(), cleanLoc, result, seen)
+			scriptPath := info.Name()
+			err := r.processFile(filepath.Dir(cleanLoc), info.Name(), cleanLoc, scriptPath, result, seen)
 			if err != nil {
 				return nil, err
 			}
@@ -316,7 +323,7 @@ func parseMigrationConfigFile(content string, cfg *MigrationConfig) {
 	}
 }
 
-func (r *Resolver) scanDir(dirPath string, result *ResolveResult, seen *seenTracking) error {
+func (r *Resolver) scanDir(locRoot, dirPath string, result *ResolveResult, seen *seenTracking) error {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return fmt.Errorf("error reading directory '%s': %w", dirPath, err)
@@ -325,14 +332,19 @@ func (r *Resolver) scanDir(dirPath string, result *ResolveResult, seen *seenTrac
 	for _, entry := range entries {
 		if entry.IsDir() {
 			subPath := filepath.Join(dirPath, entry.Name())
-			if err := r.scanDir(subPath, result, seen); err != nil {
+			if err := r.scanDir(locRoot, subPath, result, seen); err != nil {
 				return err
 			}
 			continue
 		}
 
 		fullPath := filepath.Join(dirPath, entry.Name())
-		if err := r.processFile(dirPath, entry.Name(), fullPath, result, seen); err != nil {
+		relPath, err := filepath.Rel(locRoot, fullPath)
+		if err != nil {
+			relPath = entry.Name()
+		}
+		scriptPath := filepath.ToSlash(relPath)
+		if err := r.processFile(dirPath, entry.Name(), fullPath, scriptPath, result, seen); err != nil {
 			return err
 		}
 	}
@@ -376,11 +388,16 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 		}
 
 		dir := filepath.Dir(path)
-		return r.parseAndAddMigration(dir, filename, path, string(data), fileSys, result, seen)
+		relPath, err := filepath.Rel(cleanDir, path)
+		if err != nil {
+			relPath = filename
+		}
+		scriptPath := filepath.ToSlash(relPath)
+		return r.parseAndAddMigration(dir, filename, path, scriptPath, string(data), fileSys, result, seen)
 	})
 }
 
-func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveResult, seen *seenTracking) error {
+func (r *Resolver) processFile(dir, filename, fullPath, scriptPath string, result *ResolveResult, seen *seenTracking) error {
 	if strings.HasSuffix(filename, ".conf") {
 		return nil
 	}
@@ -401,7 +418,7 @@ func (r *Resolver) processFile(dir, filename, fullPath string, result *ResolveRe
 		return fmt.Errorf("error reading file '%s': %w", fullPath, err)
 	}
 
-	return r.parseAndAddMigration(dir, filename, fullPath, string(data), nil, result, seen)
+	return r.parseAndAddMigration(dir, filename, fullPath, scriptPath, string(data), nil, result, seen)
 }
 
 func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool) (int64, *int64, error) {
@@ -439,7 +456,7 @@ func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, 
 	return cs, &eqCs, nil
 }
 
-func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string, fileSys fs.FS, result *ResolveResult, seen *seenTracking) error {
+func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, content string, fileSys fs.FS, result *ResolveResult, seen *seenTracking) error {
 	migConfig := r.loadMigrationConfig(dir, filename, fileSys)
 	isScript := isScriptFile(filename)
 
@@ -518,7 +535,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 		result.RepeatableMigrations = append(result.RepeatableMigrations, ResolvedMigration{
 			Version:            nil,
 			Description:        desc,
-			Script:             filename,
+			Script:             scriptPath,
 			Checksum:           cs,
 			EquivalentChecksum: eqCs,
 			Type:               repType,
@@ -558,7 +575,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 				result.UndoMigrations = append(result.UndoMigrations, ResolvedMigration{
 					Version:          &ver,
 					Description:      desc,
-					Script:           filename,
+					Script:           scriptPath,
 					Checksum:         cs,
 					Type:             undoType,
 					Content:          content,
@@ -602,7 +619,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 				result.BaselineMigrations = append(result.BaselineMigrations, ResolvedMigration{
 					Version:          &ver,
 					Description:      desc,
-					Script:           filename,
+					Script:           scriptPath,
 					Checksum:         cs,
 					Type:             TypeBaseline,
 					Content:          content,
@@ -656,7 +673,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, content string,
 			result.VersionedMigrations = append(result.VersionedMigrations, ResolvedMigration{
 				Version:          &ver,
 				Description:      desc,
-				Script:           filename,
+				Script:           scriptPath,
 				Checksum:         cs,
 				Type:             defaultType,
 				Content:          content,

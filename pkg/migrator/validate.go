@@ -105,6 +105,8 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 
+	m.ensureUser(ctx)
+
 	// 1. Resolve local migrations
 	resolved, err := m.resolver.Resolve()
 	if err != nil {

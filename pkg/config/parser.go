@@ -13,35 +13,216 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LoadFromFile loads configuration from a file (.conf, .toml, .yaml, .json).
+// LoadFromFile loads configuration from a file (.conf, .properties, .toml, .yaml, .json).
 func LoadFromFile(filePath string) (*Configuration, error) {
+	cfg := NewDefaultConfiguration()
+	if err := LoadFromFileInto(filePath, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadFromFileInto overlays configuration from a file onto an existing Configuration struct.
+func LoadFromFileInto(filePath string, cfg *Configuration) error {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("error reading config file '%s': %w", filePath, err)
+		return fmt.Errorf("error reading config file '%s': %w", filePath, err)
 	}
 
-	cfg := NewDefaultConfiguration()
 	ext := strings.ToLower(filepath.Ext(filePath))
-
 	switch ext {
 	case ".conf", ".properties":
 		err = parseProperties(string(data), cfg)
 	case ".toml":
-		err = toml.Unmarshal(data, cfg)
+		err = parseTOML(data, cfg)
 	case ".yaml", ".yml":
-		err = yaml.Unmarshal(data, cfg)
+		err = parseYAML(data, cfg)
 	case ".json":
-		err = json.Unmarshal(data, cfg)
+		err = parseJSON(data, cfg)
 	default:
 		// Default to properties file
 		err = parseProperties(string(data), cfg)
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("error parsing config file '%s': %w", filePath, err)
+		return fmt.Errorf("error parsing config file '%s': %w", filePath, err)
 	}
 
-	return cfg, nil
+	return nil
+}
+
+func parseTOML(data []byte, cfg *Configuration) error {
+	var rawMap map[string]any
+	if err := toml.Unmarshal(data, &rawMap); err != nil {
+		return err
+	}
+	return processConfigMap(rawMap, cfg)
+}
+
+func parseYAML(data []byte, cfg *Configuration) error {
+	var rawMap map[string]any
+	if err := yaml.Unmarshal(data, &rawMap); err != nil {
+		return err
+	}
+	return processConfigMap(rawMap, cfg)
+}
+
+func parseJSON(data []byte, cfg *Configuration) error {
+	var rawMap map[string]any
+	if err := json.Unmarshal(data, &rawMap); err != nil {
+		return err
+	}
+	return processConfigMap(rawMap, cfg)
+}
+
+func processConfigMap(rawMap map[string]any, cfg *Configuration) error {
+	if rawMap == nil {
+		return nil
+	}
+
+	// 1. Determine active environment
+	targetEnv := cfg.Environment
+	if targetEnv == "" {
+		if envVal := os.Getenv("FLYWAY_ENVIRONMENT"); envVal != "" {
+			targetEnv = envVal
+		} else if envVal := os.Getenv("NOWAY_ENVIRONMENT"); envVal != "" {
+			targetEnv = envVal
+		} else if envVal, ok := rawMap["environment"].(string); ok && envVal != "" {
+			targetEnv = envVal
+		} else {
+			targetEnv = "default"
+		}
+	}
+
+	// 2. Apply root-level properties (skipping "flyway" and "environments")
+	for k, v := range rawMap {
+		kLower := strings.ToLower(k)
+		if kLower == "flyway" || kLower == "environments" {
+			continue
+		}
+		applyAnyValue(cfg, k, v)
+	}
+
+	// 3. Apply [flyway] table
+	if flywayVal, ok := rawMap["flyway"]; ok {
+		if flywayMap, ok := flywayVal.(map[string]any); ok {
+			for k, v := range flywayMap {
+				applyAnyValue(cfg, k, v)
+			}
+		}
+	}
+
+	// 4. Apply [environments] table
+	if envsVal, ok := rawMap["environments"]; ok {
+		if envsMap, ok := envsVal.(map[string]any); ok {
+			var envObj map[string]any
+			if specific, ok := envsMap[targetEnv].(map[string]any); ok {
+				envObj = specific
+			} else if targetEnv != "default" {
+				return fmt.Errorf("environment '%s' not found in config", targetEnv)
+			} else if defaultEnv, ok := envsMap["default"].(map[string]any); ok {
+				envObj = defaultEnv
+			}
+
+			if envObj != nil {
+				// Apply environment properties
+				for k, v := range envObj {
+					if strings.ToLower(k) == "flyway" {
+						continue
+					}
+					applyAnyValue(cfg, k, v)
+				}
+				// Apply nested [environments.<env>.flyway]
+				if envFlywayVal, ok := envObj["flyway"]; ok {
+					if envFlywayMap, ok := envFlywayVal.(map[string]any); ok {
+						for k, v := range envFlywayMap {
+							applyAnyValue(cfg, k, v)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func applyAnyValue(cfg *Configuration, key string, val any) {
+	if val == nil {
+		return
+	}
+	switch v := val.(type) {
+	case string:
+		applyProperty(cfg, key, v)
+	case bool:
+		applyProperty(cfg, key, strconv.FormatBool(v))
+	case int:
+		applyProperty(cfg, key, strconv.Itoa(v))
+	case int64:
+		applyProperty(cfg, key, strconv.FormatInt(v, 10))
+	case float64:
+		if v == float64(int64(v)) {
+			applyProperty(cfg, key, strconv.FormatInt(int64(v), 10))
+		} else {
+			applyProperty(cfg, key, fmt.Sprintf("%v", v))
+		}
+	case []any:
+		var items []string
+		for _, item := range v {
+			items = append(items, fmt.Sprintf("%v", item))
+		}
+		switch strings.ToLower(key) {
+		case "locations":
+			cfg.Locations = items
+		case "schemas":
+			cfg.Schemas = items
+		case "sqlmigrationsuffixes", "sql_migration_suffixes":
+			cfg.SQLMigrationSuffixes = items
+		default:
+			applyProperty(cfg, key, strings.Join(items, ","))
+		}
+	case []string:
+		switch strings.ToLower(key) {
+		case "locations":
+			cfg.Locations = v
+		case "schemas":
+			cfg.Schemas = v
+		case "sqlmigrationsuffixes", "sql_migration_suffixes":
+			cfg.SQLMigrationSuffixes = v
+		default:
+			applyProperty(cfg, key, strings.Join(v, ","))
+		}
+	case map[string]any:
+		keyLower := strings.ToLower(key)
+		if keyLower == "placeholders" {
+			if cfg.Placeholders == nil {
+				cfg.Placeholders = make(map[string]string)
+			}
+			for pk, pv := range v {
+				cfg.Placeholders[pk] = fmt.Sprintf("%v", pv)
+			}
+		} else {
+			for subK, subV := range v {
+				applyAnyValue(cfg, key+"."+subK, subV)
+			}
+		}
+	case map[string]string:
+		keyLower := strings.ToLower(key)
+		if keyLower == "placeholders" {
+			if cfg.Placeholders == nil {
+				cfg.Placeholders = make(map[string]string)
+			}
+			for pk, pv := range v {
+				cfg.Placeholders[pk] = pv
+			}
+		} else {
+			for subK, subV := range v {
+				applyProperty(cfg, key+"."+subK, subV)
+			}
+		}
+	default:
+		applyProperty(cfg, key, fmt.Sprintf("%v", v))
+	}
 }
 
 // LoadFromEnv overrides configuration values from FLYWAY_* and NOWAY_* environment variables.
@@ -68,14 +249,20 @@ func LoadFromEnv(cfg *Configuration) {
 func applyEnvKey(cfg *Configuration, key, val string) {
 	keyUpper := strings.ToUpper(key)
 	switch keyUpper {
+	case "ENVIRONMENT", "ENV":
+		cfg.Environment = val
 	case "URL":
 		cfg.URL = val
-	case "USER":
+	case "USER", "USERNAME":
 		cfg.User = val
 	case "PASSWORD":
 		cfg.Password = val
 	case "DRIVER":
 		cfg.Driver = val
+	case "LOCK_RETRY_COUNT", "LOCKRETRYCOUNT":
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.LockRetryCount = n
+		}
 	case "SCHEMAS":
 		cfg.Schemas = splitAndTrim(val, ",")
 	case "CREATE_SCHEMAS", "CREATESCHEMAS":
@@ -217,14 +404,20 @@ func parseProperties(content string, cfg *Configuration) error {
 
 func applyProperty(cfg *Configuration, key, val string) {
 	switch strings.ToLower(key) {
+	case "environment", "env":
+		cfg.Environment = val
 	case "url":
 		cfg.URL = val
-	case "user":
+	case "user", "username":
 		cfg.User = val
 	case "password":
 		cfg.Password = val
 	case "driver":
 		cfg.Driver = val
+	case "lockretrycount", "lock_retry_count":
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.LockRetryCount = n
+		}
 	case "schemas":
 		cfg.Schemas = splitAndTrim(val, ",")
 	case "createschemas", "create_schemas":

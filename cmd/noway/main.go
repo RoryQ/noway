@@ -119,7 +119,7 @@ func main() {
 func parseCLIArgs(args []string) (*config.Configuration, error) {
 	cfg := config.NewDefaultConfiguration()
 
-	// 1. Check for configFile/configFiles in args first
+	// 1. Check for configFile/configFiles and environment in args first
 	var configFiles []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -129,10 +129,17 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			v := clean[idx+1:]
 			if k == "configfile" || k == "configfiles" || k == "config-file" || k == "config-files" {
 				configFiles = append(configFiles, splitAndTrimCLI(v, ",")...)
+			} else if k == "environment" || k == "env" {
+				cfg.Environment = v
 			}
 		} else if clean == "configFile" || clean == "configFiles" || clean == "config-file" || clean == "config-files" {
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				configFiles = append(configFiles, splitAndTrimCLI(args[i+1], ",")...)
+				i++
+			}
+		} else if strings.ToLower(clean) == "environment" || strings.ToLower(clean) == "env" {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				cfg.Environment = args[i+1]
 				i++
 			}
 		}
@@ -144,16 +151,13 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			if cf == "" {
 				continue
 			}
-			loaded, err := config.LoadFromFile(cf)
-			if err != nil {
+			if err := config.LoadFromFileInto(cf, cfg); err != nil {
 				return nil, err
 			}
-			cfg = loaded
 		}
 	} else if autoConf := config.FindConfigFile(); autoConf != "" {
-		loaded, err := config.LoadFromFile(autoConf)
-		if err == nil {
-			cfg = loaded
+		if err := config.LoadFromFileInto(autoConf, cfg); err != nil {
+			return nil, err
 		}
 	}
 
@@ -243,6 +247,8 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.GCPSpannerDatabaseID = val
 		case "gcpspannerendpoint", "spannerendpoint", "spanner-endpoint":
 			cfg.GCPSpannerEndpoint = val
+		case "installedby", "installed-by", "installed_by":
+			cfg.InstalledBy = val
 		case "configfile", "configfiles", "config-file", "config-files":
 			// Handled in step 1
 		default:

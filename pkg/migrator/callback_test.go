@@ -259,3 +259,51 @@ func TestCallbackRunner_DetermineOperation(t *testing.T) {
 		}
 	}
 }
+
+func TestCallbackRunner_FlywayUserPlaceholder(t *testing.T) {
+	ctx := context.Background()
+	db := mock.NewMockDatabase()
+
+	bqParser := parser.NewBigQueryParser()
+	replacer := parser.NewPlaceholderReplacer(parser.DefaultPlaceholderConfig())
+	builtins := parser.BuiltinPlaceholders{
+		DefaultSchema: "test_schema",
+		Table:         "flyway_schema_history",
+		User:          "initial_user",
+	}
+
+	callbacks := map[string][]resolver.ResolvedCallback{
+		"beforeMigrate": {
+			{
+				Event:    "beforeMigrate",
+				Filename: "beforeMigrate__user.sql",
+				Content:  "INSERT INTO audit (executed_by) VALUES ('${flyway:user}');",
+			},
+		},
+	}
+
+	runner := NewCallbackRunner(db, callbacks, bqParser, replacer, builtins)
+
+	// 1. Initial fire replaces with initial_user
+	if err := runner.Fire(ctx, "beforeMigrate"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	stmts := db.ExecutedStatements()
+	if len(stmts) != 1 || !strings.Contains(stmts[0], "'initial_user'") {
+		t.Errorf("expected statement to contain 'initial_user', got %v", stmts)
+	}
+
+	// 2. SetBuiltins updates user dynamically
+	builtins.User = "updated_admin"
+	runner.SetBuiltins(builtins)
+	db.ClearExecutedStatements()
+
+	if err := runner.Fire(ctx, "beforeMigrate"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	stmts = db.ExecutedStatements()
+	if len(stmts) != 1 || !strings.Contains(stmts[0], "'updated_admin'") {
+		t.Errorf("expected statement to contain 'updated_admin', got %v", stmts)
+	}
+}
+

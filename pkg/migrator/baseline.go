@@ -30,6 +30,8 @@ func (m *Migrator) Baseline(ctx context.Context) (res *BaselineResult, retErr er
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 
+	m.ensureUser(ctx)
+
 	// 1. Ensure schema exists
 	if m.config.CreateSchemas {
 		if err := m.db.EnsureSchema(ctx, defaultSchema); err != nil {

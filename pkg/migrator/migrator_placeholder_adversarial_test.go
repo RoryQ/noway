@@ -271,3 +271,78 @@ func TestMigrateAndInfoAcceptEquivalentChecksum(t *testing.T) {
 	}
 }
 
+func TestAdversarial_RepeatableFlywayUserPlaceholder(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/R__user_perm.sql": &fstest.MapFile{
+			Data: []byte("GRANT SELECT ON TABLE my_table TO '${flyway:user}';"),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_schema"
+	cfg.User = "alice"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"sql"}
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if res.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+
+	stmts := db.ExecutedStatements()
+	if len(stmts) != 1 || !strings.Contains(stmts[0], "'alice'") {
+		t.Errorf("expected statement to contain 'alice', got %v", stmts)
+	}
+
+	history, err := db.FetchHistory(ctx, "test_schema", "flyway_schema_history")
+	if err != nil || len(history) != 1 {
+		t.Fatalf("expected 1 history record, got %d (err: %v)", len(history), err)
+	}
+	aliceChecksum := history[0].Checksum
+
+	// Second run with different user "bob" -> checksum should change and re-execute
+	db.ClearExecutedStatements()
+	cfg2 := config.NewDefaultConfiguration()
+	cfg2.DefaultSchema = "test_schema"
+	cfg2.User = "bob"
+	cfg2.FS = mockFS
+	cfg2.Locations = []string{"sql"}
+
+	m2, err := New(cfg2, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator 2: %v", err)
+	}
+
+	res2, err := m2.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate 2 failed: %v", err)
+	}
+	if res2.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration re-executed for user change, got %d", res2.MigrationsExecuted)
+	}
+
+	stmts2 := db.ExecutedStatements()
+	if len(stmts2) != 1 || !strings.Contains(stmts2[0], "'bob'") {
+		t.Errorf("expected statement to contain 'bob', got %v", stmts2)
+	}
+
+	history2, err := db.FetchHistory(ctx, "test_schema", "flyway_schema_history")
+	if err != nil || len(history2) != 2 {
+		t.Fatalf("expected 2 history records, got %d (err: %v)", len(history2), err)
+	}
+	if *history2[1].Checksum == *aliceChecksum {
+		t.Errorf("expected different checksum for user bob, but both are %d", *aliceChecksum)
+	}
+}
+
+

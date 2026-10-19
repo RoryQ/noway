@@ -59,6 +59,12 @@ func (c *CallbackRunner) SetConfig(cfg *config.Configuration) {
 	}
 }
 
+// SetBuiltins updates the builtin placeholders.
+func (c *CallbackRunner) SetBuiltins(builtins parser.BuiltinPlaceholders) {
+	c.builtins = builtins
+}
+
+
 // Fire executes all registered callbacks for the given event name.
 func (c *CallbackRunner) Fire(ctx context.Context, event string) error {
 	scripts, ok := c.callbacks[event]
@@ -174,6 +180,11 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		}
 	}
 
+	cbUser := c.builtins.User
+	if cbUser == "" {
+		cbUser = "flyway"
+	}
+
 	env := os.Environ()
 	env = append(env,
 		"FLYWAY_OPERATION="+op,
@@ -182,8 +193,8 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		"NOWAY_EVENT="+event,
 		"FLYWAY_CALLBACK="+cb.Filename,
 		"NOWAY_CALLBACK="+cb.Filename,
-		"FLYWAY_USER="+c.builtins.User,
-		"NOWAY_USER="+c.builtins.User,
+		"FLYWAY_USER="+cbUser,
+		"NOWAY_USER="+cbUser,
 		"FLYWAY_DATABASE="+dbName,
 		"NOWAY_DATABASE="+dbName,
 		"FLYWAY_DEFAULT_SCHEMA="+c.builtins.DefaultSchema,
@@ -202,7 +213,7 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		"NOWAY_BIGQUERY_ENDPOINT="+c.config.GCPBigQueryEndpoint,
 		"FP__flyway_defaultSchema="+c.builtins.DefaultSchema,
 		"FP__flyway_table="+c.builtins.Table,
-		"FP__flyway_user="+c.builtins.User,
+		"FP__flyway_user="+cbUser,
 		"FP__flyway_database="+dbName,
 	)
 

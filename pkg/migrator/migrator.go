@@ -90,10 +90,19 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 	})
 
 	defaultSchema := cfg.GetDefaultSchema()
+	user := cfg.User
+	if user == "" {
+		user = cfg.InstalledBy
+	}
+	if user == "" {
+		user = "flyway"
+	}
+
 	builtins := parser.BuiltinPlaceholders{
 		DefaultSchema: defaultSchema,
 		Table:         cfg.Table,
 		Database:      cfg.GCPProjectID,
+		User:          user,
 		Timestamp:     time.Now(),
 	}
 
@@ -226,6 +235,30 @@ func (m *Migrator) FlywayVersion() string {
 	return versioninfo.Short()
 }
 
+func (m *Migrator) ensureUser(ctx context.Context) string {
+	user := m.config.User
+	if user == "" {
+		user = m.config.InstalledBy
+	}
+	if user == "" && m.db != nil {
+		currentUser, _ := m.db.GetCurrentUser(ctx)
+		if currentUser != "" && currentUser != "unknown" {
+			user = currentUser
+		}
+	}
+	if user == "" {
+		user = "flyway"
+	}
+	m.builtins.User = user
+	if m.resolver != nil {
+		m.resolver.SetBuiltins(m.builtins)
+	}
+	if m.callbackRunner != nil {
+		m.callbackRunner.SetBuiltins(m.builtins)
+	}
+	return user
+}
+
 // Migrate executes pending migrations.
 func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr error) {
 	defaultSchema := m.config.GetDefaultSchema()
@@ -235,16 +268,11 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	m.callbackRunner.SetOperation("MIGRATE")
 
 	// Determine user early for callbacks & metadata
-	user := m.config.InstalledBy
-	if user == "" {
-		currentUser, _ := m.db.GetCurrentUser(ctx)
-		if currentUser != "" {
-			user = currentUser
-		} else {
-			user = "flyway"
-		}
+	user := m.ensureUser(ctx)
+	installedBy := m.config.InstalledBy
+	if installedBy == "" {
+		installedBy = user
 	}
-	m.builtins.User = user
 
 	var createdSchemas []string
 	isDryRun := m.config.DryRunOutput != ""
@@ -587,7 +615,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 				}
 			}
 
-			execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, user)
+			execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, installedBy)
 			if err != nil {
 				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				result.Success = false
@@ -630,7 +658,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 				}
 			}
 
-			execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, user)
+			execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, installedBy)
 			if err != nil {
 				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				result.Success = false

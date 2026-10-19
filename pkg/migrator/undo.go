@@ -42,6 +42,8 @@ func (m *Migrator) Undo(ctx context.Context) (res *UndoResult, retErr error) {
 	table := m.config.Table
 	isDryRun := m.config.DryRunOutput != ""
 
+	m.ensureUser(ctx)
+
 	// 1. Ensure history table exists
 	exists, err := m.db.HistoryTableExists(ctx, defaultSchema, table)
 	if err != nil {

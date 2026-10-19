@@ -86,6 +86,8 @@ func (m *Migrator) Info(ctx context.Context) (*InfoResult, error) {
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 
+	m.ensureUser(ctx)
+
 	// 1. Resolve local migrations
 	res, err := m.resolver.Resolve()
 	if err != nil {

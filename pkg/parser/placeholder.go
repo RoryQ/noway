@@ -97,14 +97,33 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 		}
 	}
 
-	addBuiltin("flyway:defaultSchema", builtins.DefaultSchema)
-	addBuiltin("noway:defaultSchema", builtins.DefaultSchema)
-	addBuiltin("flyway:table", builtins.Table)
-	addBuiltin("noway:table", builtins.Table)
-	addBuiltin("flyway:user", builtins.User)
-	addBuiltin("noway:user", builtins.User)
-	addBuiltin("flyway:database", builtins.Database)
-	addBuiltin("noway:database", builtins.Database)
+	defaultSchema := builtins.DefaultSchema
+	if defaultSchema == "" {
+		defaultSchema = "flyway"
+	}
+	addBuiltin("flyway:defaultSchema", defaultSchema)
+	addBuiltin("noway:defaultSchema", defaultSchema)
+
+	table := builtins.Table
+	if table == "" {
+		table = "flyway_schema_history"
+	}
+	addBuiltin("flyway:table", table)
+	addBuiltin("noway:table", table)
+
+	user := builtins.User
+	if user == "" {
+		user = "flyway"
+	}
+	addBuiltin("flyway:user", user)
+	addBuiltin("noway:user", user)
+
+	database := builtins.Database
+	if database == "" {
+		database = defaultSchema
+	}
+	addBuiltin("flyway:database", database)
+	addBuiltin("noway:database", database)
 
 	ts := builtins.Timestamp
 	if ts.IsZero() {

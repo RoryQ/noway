@@ -13,9 +13,10 @@ import (
 // Configuration represents complete configuration for noway / flyway operations.
 type Configuration struct {
 	// Connection & Target
-	URL      string   `json:"url" yaml:"url" toml:"url"`
-	User     string   `json:"user" yaml:"user" toml:"user"`
-	Password string   `json:"password" yaml:"password" toml:"password"`
+	Environment string   `json:"environment" yaml:"environment" toml:"environment"` // default: "default"
+	URL         string   `json:"url" yaml:"url" toml:"url"`
+	User        string   `json:"user" yaml:"user" toml:"user"`
+	Password    string   `json:"password" yaml:"password" toml:"password"`
 	Driver   string   `json:"driver" yaml:"driver" toml:"driver"`
 	Schemas  []string `json:"schemas" yaml:"schemas" toml:"schemas"`
 	DefaultSchema string `json:"defaultSchema" yaml:"defaultSchema" toml:"defaultSchema"`

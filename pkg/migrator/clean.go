@@ -32,6 +32,8 @@ func (m *Migrator) cleanInternal(ctx context.Context, preserveTable string) (*Cl
 		schemas = []string{defaultSchema}
 	}
 
+	m.ensureUser(ctx)
+
 	// 1. Fire beforeClean callbacks
 	if err := m.callbackRunner.Fire(ctx, "beforeClean"); err != nil {
 		return nil, err

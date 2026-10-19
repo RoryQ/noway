@@ -733,4 +733,50 @@ func TestResolverRepeatableMigrationTypes(t *testing.T) {
 	}
 }
 
+func TestResolver_RelativeScriptPath(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__root.sql": &fstest.MapFile{
+			Data: []byte("SELECT 1;"),
+		},
+		"sql/views/R__users_view.sql": &fstest.MapFile{
+			Data: []byte("CREATE VIEW users_v AS SELECT 1;"),
+		},
+		"sql/sub/deep/V2__deep.sql": &fstest.MapFile{
+			Data: []byte("SELECT 2;"),
+		},
+		"sql/sub/deep/U2__undo_deep.sql": &fstest.MapFile{
+			Data: []byte("SELECT 3;"),
+		},
+	}
+
+	res := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"sql"},
+	})
+
+	resolved, err := res.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(resolved.RepeatableMigrations) != 1 || resolved.RepeatableMigrations[0].Script != "views/R__users_view.sql" {
+		t.Errorf("expected repeatable script 'views/R__users_view.sql', got %s", resolved.RepeatableMigrations[0].Script)
+	}
+
+	if len(resolved.VersionedMigrations) != 2 {
+		t.Fatalf("expected 2 versioned migrations, got %d", len(resolved.VersionedMigrations))
+	}
+	if resolved.VersionedMigrations[0].Script != "V1__root.sql" {
+		t.Errorf("expected root script 'V1__root.sql', got %s", resolved.VersionedMigrations[0].Script)
+	}
+	if resolved.VersionedMigrations[1].Script != "sub/deep/V2__deep.sql" {
+		t.Errorf("expected deep script 'sub/deep/V2__deep.sql', got %s", resolved.VersionedMigrations[1].Script)
+	}
+
+	if len(resolved.UndoMigrations) != 1 || resolved.UndoMigrations[0].Script != "sub/deep/U2__undo_deep.sql" {
+		t.Errorf("expected undo script 'sub/deep/U2__undo_deep.sql', got %s", resolved.UndoMigrations[0].Script)
+	}
+}
+
+
 
