@@ -43,7 +43,10 @@ type BigQueryDatabase struct {
 	activeLockMu      sync.Mutex
 	activeLockErr     error
 	heartbeatInterval time.Duration
+	lockTTL           time.Duration
 	onHeartbeat       func(err error)
+
+	heartbeatAttemptInterceptor func() error
 }
 
 // New creates and initializes a new BigQueryDatabase instance.
@@ -550,6 +553,10 @@ func (db *BigQueryDatabase) FetchHistory(ctx context.Context, schema, table stri
 
 // InsertHistory inserts a record into the history table.
 func (db *BigQueryDatabase) InsertHistory(ctx context.Context, schema, table string, rec database.HistoryRecord) error {
+	if err := db.checkActiveLockErr(); err != nil {
+		return err
+	}
+
 	sql := fmt.Sprintf(`INSERT INTO %s (
 		`+"`installed_rank`"+`,
 		`+"`version`"+`,
@@ -604,6 +611,10 @@ func (db *BigQueryDatabase) InsertHistory(ctx context.Context, schema, table str
 
 // UpdateHistory updates an existing migration record.
 func (db *BigQueryDatabase) UpdateHistory(ctx context.Context, schema, table string, rec database.HistoryRecord) error {
+	if err := db.checkActiveLockErr(); err != nil {
+		return err
+	}
+
 	sql := fmt.Sprintf(`UPDATE %s
 	SET `+"`checksum`"+` = @checksum,
 	    `+"`description`"+` = @description,
@@ -629,6 +640,10 @@ func (db *BigQueryDatabase) UpdateHistory(ctx context.Context, schema, table str
 
 // DeleteHistory deletes a migration record.
 func (db *BigQueryDatabase) DeleteHistory(ctx context.Context, schema, table string, installedRank int) error {
+	if err := db.checkActiveLockErr(); err != nil {
+		return err
+	}
+
 	sql := fmt.Sprintf("DELETE FROM %s WHERE `installed_rank` = @installed_rank", db.Quote(schema, table))
 
 	q := db.client.Query(sql)
@@ -644,10 +659,22 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 	lockID := uuid.New().String()
 	tableName := db.Quote(schema, table)
 
-	// Clean expired locks older than 10 minutes
+	ttl := db.lockTTL
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+
+	var expireInterval string
+	if ttl%time.Minute == 0 {
+		expireInterval = fmt.Sprintf("INTERVAL %d MINUTE", int(ttl.Minutes()))
+	} else if ttl%time.Second == 0 {
+		expireInterval = fmt.Sprintf("INTERVAL %d SECOND", int(ttl.Seconds()))
+	} else {
+		expireInterval = fmt.Sprintf("INTERVAL %d MILLISECOND", ttl.Milliseconds())
+	}
 	delExpiredSQL := fmt.Sprintf(`DELETE FROM %s 
 	WHERE `+"`description`"+` = 'flyway-lock' 
-	  AND `+"`installed_on`"+` < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 10 MINUTE)`, tableName)
+	  AND `+"`installed_on`"+` < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), %s)`, tableName, expireInterval)
 	_ = db.ExecuteStatement(ctx, delExpiredSQL)
 
 	insertLockSQL := fmt.Sprintf(`INSERT INTO %s (
@@ -738,8 +765,11 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 	var heartbeatErr error
 	setHeartbeatErr := func(err error) {
 		heartbeatErrMu.Lock()
-		defer heartbeatErrMu.Unlock()
-		heartbeatErr = err
+		if heartbeatErr == nil {
+			heartbeatErr = err
+		}
+		heartbeatErrMu.Unlock()
+		db.setActiveLockErr(err)
 	}
 	getHeartbeatErr := func() error {
 		heartbeatErrMu.Lock()
@@ -752,71 +782,159 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
+		lastHeartbeatSuccess := time.Now()
+		safetyMargin := 2 * time.Minute
+		if ttl <= 2*time.Minute {
+			safetyMargin = ttl / 4
+		}
+		deadline := ttl - safetyMargin
+
 		updateSQL := fmt.Sprintf(`UPDATE %s 
 		SET `+"`installed_on`"+` = CURRENT_TIMESTAMP() 
 		WHERE `+"`version`"+` = @lock_id AND `+"`description`"+` = 'flyway-lock'`, tableName)
+
+		attemptHeartbeat := func() error {
+			if db.heartbeatAttemptInterceptor != nil {
+				if interceptErr := db.heartbeatAttemptInterceptor(); interceptErr != nil {
+					return interceptErr
+				}
+			}
+			tickTimeout := 30 * time.Second
+			if interval < tickTimeout {
+				tickTimeout = interval / 2
+				if tickTimeout < 500*time.Millisecond {
+					tickTimeout = 500 * time.Millisecond
+				}
+			}
+			tickCtx, cancelTick := context.WithTimeout(heartbeatCtx, tickTimeout)
+			defer cancelTick()
+
+			q := db.client.Query(updateSQL)
+			q.Parameters = []bigquery.QueryParameter{
+				{Name: "lock_id", Value: lockID},
+			}
+			status, hErr := db.executeQueryWithStatus(tickCtx, q, 0)
+			if heartbeatCtx.Err() != nil {
+				return heartbeatCtx.Err()
+			}
+			if tickCtx.Err() != nil && hErr == nil {
+				return tickCtx.Err()
+			}
+			if hErr == nil {
+				// Check if any rows were updated. In BigQuery, an UPDATE that matches 0 rows
+				// returns success without error. If 0 rows were updated, the lock was lost!
+				if status != nil && status.Statistics != nil {
+					if qs, ok := status.Statistics.Details.(*bigquery.QueryStatistics); ok {
+						if qs.NumDMLAffectedRows == 0 {
+							hErr = db.determineLostLockError(tickCtx, tableName, lockID)
+						}
+					}
+				}
+			}
+			return hErr
+		}
 
 		for {
 			select {
 			case <-heartbeatCtx.Done():
 				return
 			case <-ticker.C:
-				q := db.client.Query(updateSQL)
-				q.Parameters = []bigquery.QueryParameter{
-					{Name: "lock_id", Value: lockID},
-				}
-				status, hErr := db.executeQueryWithStatus(heartbeatCtx, q, 0)
+				hErr := attemptHeartbeat()
 				if heartbeatCtx.Err() != nil {
 					return
 				}
 				if hErr == nil {
-					// Check if any rows were updated. In BigQuery, an UPDATE that matches 0 rows
-					// returns success without error. If 0 rows were updated, the lock was lost!
-					if status != nil && status.Statistics != nil {
-						if qs, ok := status.Statistics.Details.(*bigquery.QueryStatistics); ok {
-							if qs.NumDMLAffectedRows == 0 {
-								hErr = db.determineLostLockError(heartbeatCtx, tableName, lockID)
-							}
-						}
+					lastHeartbeatSuccess = time.Now()
+					if db.onHeartbeat != nil {
+						db.onHeartbeat(nil)
 					}
+					continue
 				}
-				if hErr != nil {
+
+				// Check if the lock was lost or missing (non-transient fatal error)
+				if errors.Is(hErr, ErrLockOwnershipLost) || errors.Is(hErr, ErrLockRowMissing) {
 					setHeartbeatErr(hErr)
-					db.setActiveLockErr(hErr)
 					if db.onHeartbeat != nil {
 						db.onHeartbeat(hErr)
 					}
 					return
 				}
-				if db.onHeartbeat != nil {
-					db.onHeartbeat(nil)
+
+				// Transient error (e.g. Unavailable, 500/503, network blip, tick timeout): retry until TTL minus safety margin
+				retryBackoff := 1 * time.Second
+				if interval < 5*time.Second {
+					retryBackoff = 20 * time.Millisecond
+				}
+				success := false
+				for time.Since(lastHeartbeatSuccess) < deadline {
+					select {
+					case <-heartbeatCtx.Done():
+						return
+					case <-time.After(retryBackoff):
+					}
+
+					hErr = attemptHeartbeat()
+					if heartbeatCtx.Err() != nil {
+						return
+					}
+					if hErr == nil {
+						lastHeartbeatSuccess = time.Now()
+						if db.onHeartbeat != nil {
+							db.onHeartbeat(nil)
+						}
+						success = true
+						break
+					}
+					if errors.Is(hErr, ErrLockOwnershipLost) || errors.Is(hErr, ErrLockRowMissing) {
+						setHeartbeatErr(hErr)
+						if db.onHeartbeat != nil {
+							db.onHeartbeat(hErr)
+						}
+						return
+					}
+					retryBackoff = min(retryBackoff*2, 10*time.Second)
+				}
+
+				if !success {
+					finalErr := fmt.Errorf("lock heartbeat failed to refresh within TTL safety margin (last refresh %v ago, TTL %v): %w", time.Since(lastHeartbeatSuccess), ttl, hErr)
+					setHeartbeatErr(finalErr)
+					if db.onHeartbeat != nil {
+						db.onHeartbeat(finalErr)
+					}
+					return
 				}
 			}
 		}
 	}()
 
+	var unlockOnce sync.Once
+	var unlockErr error
 	unlock := func(unlockCtx context.Context) error {
-		cancelHeartbeat()
-		wg.Wait()
+		unlockOnce.Do(func() {
+			cancelHeartbeat()
+			wg.Wait()
 
-		hbErr := getHeartbeatErr()
-		db.setActiveLockErr(nil)
+			hbErr := getHeartbeatErr()
+			db.setActiveLockErr(nil)
 
-		delLockSQL := fmt.Sprintf(`DELETE FROM %s 
-		WHERE `+"`version`"+` = @lock_id AND `+"`description`"+` = 'flyway-lock'`, tableName)
+			delLockSQL := fmt.Sprintf(`DELETE FROM %s 
+			WHERE `+"`version`"+` = @lock_id AND `+"`description`"+` = 'flyway-lock'`, tableName)
 
-		q := db.client.Query(delLockSQL)
-		q.Parameters = []bigquery.QueryParameter{
-			{Name: "lock_id", Value: lockID},
-		}
-		delErr := db.executeQuery(unlockCtx, q)
-		if hbErr != nil {
-			return fmt.Errorf("lock heartbeat failed: %w", hbErr)
-		}
-		if delErr != nil {
-			return fmt.Errorf("failed to release lock: %w", delErr)
-		}
-		return nil
+			q := db.client.Query(delLockSQL)
+			q.Parameters = []bigquery.QueryParameter{
+				{Name: "lock_id", Value: lockID},
+			}
+			delErr := db.executeQuery(unlockCtx, q)
+			if hbErr != nil {
+				unlockErr = fmt.Errorf("lock heartbeat failed: %w", hbErr)
+				return
+			}
+			if delErr != nil {
+				unlockErr = fmt.Errorf("failed to release lock: %w", delErr)
+				return
+			}
+		})
+		return unlockErr
 	}
 
 	return unlock, nil
@@ -829,19 +947,22 @@ func (db *BigQueryDatabase) determineLostLockError(ctx context.Context, tableNam
 	checkSQL := fmt.Sprintf("SELECT `version` FROM %s WHERE `description` = 'flyway-lock' LIMIT 1", tableName)
 	q := db.client.Query(checkSQL)
 	it, err := q.Read(ctx)
-	if err == nil {
-		var row struct {
-			Version string `bigquery:"version"`
-		}
-		if itErr := it.Next(&row); itErr == nil {
-			if row.Version != lockID {
-				return fmt.Errorf("%w: lock owned by %q", ErrLockOwnershipLost, row.Version)
-			}
-		} else if errors.Is(itErr, iterator.Done) {
-			return fmt.Errorf("%w: row was deleted", ErrLockRowMissing)
-		}
+	if err != nil {
+		return err
 	}
-	return ErrLockOwnershipLost
+	var row struct {
+		Version string `bigquery:"version"`
+	}
+	if itErr := it.Next(&row); itErr == nil {
+		if row.Version != lockID {
+			return fmt.Errorf("%w: lock owned by %q", ErrLockOwnershipLost, row.Version)
+		}
+		return fmt.Errorf("lock row present but update affected 0 rows")
+	} else if errors.Is(itErr, iterator.Done) {
+		return fmt.Errorf("%w: row was deleted", ErrLockRowMissing)
+	} else {
+		return itErr
+	}
 }
 
 func (db *BigQueryDatabase) setActiveLockErr(err error) {

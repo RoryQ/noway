@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
 )
 
 func TestQuote(t *testing.T) {
@@ -1759,6 +1761,423 @@ func TestBigQueryHeartbeatDetectsLostLockOnZeroRowsUpdated(t *testing.T) {
 	// Verify unlock returns the heartbeat error
 	if err := unlock(ctx); err == nil {
 		t.Errorf("expected unlock to report lost lock error, got nil")
+	}
+}
+
+func TestBigQueryHistoryWritesCheckActiveLockErr(t *testing.T) {
+	ctx := context.Background()
+	db := &BigQueryDatabase{}
+	sentinel := errors.New("heartbeat lost")
+	db.setActiveLockErr(sentinel)
+
+	rec := database.HistoryRecord{
+		InstalledRank: 1,
+		Description:   "test",
+	}
+
+	if err := db.InsertHistory(ctx, "ds", "history", rec); err == nil || !errors.Is(err, sentinel) {
+		t.Errorf("expected InsertHistory to fail with activeLockErr, got: %v", err)
+	}
+
+	if err := db.UpdateHistory(ctx, "ds", "history", rec); err == nil || !errors.Is(err, sentinel) {
+		t.Errorf("expected UpdateHistory to fail with activeLockErr, got: %v", err)
+	}
+
+	if err := db.DeleteHistory(ctx, "ds", "history", 1); err == nil || !errors.Is(err, sentinel) {
+		t.Errorf("expected DeleteHistory to fail with activeLockErr, got: %v", err)
+	}
+
+	if err := db.ExecuteStatement(ctx, "SELECT 1"); err == nil || !errors.Is(err, sentinel) {
+		t.Errorf("expected ExecuteStatement to fail with activeLockErr, got: %v", err)
+	}
+}
+
+func TestBigQueryHeartbeatRetriesOnTransientError(t *testing.T) {
+	projectID := "test-project"
+	var mu sync.Mutex
+	var currentLockID string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			cfg, _ := body["configuration"].(map[string]any)
+			queryCfg, _ := cfg["query"].(map[string]any)
+			queryStr, _ := queryCfg["query"].(string)
+
+			jobID := "job-" + uuid.New().String()
+
+			if strings.Contains(queryStr, "INSERT INTO") {
+				if qParams, ok := queryCfg["queryParameters"].([]any); ok {
+					for _, qp := range qParams {
+						if pMap, ok := qp.(map[string]any); ok && pMap["name"] == "lock_id" {
+							if pv, ok := pMap["parameterValue"].(map[string]any); ok {
+								currentLockID, _ = pv["value"].(string)
+							}
+						}
+					}
+				}
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobReference": map[string]any{
+					"jobId":     jobID,
+					"projectId": projectID,
+					"location":  "US",
+				},
+				"status": map[string]any{
+					"state": "DONE",
+				},
+				"statistics": map[string]any{
+					"query": map[string]any{
+						"statementType":      "UPDATE",
+						"numDmlAffectedRows": "1",
+					},
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": map[string]any{
+					"state": "DONE",
+				},
+				"statistics": map[string]any{
+					"query": map[string]any{
+						"statementType":      "UPDATE",
+						"numDmlAffectedRows": "1",
+					},
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/queries") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema": map[string]any{
+					"fields": []map[string]any{
+						{"name": "version", "type": "STRING"},
+					},
+				},
+				"rows": []map[string]any{
+					{"f": []map[string]any{{"v": currentLockID}}},
+				},
+				"jobComplete": true,
+			})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	var attemptCount int64
+	var successCount int64
+
+	db := &BigQueryDatabase{
+		client:            client,
+		projectID:         projectID,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 40 * time.Millisecond,
+		lockTTL:           1 * time.Second,
+		heartbeatAttemptInterceptor: func() error {
+			n := atomic.AddInt64(&attemptCount, 1)
+			if n == 1 {
+				// First heartbeat attempt fails with transient error (e.g. backend error)
+				return errors.New("transient 503 backend error")
+			}
+			return nil
+		},
+		onHeartbeat: func(err error) {
+			if err == nil {
+				atomic.AddInt64(&successCount, 1)
+			}
+		},
+	}
+
+	unlock, err := db.Lock(ctx, "test_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+	defer func() { _ = unlock(ctx) }()
+
+	// Wait for heartbeat tick and retry
+	time.Sleep(150 * time.Millisecond)
+
+	if attempts := atomic.LoadInt64(&attemptCount); attempts < 2 {
+		t.Errorf("expected at least 2 attempts (1 failure + 1 retry), got %d", attempts)
+	}
+	if successes := atomic.LoadInt64(&successCount); successes < 1 {
+		t.Errorf("expected at least 1 successful heartbeat after retry, got %d", successes)
+	}
+
+	// Active lock error should NOT be set because retry succeeded within safety margin
+	if err := db.checkActiveLockErr(); err != nil {
+		t.Errorf("expected activeLockErr to be nil after successful retry, got: %v", err)
+	}
+}
+
+func TestBigQueryHeartbeatFailsUntilDeadline(t *testing.T) {
+	projectID := "test-project"
+	var mu sync.Mutex
+	var currentLockID string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			cfg, _ := body["configuration"].(map[string]any)
+			queryCfg, _ := cfg["query"].(map[string]any)
+			queryStr, _ := queryCfg["query"].(string)
+
+			jobID := "job-" + uuid.New().String()
+
+			if strings.Contains(queryStr, "INSERT INTO") {
+				if qParams, ok := queryCfg["queryParameters"].([]any); ok {
+					for _, qp := range qParams {
+						if pMap, ok := qp.(map[string]any); ok && pMap["name"] == "lock_id" {
+							if pv, ok := pMap["parameterValue"].(map[string]any); ok {
+								currentLockID, _ = pv["value"].(string)
+							}
+						}
+					}
+				}
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobReference": map[string]any{
+					"jobId":     jobID,
+					"projectId": projectID,
+					"location":  "US",
+				},
+				"status": map[string]any{
+					"state": "DONE",
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": map[string]any{
+					"state": "DONE",
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/queries") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema": map[string]any{
+					"fields": []map[string]any{
+						{"name": "version", "type": "STRING"},
+					},
+				},
+				"rows": []map[string]any{
+					{"f": []map[string]any{{"v": currentLockID}}},
+				},
+				"jobComplete": true,
+			})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	var attemptCount int64
+
+	db := &BigQueryDatabase{
+		client:            client,
+		projectID:         projectID,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 20 * time.Millisecond,
+		lockTTL:           100 * time.Millisecond,
+		heartbeatAttemptInterceptor: func() error {
+			atomic.AddInt64(&attemptCount, 1)
+			return errors.New("persistent network error")
+		},
+	}
+
+	unlock, err := db.Lock(ctx, "test_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+
+	// Wait for heartbeat attempts to exceed deadline
+	time.Sleep(150 * time.Millisecond)
+
+	if attempts := atomic.LoadInt64(&attemptCount); attempts < 2 {
+		t.Errorf("expected multiple failed attempts, got %d", attempts)
+	}
+
+	// Active lock error MUST be set because heartbeat exceeded deadline
+	if err := db.checkActiveLockErr(); err == nil {
+		t.Errorf("expected activeLockErr to be set after exceeding deadline, got nil")
+	}
+
+	// Unlock must return the heartbeat failure error
+	unlockErr := unlock(ctx)
+	if unlockErr == nil {
+		t.Errorf("expected unlock to return error after heartbeat failed until deadline, got nil")
+	} else if !strings.Contains(unlockErr.Error(), "lock heartbeat failed") {
+		t.Errorf("expected unlock error to contain 'lock heartbeat failed', got: %v", unlockErr)
+	}
+}
+
+func TestBigQueryHeartbeatTickTimeout(t *testing.T) {
+	projectID := "test-project"
+	var mu sync.Mutex
+	var currentLockID string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			cfg, _ := body["configuration"].(map[string]any)
+			queryCfg, _ := cfg["query"].(map[string]any)
+			queryStr, _ := queryCfg["query"].(string)
+
+			jobID := "job-" + uuid.New().String()
+
+			if strings.Contains(queryStr, "INSERT INTO") {
+				if qParams, ok := queryCfg["queryParameters"].([]any); ok {
+					for _, qp := range qParams {
+						if pMap, ok := qp.(map[string]any); ok && pMap["name"] == "lock_id" {
+							if pv, ok := pMap["parameterValue"].(map[string]any); ok {
+								currentLockID, _ = pv["value"].(string)
+							}
+						}
+					}
+				}
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobReference": map[string]any{
+					"jobId":     jobID,
+					"projectId": projectID,
+					"location":  "US",
+				},
+				"status": map[string]any{
+					"state": "DONE",
+				},
+				"statistics": map[string]any{
+					"query": map[string]any{
+						"statementType":      "UPDATE",
+						"numDmlAffectedRows": "1",
+					},
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": map[string]any{
+					"state": "DONE",
+				},
+				"statistics": map[string]any{
+					"query": map[string]any{
+						"statementType":      "UPDATE",
+						"numDmlAffectedRows": "1",
+					},
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/queries") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema": map[string]any{
+					"fields": []map[string]any{
+						{"name": "version", "type": "STRING"},
+					},
+				},
+				"rows": []map[string]any{
+					{"f": []map[string]any{{"v": currentLockID}}},
+				},
+				"jobComplete": true,
+			})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	var attemptCount int64
+
+	db := &BigQueryDatabase{
+		client:            client,
+		projectID:         projectID,
+		config:            &config.Configuration{LockRetryCount: 1},
+		heartbeatInterval: 25 * time.Millisecond,
+		lockTTL:           2 * time.Second,
+		heartbeatAttemptInterceptor: func() error {
+			n := atomic.AddInt64(&attemptCount, 1)
+			if n == 1 {
+				// Simulate tick timeout
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+	}
+
+	unlock, err := db.Lock(ctx, "test_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+	defer func() { _ = unlock(ctx) }()
+
+	time.Sleep(100 * time.Millisecond)
+
+	if attempts := atomic.LoadInt64(&attemptCount); attempts < 2 {
+		t.Errorf("expected at least 2 attempts after tick timeout retry, got %d", attempts)
+	}
+
+	// Active lock error should NOT be set because retry recovered after tick timeout
+	if err := db.checkActiveLockErr(); err != nil {
+		t.Errorf("expected activeLockErr to be nil after timeout recovery, got: %v", err)
 	}
 }
 
