@@ -73,6 +73,20 @@ type ResolvedMigration struct {
 	Config             MigrationConfig
 }
 
+// ChecksumMatches returns true if appliedChecksum matches either the resolved checksum or the equivalent checksum.
+func (r *ResolvedMigration) ChecksumMatches(appliedChecksum *int64) bool {
+	if appliedChecksum == nil {
+		return false
+	}
+	if *appliedChecksum == r.Checksum {
+		return true
+	}
+	if r.EquivalentChecksum != nil && *appliedChecksum == *r.EquivalentChecksum {
+		return true
+	}
+	return false
+}
+
 // ChecksumMatchesWithoutBeingIdentical returns true if appliedChecksum matches the equivalent checksum
 // (e.g. raw content without placeholder replacement) while differing from the actual checksum (with replacement).
 func (r *ResolvedMigration) ChecksumMatchesWithoutBeingIdentical(appliedChecksum *int64) bool {

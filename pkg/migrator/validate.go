@@ -255,7 +255,7 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 				}
 
 				// Check checksum
-				if app.Checksum != nil && *app.Checksum != res.Checksum {
+				if app.Checksum != nil && !res.ChecksumMatches(app.Checksum) {
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Version:     app.Version,
@@ -330,7 +330,7 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			}
 
 			// Check checksum
-			if app.Checksum != nil && *app.Checksum != res.Checksum {
+			if app.Checksum != nil && !res.ChecksumMatches(app.Checksum) {
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
 					Version:     app.Version,

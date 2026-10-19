@@ -276,10 +276,16 @@ func viewReferences(viewDef, targetView string) bool {
 	if viewDef == "" || targetView == "" {
 		return false
 	}
-	pattern := `(?i)(?:^|[^a-zA-Z0-9_` + "`" + `])` + regexp.QuoteMeta(targetView) + `(?:$|[^a-zA-Z0-9_` + "`" + `])`
+	cleanTarget := cleanIdentifier(targetView)
+	quotedTarget := "`" + cleanTarget + "`"
+	escapedClean := regexp.QuoteMeta(cleanTarget)
+	escapedQuoted := regexp.QuoteMeta(quotedTarget)
+
+	pattern := `(?i)(?:^|[^a-zA-Z0-9_` + "`" + `])(?:` + escapedQuoted + `|` + escapedClean + `)(?:$|[^a-zA-Z0-9_` + "`" + `])`
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return strings.Contains(strings.ToLower(viewDef), strings.ToLower(targetView))
+		lowerDef := strings.ToLower(viewDef)
+		return strings.Contains(lowerDef, strings.ToLower(quotedTarget)) || strings.Contains(lowerDef, strings.ToLower(cleanTarget))
 	}
 	return re.MatchString(viewDef)
 }

@@ -4,16 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unsafe"
 
 	"cloud.google.com/go/bigquery"
+	"github.com/google/uuid"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
@@ -313,9 +313,66 @@ func TestPollJobStatus(t *testing.T) {
 	})
 }
 
-func setJobStatusError(s *bigquery.JobStatus, err error) {
-	val := reflect.ValueOf(s).Elem().FieldByName("err")
-	reflect.NewAt(val.Type(), unsafe.Pointer(val.UnsafeAddr())).Elem().Set(reflect.ValueOf(err))
+func makeTestJobStatus(state string, errReason, errMsg string, stats *bigquery.JobStatistics) *bigquery.JobStatus {
+	projectID := "test-proj"
+	jobID := "test-job"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"jobReference": map[string]any{
+				"projectId": projectID,
+				"jobId":     jobID,
+				"location":  "US",
+			},
+			"status": map[string]any{
+				"state": state,
+			},
+		}
+		if errReason != "" || errMsg != "" {
+			errObj := map[string]any{
+				"message": errMsg,
+			}
+			if errReason != "" {
+				errObj["reason"] = errReason
+			}
+			resp["status"].(map[string]any)["errorResult"] = errObj
+		}
+		if stats != nil {
+			st := map[string]any{}
+			if stats.NumChildJobs > 0 {
+				st["numChildJobs"] = fmt.Sprintf("%d", stats.NumChildJobs)
+			}
+			if qs, ok := stats.Details.(*bigquery.QueryStatistics); ok {
+				qMap := map[string]any{
+					"statementType": qs.StatementType,
+				}
+				if qs.NumDMLAffectedRows > 0 {
+					qMap["numDmlAffectedRows"] = fmt.Sprintf("%d", qs.NumDMLAffectedRows)
+				}
+				st["query"] = qMap
+			}
+			resp["statistics"] = st
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+	if err != nil {
+		panic(err)
+	}
+	defer client.Close()
+
+	job, err := client.JobFromProject(ctx, projectID, jobID, "US")
+	if err != nil {
+		panic(err)
+	}
+	status, err := job.Status(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return status
 }
 
 func TestSubmitAndPollJob(t *testing.T) {
@@ -357,9 +414,7 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 
 		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
-			s := &bigquery.JobStatus{State: bigquery.Done}
-			setJobStatusError(s, errors.New("syntax error at [1:10]"))
-			return s, nil
+			return makeTestJobStatus("DONE", "", "syntax error at [1:10]", nil), nil
 		}
 
 		_, err := submitAndPollJob(context.Background(), "noway-initial", db.retry, submitJob, waitForJob, nil)
@@ -381,16 +436,13 @@ func TestSubmitAndPollJob(t *testing.T) {
 		pollCount := 0
 		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
 			pollCount++
-			s := &bigquery.JobStatus{State: bigquery.Done}
 			if pollCount == 1 {
-				setJobStatusError(s, &bigquery.Error{Reason: "rateLimitExceeded", Message: "Exceeded rate limits"})
-				return s, nil
+				return makeTestJobStatus("DONE", "rateLimitExceeded", "Exceeded rate limits", nil), nil
 			}
 			if pollCount == 2 {
-				setJobStatusError(s, &bigquery.Error{Reason: "backendError", Message: "Transient backend error"})
-				return s, nil
+				return makeTestJobStatus("DONE", "backendError", "Transient backend error", nil), nil
 			}
-			return s, nil
+			return makeTestJobStatus("DONE", "", "", nil), nil
 		}
 
 		status, err := submitAndPollJob(context.Background(), "noway-job-1", db.retry, submitJob, waitForJob, nil)
@@ -485,14 +537,9 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 
 		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
-			s := &bigquery.JobStatus{
-				State: bigquery.Done,
-				Statistics: &bigquery.JobStatistics{
-					NumChildJobs: 2, // Statement 1 succeeded, statement 2 failed
-				},
-			}
-			setJobStatusError(s, &bigquery.Error{Reason: "concurrentModification", Message: "Could not serialize access"})
-			return s, nil
+			return makeTestJobStatus("DONE", "concurrentModification", "Could not serialize access", &bigquery.JobStatistics{
+				NumChildJobs: 2, // Statement 1 succeeded, statement 2 failed
+			}), nil
 		}
 
 		_, err := submitAndPollJob(context.Background(), "noway-script", db.retry, submitJob, waitForJob, nil)
@@ -515,16 +562,11 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 
 		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
-			s := &bigquery.JobStatus{
-				State: bigquery.Done,
-				Statistics: &bigquery.JobStatistics{
-					Details: &bigquery.QueryStatistics{
-						NumDMLAffectedRows: 5,
-					},
+			return makeTestJobStatus("DONE", "backendError", "transient backend error", &bigquery.JobStatistics{
+				Details: &bigquery.QueryStatistics{
+					NumDMLAffectedRows: 5,
 				},
-			}
-			setJobStatusError(s, &bigquery.Error{Reason: "backendError", Message: "transient backend error"})
-			return s, nil
+			}), nil
 		}
 
 		_, err := submitAndPollJob(context.Background(), "noway-dml", db.retry, submitJob, waitForJob, nil)
@@ -544,14 +586,9 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 
 		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
-			s := &bigquery.JobStatus{
-				State: bigquery.Done,
-				Statistics: &bigquery.JobStatistics{
-					NumChildJobs: 1,
-				},
-			}
-			setJobStatusError(s, &bigquery.Error{Reason: "concurrentModification", Message: "Could not serialize access"})
-			return s, nil
+			return makeTestJobStatus("DONE", "concurrentModification", "Could not serialize access", &bigquery.JobStatistics{
+				NumChildJobs: 1,
+			}), nil
 		}
 
 		isPartiallyExecuted := func(ctx context.Context, job *bigquery.Job, status *bigquery.JobStatus) bool {
@@ -565,6 +602,29 @@ func TestSubmitAndPollJob(t *testing.T) {
 		}
 		if submitCount != 1 {
 			t.Errorf("job marked partially executed by callback was submitted %d times; expected exactly 1 submission (no retry)", submitCount)
+		}
+	})
+
+	t.Run("ScriptJobUnreadableFailsClosedAndDoesNotRetry", func(t *testing.T) {
+		submitCount := 0
+		submitJob := func(ctx context.Context, jobID string) (*bigquery.Job, error) {
+			submitCount++
+			return &bigquery.Job{}, nil
+		}
+
+		waitForJob := func(ctx context.Context, job *bigquery.Job) (*bigquery.JobStatus, error) {
+			return makeTestJobStatus("DONE", "concurrentModification", "Could not serialize access", &bigquery.JobStatistics{
+				NumChildJobs: 1,
+			}), nil
+		}
+
+		// When isPartiallyExecuted is nil, code cannot read child jobs -> fails closed, no retry
+		_, err := submitAndPollJob(context.Background(), "noway-unreadable-script", db.retry, submitJob, waitForJob, nil)
+		if err == nil {
+			t.Fatalf("expected error from failed script job, got nil")
+		}
+		if submitCount != 1 {
+			t.Errorf("unreadable script job was submitted %d times; expected exactly 1 submission (fail closed, no retry)", submitCount)
 		}
 	})
 }
@@ -1444,5 +1504,262 @@ func TestHasJobPartiallyExecuted(t *testing.T) {
 			t.Errorf("expected hasJobPartiallyExecuted to return true after child job inspection found succeeded child job")
 		}
 	})
+
+	t.Run("ChildJobsInspectionFailsClosedWhenUnreadable", func(t *testing.T) {
+		dbNil := &BigQueryDatabase{}
+		parentStatus := &bigquery.JobStatus{
+			Statistics: &bigquery.JobStatistics{
+				NumChildJobs: 1,
+			},
+		}
+		// Client is nil -> cannot read child jobs -> fail closed (return true)
+		if !dbNil.hasJobPartiallyExecuted(context.Background(), nil, parentStatus) {
+			t.Errorf("expected true (fail-closed) when client is nil")
+		}
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Simulating permission error when listing child jobs (non-retryable 403)
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":    403,
+					"message": "access denied listing jobs",
+				},
+			})
+		}))
+		defer ts.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+		if err != nil {
+			t.Fatalf("failed to create client: %v", err)
+		}
+		defer client.Close()
+
+		db := &BigQueryDatabase{
+			client:    client,
+			projectID: projectID,
+		}
+
+		job := &bigquery.Job{}
+		// Listing child jobs will fail -> fail closed (return true)
+		if !db.hasJobPartiallyExecuted(ctx, job, parentStatus) {
+			t.Errorf("expected true (fail-closed) when listing child jobs fails with error")
+		}
+	})
 }
+
+func TestBigQueryHeartbeatDetectsLostLockOnZeroRowsUpdated(t *testing.T) {
+	projectID := "test-project"
+	var heartbeatCallCount int
+	var mu sync.Mutex
+	var currentLockID string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			cfg, _ := body["configuration"].(map[string]any)
+			queryCfg, _ := cfg["query"].(map[string]any)
+			queryStr, _ := queryCfg["query"].(string)
+
+			jobID := "job-" + uuid.New().String()
+
+			// Initial lock insert: capture lock_id
+			if strings.Contains(queryStr, "INSERT INTO") {
+				if qParams, ok := queryCfg["queryParameters"].([]any); ok {
+					for _, qp := range qParams {
+						if pMap, ok := qp.(map[string]any); ok && pMap["name"] == "lock_id" {
+							if pv, ok := pMap["parameterValue"].(map[string]any); ok {
+								currentLockID, _ = pv["value"].(string)
+							}
+						}
+					}
+				}
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jobReference": map[string]any{
+						"jobId":     jobID,
+						"projectId": projectID,
+						"location":  "US",
+					},
+					"status": map[string]any{
+						"state": "DONE",
+					},
+					"statistics": map[string]any{
+						"query": map[string]any{
+							"statementType":      "INSERT",
+							"numDmlAffectedRows": "1",
+						},
+					},
+				})
+				return
+			}
+
+			// Heartbeat query updates installed_on
+			if strings.Contains(queryStr, "SET `installed_on` = CURRENT_TIMESTAMP()") {
+				heartbeatCallCount++
+				// Simulate 0 rows updated (lock row removed/stolen)
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jobReference": map[string]any{
+						"jobId":     jobID,
+						"projectId": projectID,
+						"location":  "US",
+					},
+					"status": map[string]any{
+						"state": "DONE",
+					},
+					"statistics": map[string]any{
+						"query": map[string]any{
+							"statementType":      "UPDATE",
+							"numDmlAffectedRows": "0",
+						},
+					},
+				})
+				return
+			}
+
+			// Unlock delete or other queries succeed
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobReference": map[string]any{
+					"jobId":     jobID,
+					"projectId": projectID,
+					"location":  "US",
+				},
+				"status": map[string]any{
+					"state": "DONE",
+				},
+				"statistics": map[string]any{
+					"query": map[string]any{
+						"statementType":      "DELETE",
+						"numDmlAffectedRows": "1",
+					},
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/") {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": map[string]any{
+					"state": "DONE",
+				},
+				"statistics": map[string]any{
+					"query": map[string]any{
+						"statementType":      "UPDATE",
+						"numDmlAffectedRows": "0",
+					},
+				},
+			})
+			return
+		}
+
+		// Active lock query check
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/queries") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			queryStr, _ := body["query"].(string)
+
+			// If determineLostLockError is querying active lock holder after lost lock:
+			// simulate row deleted
+			if strings.Contains(queryStr, "LIMIT 1") && heartbeatCallCount > 0 {
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"schema": map[string]any{
+						"fields": []map[string]any{
+							{"name": "version", "type": "STRING"},
+						},
+					},
+					"rows":        []map[string]any{},
+					"jobComplete": true,
+				})
+				return
+			}
+
+			// Initial active lock check
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"schema": map[string]any{
+					"fields": []map[string]any{
+						{"name": "version", "type": "STRING"},
+					},
+				},
+				"rows": []map[string]any{
+					{"f": []map[string]any{{"v": currentLockID}}},
+				},
+				"jobComplete": true,
+			})
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client, err := bigquery.NewClient(ctx, projectID, option.WithEndpoint(ts.URL+"/bigquery/v2/"), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	var hbErr error
+	var hbMu sync.Mutex
+	hbDone := make(chan struct{})
+
+	db := &BigQueryDatabase{
+		client:            client,
+		projectID:         projectID,
+		config:            &config.Configuration{LockRetryCount: 2},
+		heartbeatInterval: 10 * time.Millisecond,
+		onHeartbeat: func(err error) {
+			hbMu.Lock()
+			defer hbMu.Unlock()
+			if err != nil && hbErr == nil {
+				hbErr = err
+				close(hbDone)
+			}
+		},
+	}
+
+	unlock, err := db.Lock(ctx, "test_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+
+	select {
+	case <-hbDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for heartbeat to detect lost lock")
+	}
+
+	hbMu.Lock()
+	capturedErr := hbErr
+	hbMu.Unlock()
+
+	if capturedErr == nil {
+		t.Fatalf("expected heartbeat error when 0 rows updated, got nil")
+	}
+	if !errors.Is(capturedErr, ErrLockOwnershipLost) && !errors.Is(capturedErr, ErrLockRowMissing) {
+		t.Errorf("expected ErrLockOwnershipLost or ErrLockRowMissing, got: %v", capturedErr)
+	}
+
+	// Verify ExecuteStatement is blocked by activeLockErr
+	if err := db.ExecuteStatement(ctx, "SELECT 1"); err == nil {
+		t.Errorf("expected ExecuteStatement to fail after lock lost, got nil")
+	}
+
+	// Verify unlock returns the heartbeat error
+	if err := unlock(ctx); err == nil {
+		t.Errorf("expected unlock to report lost lock error, got nil")
+	}
+}
+
 

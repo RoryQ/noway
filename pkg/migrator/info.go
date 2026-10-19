@@ -472,7 +472,7 @@ func computeMigrationInfos(
 			state := resolver.StateSuccess
 			if !lastRun.Success {
 				state = resolver.StateFailed
-			} else if lastRun.Checksum != nil && *lastRun.Checksum != res.Checksum {
+			} else if !res.ChecksumMatches(lastRun.Checksum) {
 				state = resolver.StateOutdated
 			}
 

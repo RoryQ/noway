@@ -917,3 +917,27 @@ func TestSpannerCleanSchema_ViewsDependencyOrder(t *testing.T) {
 		t.Errorf("expected middle_view before root_view in drop order, got: %v", sorted)
 	}
 }
+
+func TestSpannerCleanSchema_ViewsDependencyOrder_WithBackticks(t *testing.T) {
+	views := []string{"root_view", "middle_view", "leaf_view"}
+	viewDefs := map[string]string{
+		"root_view":   "SELECT 1 AS num",
+		"middle_view": "SELECT num + 1 AS num FROM `root_view`",
+		"leaf_view":   "SELECT num * 2 AS res FROM `middle_view`",
+	}
+
+	sorted := sortViewsDependenciesFirst(views, viewDefs)
+
+	pos := make(map[string]int)
+	for i, v := range sorted {
+		pos[v] = i
+	}
+
+	if pos["leaf_view"] >= pos["middle_view"] {
+		t.Errorf("expected leaf_view before middle_view in drop order with backticks, got: %v", sorted)
+	}
+	if pos["middle_view"] >= pos["root_view"] {
+		t.Errorf("expected middle_view before root_view in drop order with backticks, got: %v", sorted)
+	}
+}
+

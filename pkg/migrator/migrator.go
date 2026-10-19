@@ -531,7 +531,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 		lastRun, wasApplied := appliedRepeatables[key]
 		if !wasApplied {
 			pendingRepeatable = append(pendingRepeatable, res)
-		} else if lastRun.Checksum == nil || *lastRun.Checksum != res.Checksum || !lastRun.Success {
+		} else if !lastRun.Success || !res.ChecksumMatches(lastRun.Checksum) {
 			pendingRepeatable = append(pendingRepeatable, res)
 		}
 	}

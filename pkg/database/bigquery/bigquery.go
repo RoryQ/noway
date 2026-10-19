@@ -22,6 +22,14 @@ import (
 	"github.com/roryq/noway/pkg/version"
 )
 
+var (
+	// ErrLockRowMissing indicates that the lock row was deleted from the schema history table during heartbeat.
+	ErrLockRowMissing = errors.New("lock row missing during heartbeat")
+
+	// ErrLockOwnershipLost indicates that lock ownership was taken by another process during heartbeat.
+	ErrLockOwnershipLost = errors.New("lock ownership lost during heartbeat")
+)
+
 // BigQueryDatabase implements database.Database for Google Cloud BigQuery.
 type BigQueryDatabase struct {
 	client              *bigquery.Client
@@ -661,9 +669,9 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 
 	delSelfSQL := fmt.Sprintf("DELETE FROM %s WHERE `version` = @lock_id AND `description` = 'flyway-lock'", tableName)
 
-	maxRetries := db.config.LockRetryCount
-	if maxRetries <= 0 {
-		maxRetries = 50
+	maxRetries := 50
+	if db.config != nil && db.config.LockRetryCount > 0 {
+		maxRetries = db.config.LockRetryCount
 	}
 
 	acquired := false
@@ -757,9 +765,20 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 				q.Parameters = []bigquery.QueryParameter{
 					{Name: "lock_id", Value: lockID},
 				}
-				hErr := db.executeQuery(heartbeatCtx, q)
+				status, hErr := db.executeQueryWithStatus(heartbeatCtx, q, 0)
 				if heartbeatCtx.Err() != nil {
 					return
+				}
+				if hErr == nil {
+					// Check if any rows were updated. In BigQuery, an UPDATE that matches 0 rows
+					// returns success without error. If 0 rows were updated, the lock was lost!
+					if status != nil && status.Statistics != nil {
+						if qs, ok := status.Statistics.Details.(*bigquery.QueryStatistics); ok {
+							if qs.NumDMLAffectedRows == 0 {
+								hErr = db.determineLostLockError(heartbeatCtx, tableName, lockID)
+							}
+						}
+					}
 				}
 				if hErr != nil {
 					setHeartbeatErr(hErr)
@@ -801,6 +820,28 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 	}
 
 	return unlock, nil
+}
+
+func (db *BigQueryDatabase) determineLostLockError(ctx context.Context, tableName, lockID string) error {
+	if db.client == nil {
+		return ErrLockOwnershipLost
+	}
+	checkSQL := fmt.Sprintf("SELECT `version` FROM %s WHERE `description` = 'flyway-lock' LIMIT 1", tableName)
+	q := db.client.Query(checkSQL)
+	it, err := q.Read(ctx)
+	if err == nil {
+		var row struct {
+			Version string `bigquery:"version"`
+		}
+		if itErr := it.Next(&row); itErr == nil {
+			if row.Version != lockID {
+				return fmt.Errorf("%w: lock owned by %q", ErrLockOwnershipLost, row.Version)
+			}
+		} else if errors.Is(itErr, iterator.Done) {
+			return fmt.Errorf("%w: row was deleted", ErrLockRowMissing)
+		}
+	}
+	return ErrLockOwnershipLost
 }
 
 func (db *BigQueryDatabase) setActiveLockErr(err error) {
@@ -849,12 +890,17 @@ func (db *BigQueryDatabase) executeQuery(ctx context.Context, q *bigquery.Query)
 }
 
 func (db *BigQueryDatabase) executeQueryWithRetries(ctx context.Context, q *bigquery.Query, maxRetries int) error {
+	_, err := db.executeQueryWithStatus(ctx, q, maxRetries)
+	return err
+}
+
+func (db *BigQueryDatabase) executeQueryWithStatus(ctx context.Context, q *bigquery.Query, maxRetries int) (*bigquery.JobStatus, error) {
 	initialJobID := q.JobIDConfig.JobID
 	if initialJobID == "" {
 		initialJobID = "noway-" + uuid.New().String()
 	}
 
-	_, err := submitAndPollJob(
+	return submitAndPollJob(
 		ctx,
 		initialJobID,
 		func(retryCtx context.Context, op func() error) error {
@@ -880,7 +926,6 @@ func (db *BigQueryDatabase) executeQueryWithRetries(ctx context.Context, q *bigq
 		db.waitForJob,
 		db.hasJobPartiallyExecuted,
 	)
-	return err
 }
 
 func (db *BigQueryDatabase) recoverExistingJob(ctx context.Context, q *bigquery.Query, jobID string, submitErr error) (*bigquery.Job, error) {
@@ -1057,6 +1102,9 @@ func submitAndPollJob(
 			partiallyExecuted := defaultIsPartiallyExecuted(status)
 			if !partiallyExecuted && isPartiallyExecuted != nil {
 				partiallyExecuted = isPartiallyExecuted(ctx, job, status)
+			} else if !partiallyExecuted && isPartiallyExecuted == nil && isScriptJob(status) {
+				// Safer rule: If the code cannot read the child jobs of a script job, do not retry.
+				partiallyExecuted = true
 			}
 			if !partiallyExecuted && isRetryableBigQueryError(jobErr) {
 				currentJobID = "noway-" + uuid.New().String()
@@ -1073,10 +1121,27 @@ func submitAndPollJob(
 	return status, nil
 }
 
+// isScriptJob reports whether a job status indicates the job was a multi-statement script.
+func isScriptJob(status *bigquery.JobStatus) bool {
+	if status == nil || status.Statistics == nil {
+		return false
+	}
+	if status.Statistics.NumChildJobs > 0 || status.Statistics.ScriptStatistics != nil {
+		return true
+	}
+	if qs, ok := status.Statistics.Details.(*bigquery.QueryStatistics); ok && qs.StatementType == "SCRIPT" {
+		return true
+	}
+	return false
+}
+
 // hasJobPartiallyExecuted checks whether a BigQuery job (especially a script / multi-statement query)
 // has already executed any part of its workload (e.g. one or more child statements completed,
 // or rows were mutated). If so, retrying the entire job from the beginning is unsafe because
 // already-committed child statements or partial mutations would run a second time.
+//
+// Safer rule: If the code cannot read the child jobs of a script job, it fails closed (returns true,
+// preventing retry).
 func (db *BigQueryDatabase) hasJobPartiallyExecuted(ctx context.Context, job *bigquery.Job, status *bigquery.JobStatus) bool {
 	if status == nil {
 		return false
@@ -1085,9 +1150,12 @@ func (db *BigQueryDatabase) hasJobPartiallyExecuted(ctx context.Context, job *bi
 		return true
 	}
 
-	// If the job is a script with child jobs, inspect them to see if any child statement completed successfully
-	// or mutated data before the failure occurred.
-	if db != nil && db.client != nil && job != nil && status.Statistics != nil && (status.Statistics.NumChildJobs > 0 || status.Statistics.ScriptStatistics != nil) {
+	if isScriptJob(status) {
+		// Safer rule: If the code cannot read the child jobs of a script job, do not retry.
+		if db == nil || db.client == nil || job == nil {
+			return true
+		}
+
 		it := db.client.Jobs(ctx)
 		it.ParentJobID = job.ID()
 		if job.ProjectID() != "" {
@@ -1095,33 +1163,47 @@ func (db *BigQueryDatabase) hasJobPartiallyExecuted(ctx context.Context, job *bi
 		} else if db.projectID != "" {
 			it.ProjectID = db.projectID
 		}
+
+		inspectedCount := 0
 		for {
 			if ctx.Err() != nil {
-				return false
+				return true // Context canceled/timed out during inspection -> fail closed
 			}
 			childJob, err := it.Next()
-			if err != nil {
+			if err == iterator.Done {
 				break
 			}
+			if err != nil {
+				// Failed to list/read child jobs -> fail closed
+				return true
+			}
+			inspectedCount++
 			childStatus, err := childJob.Status(ctx)
-			if err == nil && childStatus != nil {
-				if childStatus.Done() && childStatus.Err() == nil {
-					return true
-				}
-				if childStatus.Statistics != nil {
-					if qs, ok := childStatus.Statistics.Details.(*bigquery.QueryStatistics); ok {
-						if qs.NumDMLAffectedRows > 0 {
-							return true
-						}
-						if qs.DMLStats != nil && (qs.DMLStats.InsertedRowCount > 0 || qs.DMLStats.UpdatedRowCount > 0 || qs.DMLStats.DeletedRowCount > 0) {
-							return true
-						}
-						if qs.DDLTargetTable != nil || qs.DDLOperationPerformed != "" || qs.DDLTargetRoutine != nil {
-							return true
-						}
+			if err != nil || childStatus == nil {
+				// Failed to read child job status -> fail closed
+				return true
+			}
+			if childStatus.Done() && childStatus.Err() == nil {
+				return true
+			}
+			if childStatus.Statistics != nil {
+				if qs, ok := childStatus.Statistics.Details.(*bigquery.QueryStatistics); ok {
+					if qs.NumDMLAffectedRows > 0 {
+						return true
+					}
+					if qs.DMLStats != nil && (qs.DMLStats.InsertedRowCount > 0 || qs.DMLStats.UpdatedRowCount > 0 || qs.DMLStats.DeletedRowCount > 0) {
+						return true
+					}
+					if qs.DDLTargetTable != nil || qs.DDLOperationPerformed != "" || qs.DDLTargetRoutine != nil {
+						return true
 					}
 				}
 			}
+		}
+
+		if inspectedCount == 0 && status.Statistics.NumChildJobs > 0 {
+			// NumChildJobs indicated child jobs existed, but we were unable to inspect any -> fail closed
+			return true
 		}
 	}
 

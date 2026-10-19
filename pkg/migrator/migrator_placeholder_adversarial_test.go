@@ -8,7 +8,9 @@ import (
 
 	"github.com/roryq/noway/pkg/checksum"
 	"github.com/roryq/noway/pkg/config"
+	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/database/mock"
+	"github.com/roryq/noway/pkg/resolver"
 )
 
 func TestAdversarial_MigratePlaceholderConfOverridesAndEscapes(t *testing.T) {
@@ -204,3 +206,68 @@ func TestAdversarial_PlaceholderChangeRepeatableRerunVsRawConf(t *testing.T) {
 		t.Fatalf("expected executed migration to be R__view.sql, got: %v", res2.ExecutedMigrations)
 	}
 }
+
+func TestMigrateAndInfoAcceptEquivalentChecksum(t *testing.T) {
+	ctx := context.Background()
+
+	mockFS := fstest.MapFS{
+		"sql/R__view.sql": &fstest.MapFile{
+			Data: []byte("CREATE VIEW v AS SELECT '${app_env}';"),
+		},
+	}
+
+	rawCs, _ := checksum.CalculateString("CREATE VIEW v AS SELECT '${app_env}';")
+	replacedCs, _ := checksum.CalculateString("CREATE VIEW v AS SELECT 'production';")
+	if rawCs == replacedCs {
+		t.Fatalf("raw and replaced checksums must differ for test setup")
+	}
+
+	db := mock.NewMockDatabase()
+	_ = db.EnsureSchema(ctx, "test_schema")
+	_ = db.EnsureHistoryTable(ctx, "test_schema", "flyway_schema_history")
+	// Pre-populate history with the raw equivalent checksum
+	_ = db.InsertHistory(ctx, "test_schema", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       nil,
+		Description:   "view",
+		Type:          "SQL",
+		Script:        "R__view.sql",
+		Checksum:      &rawCs,
+		Success:       true,
+	})
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_schema"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"sql"}
+	cfg.Placeholders = map[string]string{
+		"app_env": "production",
+	}
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	// 1. Info must accept equivalent checksum and report StateSuccess (not StateOutdated)
+	infoRes, err := m.Info(ctx)
+	if err != nil {
+		t.Fatalf("Info failed: %v", err)
+	}
+	if len(infoRes.Migrations) != 1 {
+		t.Fatalf("expected 1 migration info item, got %d", len(infoRes.Migrations))
+	}
+	if infoRes.Migrations[0].State != resolver.StateSuccess {
+		t.Errorf("expected Info to report StateSuccess for equivalent checksum, got: %v", infoRes.Migrations[0].State)
+	}
+
+	// 2. Migrate must accept equivalent checksum and not re-execute the repeatable migration
+	migRes, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if migRes.MigrationsExecuted != 0 {
+		t.Errorf("expected Migrate to accept equivalent checksum (0 executions), got %d executed", migRes.MigrationsExecuted)
+	}
+}
+
