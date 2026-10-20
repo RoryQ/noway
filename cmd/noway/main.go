@@ -132,7 +132,7 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			} else if k == "environment" || k == "env" {
 				cfg.Environment = v
 			}
-		} else if clean == "configFile" || clean == "configFiles" || clean == "config-file" || clean == "config-files" {
+		} else if cleanLower := strings.ToLower(clean); cleanLower == "configfile" || cleanLower == "configfiles" || cleanLower == "config-file" || cleanLower == "config-files" {
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				configFiles = append(configFiles, splitAndTrimCLI(args[i+1], ",")...)
 				i++
@@ -145,18 +145,20 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 		}
 	}
 
+	if len(configFiles) == 0 {
+		if envConfigFiles := os.Getenv("FLYWAY_CONFIG_FILES"); envConfigFiles != "" {
+			configFiles = append(configFiles, splitAndTrimCLI(envConfigFiles, ",")...)
+		} else if envConfigFiles := os.Getenv("NOWAY_CONFIG_FILES"); envConfigFiles != "" {
+			configFiles = append(configFiles, splitAndTrimCLI(envConfigFiles, ",")...)
+		}
+	}
+
 	if len(configFiles) > 0 {
-		for _, cf := range configFiles {
-			cf = strings.TrimSpace(cf)
-			if cf == "" {
-				continue
-			}
-			if err := config.LoadFromFileInto(cf, cfg); err != nil {
-				return nil, err
-			}
+		if err := config.LoadFromFilesInto(configFiles, cfg); err != nil {
+			return nil, err
 		}
 	} else if autoConf := config.FindConfigFile(); autoConf != "" {
-		if err := config.LoadFromFileInto(autoConf, cfg); err != nil {
+		if err := config.LoadFromFilesInto([]string{autoConf}, cfg); err != nil {
 			return nil, err
 		}
 	}

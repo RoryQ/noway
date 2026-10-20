@@ -121,3 +121,53 @@ user = "prod_user"
 	}
 }
 
+func TestParseCLIArgs_ConfigFilesMultiFileEnvironmentSelection(t *testing.T) {
+	tmpDir := t.TempDir()
+	tomlFile := tmpDir + "/environments.toml"
+	confFile := tmpDir + "/flyway.conf"
+
+	tomlContent := `
+[environments.staging]
+url = "jdbc:bigquery:;ProjectId=staging-proj;DefaultDataset=staging_ds;"
+user = "staging_user"
+
+[environments.prod]
+url = "jdbc:bigquery:;ProjectId=prod-proj;DefaultDataset=prod_ds;"
+user = "prod_user"
+`
+	confContent := `
+flyway.environment=staging
+flyway.password=secret_staging
+`
+
+	if err := os.WriteFile(tomlFile, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write toml: %v", err)
+	}
+	if err := os.WriteFile(confFile, []byte(confContent), 0644); err != nil {
+		t.Fatalf("failed to write conf: %v", err)
+	}
+
+	args := []string{
+		"-configFiles=" + tomlFile + "," + confFile,
+	}
+
+	cfg, err := parseCLIArgs(args)
+	if err != nil {
+		t.Fatalf("parseCLIArgs failed: %v", err)
+	}
+
+	if cfg.Environment != "staging" {
+		t.Errorf("expected staging environment, got '%s'", cfg.Environment)
+	}
+	if cfg.GCPProjectID != "staging-proj" || cfg.GCPDataset != "staging_ds" {
+		t.Errorf("expected staging url, got %s/%s", cfg.GCPProjectID, cfg.GCPDataset)
+	}
+	if cfg.User != "staging_user" {
+		t.Errorf("expected staging user 'staging_user', got %s", cfg.User)
+	}
+	if cfg.Password != "secret_staging" {
+		t.Errorf("expected staging password 'secret_staging', got %s", cfg.Password)
+	}
+}
+
+

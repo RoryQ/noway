@@ -237,3 +237,212 @@ url = "jdbc:bigquery:;ProjectId=override-proj;DefaultDataset=override_ds;"
 	}
 }
 
+func TestLoadFromFiles_MultipleFilesCrossEnvironment(t *testing.T) {
+	tmpDir := t.TempDir()
+	tomlFile := filepath.Join(tmpDir, "environments.toml")
+	confFile := filepath.Join(tmpDir, "flyway.conf")
+
+	tomlContent := `
+[environments.staging]
+url = "jdbc:bigquery:;ProjectId=staging-proj;DefaultDataset=staging_ds;"
+user = "staging_user"
+
+[environments.production]
+url = "jdbc:bigquery:;ProjectId=prod-proj;DefaultDataset=prod_ds;"
+user = "prod_user"
+`
+	confContent := `
+flyway.environment=staging
+flyway.password=secret_staging
+`
+
+	if err := os.WriteFile(tomlFile, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write toml: %v", err)
+	}
+	if err := os.WriteFile(confFile, []byte(confContent), 0644); err != nil {
+		t.Fatalf("failed to write conf: %v", err)
+	}
+
+	// Order 1: TOML first, then CONF
+	cfg1, err := LoadFromFiles([]string{tomlFile, confFile})
+	if err != nil {
+		t.Fatalf("LoadFromFiles (order 1) failed: %v", err)
+	}
+	if cfg1.Environment != "staging" {
+		t.Errorf("expected Environment='staging', got '%s'", cfg1.Environment)
+	}
+	if cfg1.URL != "jdbc:bigquery:;ProjectId=staging-proj;DefaultDataset=staging_ds;" {
+		t.Errorf("expected staging URL, got '%s'", cfg1.URL)
+	}
+	if cfg1.User != "staging_user" {
+		t.Errorf("expected User='staging_user', got '%s'", cfg1.User)
+	}
+	if cfg1.Password != "secret_staging" {
+		t.Errorf("expected Password='secret_staging', got '%s'", cfg1.Password)
+	}
+
+	// Order 2: CONF first, then TOML
+	cfg2, err := LoadFromFiles([]string{confFile, tomlFile})
+	if err != nil {
+		t.Fatalf("LoadFromFiles (order 2) failed: %v", err)
+	}
+	if cfg2.Environment != "staging" {
+		t.Errorf("expected Environment='staging', got '%s'", cfg2.Environment)
+	}
+	if cfg2.URL != "jdbc:bigquery:;ProjectId=staging-proj;DefaultDataset=staging_ds;" {
+		t.Errorf("expected staging URL, got '%s'", cfg2.URL)
+	}
+	if cfg2.User != "staging_user" {
+		t.Errorf("expected User='staging_user', got '%s'", cfg2.User)
+	}
+	if cfg2.Password != "secret_staging" {
+		t.Errorf("expected Password='secret_staging', got '%s'", cfg2.Password)
+	}
+}
+
+func TestDetermineEnvironment_PriorityOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Clear environment variables before testing
+	origFlywayEnv := os.Getenv("FLYWAY_ENVIRONMENT")
+	origNowayEnv := os.Getenv("NOWAY_ENVIRONMENT")
+	defer func() {
+		os.Setenv("FLYWAY_ENVIRONMENT", origFlywayEnv)
+		os.Setenv("NOWAY_ENVIRONMENT", origNowayEnv)
+	}()
+	os.Unsetenv("FLYWAY_ENVIRONMENT")
+	os.Unsetenv("NOWAY_ENVIRONMENT")
+
+	// Priority 5: default
+	{
+		emptyFile := filepath.Join(tmpDir, "empty.conf")
+		_ = os.WriteFile(emptyFile, []byte("flyway.table=history\n"), 0644)
+		cfg, err := LoadFromFiles([]string{emptyFile})
+		if err != nil {
+			t.Fatalf("LoadFromFiles failed: %v", err)
+		}
+		if cfg.Environment != "default" {
+			t.Errorf("priority 5: expected 'default', got '%s'", cfg.Environment)
+		}
+	}
+
+	// Priority 4: root environment
+	{
+		rootEnvFile := filepath.Join(tmpDir, "root_env.toml")
+		_ = os.WriteFile(rootEnvFile, []byte("environment = \"env4\"\n[environments.env4]\nurl=\"jdbc:bigquery:;ProjectId=p4;DefaultDataset=d4;\"\n"), 0644)
+		cfg, err := LoadFromFiles([]string{rootEnvFile})
+		if err != nil {
+			t.Fatalf("LoadFromFiles failed: %v", err)
+		}
+		if cfg.Environment != "env4" {
+			t.Errorf("priority 4: expected 'env4', got '%s'", cfg.Environment)
+		}
+	}
+
+	// Priority 3: flyway.environment overrides root environment
+	{
+		flywayEnvFile := filepath.Join(tmpDir, "flyway_env.toml")
+		content := `
+environment = "env4"
+
+[flyway]
+environment = "env3"
+
+[environments.env3]
+url = "jdbc:bigquery:;ProjectId=p3;DefaultDataset=d3;"
+
+[environments.env4]
+url = "jdbc:bigquery:;ProjectId=p4;DefaultDataset=d4;"
+`
+		_ = os.WriteFile(flywayEnvFile, []byte(content), 0644)
+		cfg, err := LoadFromFiles([]string{flywayEnvFile})
+		if err != nil {
+			t.Fatalf("LoadFromFiles failed: %v", err)
+		}
+		if cfg.Environment != "env3" {
+			t.Errorf("priority 3: expected 'env3', got '%s'", cfg.Environment)
+		}
+	}
+
+	// Priority 2: FLYWAY_ENVIRONMENT overrides flyway.environment and root environment
+	{
+		os.Setenv("FLYWAY_ENVIRONMENT", "env2")
+		file := filepath.Join(tmpDir, "env2_test.toml")
+		content := `
+environment = "env4"
+
+[flyway]
+environment = "env3"
+
+[environments.env2]
+url = "jdbc:bigquery:;ProjectId=p2;DefaultDataset=d2;"
+
+[environments.env3]
+url = "jdbc:bigquery:;ProjectId=p3;DefaultDataset=d3;"
+`
+		_ = os.WriteFile(file, []byte(content), 0644)
+		cfg, err := LoadFromFiles([]string{file})
+		if err != nil {
+			t.Fatalf("LoadFromFiles failed: %v", err)
+		}
+		if cfg.Environment != "env2" {
+			t.Errorf("priority 2: expected 'env2', got '%s'", cfg.Environment)
+		}
+	}
+
+	// Priority 1: CLI overrides FLYWAY_ENVIRONMENT, flyway.environment, root environment
+	{
+		os.Setenv("FLYWAY_ENVIRONMENT", "env2")
+		file := filepath.Join(tmpDir, "env1_test.toml")
+		content := `
+environment = "env4"
+
+[flyway]
+environment = "env3"
+
+[environments.env1]
+url = "jdbc:bigquery:;ProjectId=p1;DefaultDataset=d1;"
+
+[environments.env2]
+url = "jdbc:bigquery:;ProjectId=p2;DefaultDataset=d2;"
+`
+		_ = os.WriteFile(file, []byte(content), 0644)
+		cfg := NewDefaultConfiguration()
+		cfg.Environment = "env1"
+		if err := LoadFromFilesInto([]string{file}, cfg); err != nil {
+			t.Fatalf("LoadFromFilesInto failed: %v", err)
+		}
+		if cfg.Environment != "env1" {
+			t.Errorf("priority 1: expected 'env1', got '%s'", cfg.Environment)
+		}
+		if cfg.URL != "jdbc:bigquery:;ProjectId=p1;DefaultDataset=d1;" {
+			t.Errorf("expected URL from env1, got '%s'", cfg.URL)
+		}
+	}
+}
+
+func TestLoadFromFiles_PlaceholderWithDotsAndMultiFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	conf1 := filepath.Join(tmpDir, "ph1.properties")
+	conf2 := filepath.Join(tmpDir, "ph2.conf")
+
+	_ = os.WriteFile(conf1, []byte("flyway.placeholders.my.dotted.var=hello\nflyway.placeholders.shared=val1\n"), 0644)
+	_ = os.WriteFile(conf2, []byte("flyway.placeholders.shared=val2\nplaceholders.root.dotted.key=world\n"), 0644)
+
+	cfg, err := LoadFromFiles([]string{conf1, conf2})
+	if err != nil {
+		t.Fatalf("LoadFromFiles failed: %v", err)
+	}
+
+	if cfg.Placeholders["my.dotted.var"] != "hello" {
+		t.Errorf("expected my.dotted.var='hello', got '%s'", cfg.Placeholders["my.dotted.var"])
+	}
+	if cfg.Placeholders["shared"] != "val2" {
+		t.Errorf("expected shared='val2', got '%s'", cfg.Placeholders["shared"])
+	}
+	if cfg.Placeholders["root.dotted.key"] != "world" {
+		t.Errorf("expected root.dotted.key='world', got '%s'", cfg.Placeholders["root.dotted.key"])
+	}
+}
+
+

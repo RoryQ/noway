@@ -13,10 +13,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LoadFromFile loads configuration from a file (.conf, .properties, .toml, .yaml, .json).
+// LoadFromFile loads configuration from a single file (.conf, .properties, .toml, .yaml, .json).
 func LoadFromFile(filePath string) (*Configuration, error) {
+	return LoadFromFiles([]string{filePath})
+}
+
+// LoadFromFiles loads and merges configuration from multiple files into a new Configuration.
+// All configs are merged into one map first, and the environment is selected once.
+func LoadFromFiles(filePaths []string) (*Configuration, error) {
 	cfg := NewDefaultConfiguration()
-	if err := LoadFromFileInto(filePath, cfg); err != nil {
+	if err := LoadFromFilesInto(filePaths, cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -24,55 +30,246 @@ func LoadFromFile(filePath string) (*Configuration, error) {
 
 // LoadFromFileInto overlays configuration from a file onto an existing Configuration struct.
 func LoadFromFileInto(filePath string, cfg *Configuration) error {
+	return LoadFromFilesInto([]string{filePath}, cfg)
+}
+
+// LoadFromFilesInto merges all configs from filePaths into one map first,
+// selects the environment once (CLI, FLYWAY_ENVIRONMENT, flyway.environment, root environment, default),
+// and applies the merged configuration to cfg.
+func LoadFromFilesInto(filePaths []string, cfg *Configuration) error {
+	mergedMap := make(map[string]any)
+
+	for _, filePath := range filePaths {
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			continue
+		}
+		fileMap, err := readFileToMap(filePath)
+		if err != nil {
+			return err
+		}
+		mergeMaps(mergedMap, fileMap)
+	}
+
+	targetEnv := determineEnvironment(mergedMap, cfg.Environment)
+	cfg.Environment = targetEnv
+
+	return applyMergedConfig(mergedMap, targetEnv, cfg)
+}
+
+func readFileToMap(filePath string) (map[string]any, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return fmt.Errorf("error reading config file '%s': %w", filePath, err)
+		return nil, fmt.Errorf("error reading config file '%s': %w", filePath, err)
 	}
 
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".conf", ".properties":
-		err = parseProperties(string(data), cfg)
+		return parsePropertiesToMap(string(data))
 	case ".toml":
-		err = parseTOML(data, cfg)
+		var rawMap map[string]any
+		if err := toml.Unmarshal(data, &rawMap); err != nil {
+			return nil, fmt.Errorf("error parsing TOML config file '%s': %w", filePath, err)
+		}
+		return rawMap, nil
 	case ".yaml", ".yml":
-		err = parseYAML(data, cfg)
+		var anyVal any
+		if err := yaml.Unmarshal(data, &anyVal); err != nil {
+			return nil, fmt.Errorf("error parsing YAML config file '%s': %w", filePath, err)
+		}
+		return toStringAnyMap(anyVal), nil
 	case ".json":
-		err = parseJSON(data, cfg)
+		var rawMap map[string]any
+		if err := json.Unmarshal(data, &rawMap); err != nil {
+			return nil, fmt.Errorf("error parsing JSON config file '%s': %w", filePath, err)
+		}
+		return rawMap, nil
 	default:
-		// Default to properties file
-		err = parseProperties(string(data), cfg)
+		return parsePropertiesToMap(string(data))
 	}
-
-	if err != nil {
-		return fmt.Errorf("error parsing config file '%s': %w", filePath, err)
-	}
-
-	return nil
 }
 
-func parseTOML(data []byte, cfg *Configuration) error {
-	var rawMap map[string]any
-	if err := toml.Unmarshal(data, &rawMap); err != nil {
-		return err
+func parsePropertiesToMap(content string) (map[string]any, error) {
+	result := make(map[string]any)
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "--") {
+			continue
+		}
+
+		var key, val string
+		if idx := strings.IndexAny(line, "=:"); idx != -1 {
+			key = strings.TrimSpace(line[:idx])
+			val = strings.TrimSpace(line[idx+1:])
+		} else {
+			continue
+		}
+
+		if (strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) ||
+			(strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'")) {
+			val = val[1 : len(val)-1]
+		}
+
+		cleanKey := key
+		lowerKey := strings.ToLower(cleanKey)
+		if strings.HasPrefix(lowerKey, "noway.") {
+			cleanKey = "flyway." + cleanKey[len("noway."):]
+			lowerKey = strings.ToLower(cleanKey)
+		}
+
+		parts := strings.Split(cleanKey, ".")
+		phIdx := -1
+		for i, part := range parts {
+			partLower := strings.ToLower(part)
+			if partLower == "placeholders" {
+				phIdx = i
+				break
+			}
+			if partLower == "placeholder" {
+				if i+1 < len(parts) {
+					nextLower := strings.ToLower(parts[i+1])
+					if nextLower == "prefix" || nextLower == "suffix" || nextLower == "separator" || nextLower == "replacement" {
+						continue
+					}
+				}
+				phIdx = i
+				break
+			}
+		}
+		if phIdx != -1 && phIdx < len(parts)-1 {
+			phName := strings.Join(parts[phIdx+1:], ".")
+			setPlaceholderInMap(result, parts[:phIdx+1], phName, val)
+			continue
+		}
+
+		setDottedKey(result, cleanKey, val)
 	}
-	return processConfigMap(rawMap, cfg)
+	return result, scanner.Err()
 }
 
-func parseYAML(data []byte, cfg *Configuration) error {
-	var rawMap map[string]any
-	if err := yaml.Unmarshal(data, &rawMap); err != nil {
-		return err
+func setDottedKey(m map[string]any, key string, val any) {
+	parts := strings.Split(key, ".")
+	curr := m
+	for i := 0; i < len(parts)-1; i++ {
+		p := parts[i]
+		matchedKey := p
+		for ek := range curr {
+			if strings.EqualFold(ek, p) {
+				matchedKey = ek
+				break
+			}
+		}
+		sub, ok := curr[matchedKey].(map[string]any)
+		if !ok {
+			sub = make(map[string]any)
+			curr[matchedKey] = sub
+		}
+		curr = sub
 	}
-	return processConfigMap(rawMap, cfg)
+	leaf := parts[len(parts)-1]
+	matchedLeaf := leaf
+	for ek := range curr {
+		if strings.EqualFold(ek, leaf) {
+			matchedLeaf = ek
+			break
+		}
+	}
+	curr[matchedLeaf] = val
 }
 
-func parseJSON(data []byte, cfg *Configuration) error {
-	var rawMap map[string]any
-	if err := json.Unmarshal(data, &rawMap); err != nil {
-		return err
+func setPlaceholderInMap(m map[string]any, path []string, phName string, val any) {
+	curr := m
+	for _, p := range path {
+		matchedKey := p
+		for ek := range curr {
+			if strings.EqualFold(ek, p) {
+				matchedKey = ek
+				break
+			}
+		}
+		sub, ok := curr[matchedKey].(map[string]any)
+		if !ok {
+			sub = make(map[string]any)
+			curr[matchedKey] = sub
+		}
+		curr = sub
 	}
-	return processConfigMap(rawMap, cfg)
+	matchedLeaf := phName
+	for ek := range curr {
+		if strings.EqualFold(ek, phName) {
+			matchedLeaf = ek
+			break
+		}
+	}
+	curr[matchedLeaf] = val
+}
+
+func mergeMaps(dst, src map[string]any) {
+	for k, srcVal := range src {
+		if srcVal == nil {
+			continue
+		}
+		dstKey := k
+		for existingK := range dst {
+			if strings.EqualFold(existingK, k) {
+				dstKey = existingK
+				break
+			}
+		}
+
+		if srcMap, ok := srcVal.(map[string]any); ok {
+			if dstMap, ok := dst[dstKey].(map[string]any); ok {
+				mergeMaps(dstMap, srcMap)
+			} else {
+				newMap := make(map[string]any, len(srcMap))
+				mergeMaps(newMap, srcMap)
+				dst[dstKey] = newMap
+			}
+		} else {
+			dst[dstKey] = srcVal
+		}
+	}
+}
+
+func toStringAnyMap(v any) map[string]any {
+	if v == nil {
+		return make(map[string]any)
+	}
+	switch m := v.(type) {
+	case map[string]any:
+		res := make(map[string]any, len(m))
+		for k, val := range m {
+			res[k] = toStringAnyMapVal(val)
+		}
+		return res
+	case map[any]any:
+		res := make(map[string]any, len(m))
+		for k, val := range m {
+			res[fmt.Sprintf("%v", k)] = toStringAnyMapVal(val)
+		}
+		return res
+	default:
+		return make(map[string]any)
+	}
+}
+
+func toStringAnyMapVal(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return toStringAnyMap(val)
+	case map[any]any:
+		return toStringAnyMap(val)
+	case []any:
+		res := make([]any, len(val))
+		for i, item := range val {
+			res[i] = toStringAnyMapVal(item)
+		}
+		return res
+	default:
+		return v
+	}
 }
 
 func findEnvString(m map[string]any) string {
@@ -90,72 +287,104 @@ func findEnvString(m map[string]any) string {
 	return ""
 }
 
-func processConfigMap(rawMap map[string]any, cfg *Configuration) error {
-	if rawMap == nil {
-		return nil
+// determineEnvironment selects the active environment using the priority:
+// 1. CLI (cliEnv)
+// 2. FLYWAY_ENVIRONMENT (and NOWAY_ENVIRONMENT)
+// 3. flyway.environment (from [flyway] table or flyway.environment property)
+// 4. root environment (from root table or property)
+// 5. default
+func determineEnvironment(mergedMap map[string]any, cliEnv string) string {
+	// 1. CLI
+	if cliEnv != "" {
+		return cliEnv
+	}
+
+	// 2. FLYWAY_ENVIRONMENT / NOWAY_ENVIRONMENT
+	if envVal := os.Getenv("FLYWAY_ENVIRONMENT"); envVal != "" {
+		return envVal
+	}
+	if envVal := os.Getenv("NOWAY_ENVIRONMENT"); envVal != "" {
+		return envVal
 	}
 
 	var flywayMap map[string]any
+	for k, v := range mergedMap {
+		if strings.EqualFold(k, "flyway") {
+			if m, ok := v.(map[string]any); ok {
+				flywayMap = m
+				break
+			}
+		}
+	}
+
+	// 3. flyway.environment
+	if flywayMap != nil {
+		if envVal := findEnvString(flywayMap); envVal != "" {
+			return envVal
+		}
+	}
+	for k, v := range mergedMap {
+		kLower := strings.ToLower(k)
+		if kLower == "flyway.environment" || kLower == "flyway.env" {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+
+	// 4. root environment
+	if envVal := findEnvString(mergedMap); envVal != "" {
+		return envVal
+	}
+
+	// 5. default
+	return "default"
+}
+
+func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configuration) error {
+	var flywayMap map[string]any
 	var envsMap map[string]any
 
-	for k, v := range rawMap {
-		switch strings.ToLower(k) {
-		case "flyway":
+	for k, v := range mergedMap {
+		if strings.EqualFold(k, "flyway") {
 			if m, ok := v.(map[string]any); ok {
 				flywayMap = m
 			}
-		case "environments":
+		} else if strings.EqualFold(k, "environments") {
 			if m, ok := v.(map[string]any); ok {
 				envsMap = m
 			}
 		}
 	}
 
-	// 1. Determine active environment
-	targetEnv := cfg.Environment
-	if targetEnv == "" {
-		if envVal := os.Getenv("FLYWAY_ENVIRONMENT"); envVal != "" {
-			targetEnv = envVal
-		} else if envVal := os.Getenv("NOWAY_ENVIRONMENT"); envVal != "" {
-			targetEnv = envVal
-		} else if envVal := findEnvString(flywayMap); envVal != "" {
-			targetEnv = envVal
-		} else if envVal := findEnvString(rawMap); envVal != "" {
-			targetEnv = envVal
-		} else {
-			targetEnv = "default"
-		}
-		cfg.Environment = targetEnv
-	}
-
-	// 2. Apply root-level properties (skipping "flyway" and "environments")
-	for k, v := range rawMap {
+	// 1. Apply root-level properties (skipping "flyway", "environments", and environment selectors)
+	for k, v := range mergedMap {
 		kLower := strings.ToLower(k)
-		if kLower == "flyway" || kLower == "environments" {
+		if kLower == "flyway" || kLower == "environments" || kLower == "environment" || kLower == "env" || kLower == "flyway.environment" || kLower == "flyway.env" {
 			continue
 		}
 		applyAnyValue(cfg, k, v)
 	}
 
-	// 3. Apply [flyway] table
+	// 2. Apply [flyway] table
 	if flywayMap != nil {
 		for k, v := range flywayMap {
+			kLower := strings.ToLower(k)
+			if kLower == "environment" || kLower == "env" {
+				continue
+			}
 			applyAnyValue(cfg, k, v)
 		}
 	}
 
-	// 4. Apply [environments] table
+	// 3. Apply [environments] table
 	if envsMap != nil {
 		var envObj map[string]any
-		if specific, ok := envsMap[targetEnv].(map[string]any); ok {
-			envObj = specific
-		} else {
-			for ek, ev := range envsMap {
-				if strings.EqualFold(ek, targetEnv) {
-					if m, ok := ev.(map[string]any); ok {
-						envObj = m
-						break
-					}
+		for ek, ev := range envsMap {
+			if strings.EqualFold(ek, targetEnv) {
+				if m, ok := ev.(map[string]any); ok {
+					envObj = m
+					break
 				}
 			}
 		}
@@ -494,13 +723,13 @@ func applyProperty(cfg *Configuration, key, val string) {
 		cfg.SQLMigrationSuffixes = splitAndTrim(val, ",")
 	case "encoding":
 		cfg.Encoding = val
-	case "placeholderreplacement":
+	case "placeholderreplacement", "placeholder.replacement", "placeholder_replacement":
 		cfg.PlaceholderReplacement = parseBool(val, true)
-	case "placeholderprefix":
+	case "placeholderprefix", "placeholder.prefix", "placeholder_prefix":
 		cfg.PlaceholderPrefix = val
-	case "placeholdersuffix":
+	case "placeholdersuffix", "placeholder.suffix", "placeholder_suffix":
 		cfg.PlaceholderSuffix = val
-	case "placeholderseparator":
+	case "placeholderseparator", "placeholder.separator", "placeholder_separator":
 		cfg.PlaceholderSeparator = val
 	case "target":
 		cfg.Target = val
