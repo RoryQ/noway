@@ -75,9 +75,40 @@ func parseJSON(data []byte, cfg *Configuration) error {
 	return processConfigMap(rawMap, cfg)
 }
 
+func findEnvString(m map[string]any) string {
+	if m == nil {
+		return ""
+	}
+	for k, v := range m {
+		kLower := strings.ToLower(k)
+		if kLower == "environment" || kLower == "env" {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
 func processConfigMap(rawMap map[string]any, cfg *Configuration) error {
 	if rawMap == nil {
 		return nil
+	}
+
+	var flywayMap map[string]any
+	var envsMap map[string]any
+
+	for k, v := range rawMap {
+		switch strings.ToLower(k) {
+		case "flyway":
+			if m, ok := v.(map[string]any); ok {
+				flywayMap = m
+			}
+		case "environments":
+			if m, ok := v.(map[string]any); ok {
+				envsMap = m
+			}
+		}
 	}
 
 	// 1. Determine active environment
@@ -87,11 +118,14 @@ func processConfigMap(rawMap map[string]any, cfg *Configuration) error {
 			targetEnv = envVal
 		} else if envVal := os.Getenv("NOWAY_ENVIRONMENT"); envVal != "" {
 			targetEnv = envVal
-		} else if envVal, ok := rawMap["environment"].(string); ok && envVal != "" {
+		} else if envVal := findEnvString(flywayMap); envVal != "" {
+			targetEnv = envVal
+		} else if envVal := findEnvString(rawMap); envVal != "" {
 			targetEnv = envVal
 		} else {
 			targetEnv = "default"
 		}
+		cfg.Environment = targetEnv
 	}
 
 	// 2. Apply root-level properties (skipping "flyway" and "environments")
@@ -104,39 +138,57 @@ func processConfigMap(rawMap map[string]any, cfg *Configuration) error {
 	}
 
 	// 3. Apply [flyway] table
-	if flywayVal, ok := rawMap["flyway"]; ok {
-		if flywayMap, ok := flywayVal.(map[string]any); ok {
-			for k, v := range flywayMap {
-				applyAnyValue(cfg, k, v)
-			}
+	if flywayMap != nil {
+		for k, v := range flywayMap {
+			applyAnyValue(cfg, k, v)
 		}
 	}
 
 	// 4. Apply [environments] table
-	if envsVal, ok := rawMap["environments"]; ok {
-		if envsMap, ok := envsVal.(map[string]any); ok {
-			var envObj map[string]any
-			if specific, ok := envsMap[targetEnv].(map[string]any); ok {
-				envObj = specific
-			} else if targetEnv != "default" {
-				return fmt.Errorf("environment '%s' not found in config", targetEnv)
-			} else if defaultEnv, ok := envsMap["default"].(map[string]any); ok {
-				envObj = defaultEnv
-			}
-
-			if envObj != nil {
-				// Apply environment properties
-				for k, v := range envObj {
-					if strings.ToLower(k) == "flyway" {
-						continue
+	if envsMap != nil {
+		var envObj map[string]any
+		if specific, ok := envsMap[targetEnv].(map[string]any); ok {
+			envObj = specific
+		} else {
+			for ek, ev := range envsMap {
+				if strings.EqualFold(ek, targetEnv) {
+					if m, ok := ev.(map[string]any); ok {
+						envObj = m
+						break
 					}
-					applyAnyValue(cfg, k, v)
 				}
-				// Apply nested [environments.<env>.flyway]
-				if envFlywayVal, ok := envObj["flyway"]; ok {
-					if envFlywayMap, ok := envFlywayVal.(map[string]any); ok {
-						for k, v := range envFlywayMap {
-							applyAnyValue(cfg, k, v)
+			}
+		}
+
+		if envObj == nil {
+			if strings.EqualFold(targetEnv, "default") {
+				for ek, ev := range envsMap {
+					if strings.EqualFold(ek, "default") {
+						if m, ok := ev.(map[string]any); ok {
+							envObj = m
+							break
+						}
+					}
+				}
+			} else {
+				return fmt.Errorf("environment '%s' not found in config", targetEnv)
+			}
+		}
+
+		if envObj != nil {
+			// Apply environment properties
+			for k, v := range envObj {
+				if strings.EqualFold(k, "flyway") {
+					continue
+				}
+				applyAnyValue(cfg, k, v)
+			}
+			// Apply nested [environments.<env>.flyway]
+			for k, v := range envObj {
+				if strings.EqualFold(k, "flyway") {
+					if envFlywayMap, ok := v.(map[string]any); ok {
+						for fk, fv := range envFlywayMap {
+							applyAnyValue(cfg, fk, fv)
 						}
 					}
 				}

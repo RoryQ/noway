@@ -144,6 +144,46 @@ tier = "qa"
 	}
 }
 
+func TestFlywayTOML_EnvironmentUnderFlywayTable(t *testing.T) {
+	tomlContent := `
+[flyway]
+environment = "development"
+
+[environments.development]
+url = "jdbc:bigquery:;ProjectId=dev-proj;DefaultDataset=dev_ds;"
+user = "dev_user"
+
+[environments.production]
+url = "jdbc:bigquery:;ProjectId=prod-proj;DefaultDataset=prod_ds;"
+user = "prod_user"
+`
+	tmpDir := t.TempDir()
+	tomlPath := filepath.Join(tmpDir, "flyway.toml")
+	if err := os.WriteFile(tomlPath, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write flyway.toml: %v", err)
+	}
+
+	// Loading without pre-set Environment should pick up "development" from [flyway]
+	cfg, err := LoadFromFile(tomlPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+	if err := cfg.Finalize(); err != nil {
+		t.Fatalf("cfg.Finalize failed: %v", err)
+	}
+
+	if cfg.Environment != "development" {
+		t.Errorf("expected Environment 'development' from [flyway], got %s", cfg.Environment)
+	}
+	if cfg.GCPProjectID != "dev-proj" || cfg.GCPDataset != "dev_ds" {
+		t.Errorf("expected dev environment url loaded, got %s/%s", cfg.GCPProjectID, cfg.GCPDataset)
+	}
+	if cfg.User != "dev_user" {
+		t.Errorf("expected dev_user, got %s", cfg.User)
+	}
+}
+
+
 func TestLoadFromFile_Overlay(t *testing.T) {
 	tmpDir := t.TempDir()
 	basePath := filepath.Join(tmpDir, "base.conf")
