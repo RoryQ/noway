@@ -261,15 +261,18 @@ type spannerDDLConstraint struct {
 }
 
 type spannerDDLObjects struct {
-	changeStreams []string
-	tables        []string
-	views         []string
-	viewDefs      map[string]string
-	models        []string
-	sequences     []string
-	indexes       []string
-	constraints   []spannerDDLConstraint
-	tableParents  map[string]string
+	changeStreams  []string
+	tables         []string
+	views          []string
+	viewDefs       map[string]string
+	models         []string
+	sequences      []string
+	indexes        []string
+	searchIndexes  []string
+	vectorIndexes  []string
+	propertyGraphs []string
+	constraints    []spannerDDLConstraint
+	tableParents   map[string]string
 }
 
 func viewReferences(viewDef, targetView string) bool {
@@ -351,9 +354,12 @@ func sortViewsDependenciesFirst(views []string, viewDefs map[string]string) []st
 }
 
 var (
-	createModelRegex        = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+MODEL\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
-	createChangeStreamRegex = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+CHANGE\s+STREAM\s+([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
-	createSequenceRegex     = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+	createModelRegex         = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+MODEL\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+	createChangeStreamRegex  = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+CHANGE\s+STREAM\s+([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+	createSequenceRegex      = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+	createSearchIndexRegex   = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+SEARCH\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+	createVectorIndexRegex   = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+VECTOR\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
+	createPropertyGraphRegex = regexp.MustCompile(`(?i)^\s*CREATE(?:\s+OR\s+REPLACE)?\s+PROPERTY\s+GRAPH\s+(?:IF\s+NOT\s+EXISTS\s+)?([` + "`" + `]?[a-zA-Z0-9_]+[` + "`" + `]?)`)
 )
 
 func cleanIdentifier(id string) string {
@@ -430,20 +436,26 @@ func (db *SpannerDatabase) inspectDDL(ctx context.Context) (*spannerDDLObjects, 
 	if err != nil {
 		return nil, err
 	}
+	return parseDDLStatements(resp.Statements), nil
+}
 
+func parseDDLStatements(statements []string) *spannerDDLObjects {
 	objs := &spannerDDLObjects{
 		tableParents: make(map[string]string),
 		viewDefs:     make(map[string]string),
 	}
 	seenTables := make(map[string]bool)
 	seenIndexes := make(map[string]bool)
+	seenSearchIndexes := make(map[string]bool)
+	seenVectorIndexes := make(map[string]bool)
+	seenPropertyGraphs := make(map[string]bool)
 	seenViews := make(map[string]bool)
 	seenConstraints := make(map[string]bool)
 	seenChangeStreams := make(map[string]bool)
 	seenSequences := make(map[string]bool)
 	seenModels := make(map[string]bool)
 
-	for _, stmtStr := range resp.Statements {
+	for _, stmtStr := range statements {
 		stmt, err := spansql.ParseDDLStmt(stmtStr)
 		if err == nil {
 			switch s := stmt.(type) {
@@ -531,8 +543,85 @@ func (db *SpannerDatabase) inspectDDL(ctx context.Context) (*spannerDDLObjects, 
 				objs.sequences = append(objs.sequences, seqName)
 			}
 		}
+		if m := createSearchIndexRegex.FindStringSubmatch(stmtStr); len(m) > 1 {
+			idxName := cleanIdentifier(m[1])
+			if !seenSearchIndexes[idxName] {
+				seenSearchIndexes[idxName] = true
+				objs.searchIndexes = append(objs.searchIndexes, idxName)
+			}
+		}
+		if m := createVectorIndexRegex.FindStringSubmatch(stmtStr); len(m) > 1 {
+			idxName := cleanIdentifier(m[1])
+			if !seenVectorIndexes[idxName] {
+				seenVectorIndexes[idxName] = true
+				objs.vectorIndexes = append(objs.vectorIndexes, idxName)
+			}
+		}
+		if m := createPropertyGraphRegex.FindStringSubmatch(stmtStr); len(m) > 1 {
+			pgName := cleanIdentifier(m[1])
+			if !seenPropertyGraphs[pgName] {
+				seenPropertyGraphs[pgName] = true
+				objs.propertyGraphs = append(objs.propertyGraphs, pgName)
+			}
+		}
 	}
-	return objs, nil
+	return objs
+}
+
+func (db *SpannerDatabase) dropStatementsFromDDLObjects(objs *spannerDDLObjects, excludeMap map[string]bool) ([]string, map[string]bool) {
+	var ddlStatements []string
+	seenStmts := make(map[string]bool)
+	addStmt := func(s string) {
+		if s != "" && !seenStmts[s] {
+			seenStmts[s] = true
+			ddlStatements = append(ddlStatements, s)
+		}
+	}
+	preservedTables := make(map[string]bool)
+
+	for _, csName := range objs.changeStreams {
+		addStmt(fmt.Sprintf("DROP CHANGE STREAM %s", db.Quote(csName)))
+	}
+	for _, fk := range objs.constraints {
+		addStmt(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(fk.table), db.Quote(fk.constraint)))
+	}
+	searchIdxSet := make(map[string]bool)
+	for _, idxName := range objs.searchIndexes {
+		searchIdxSet[idxName] = true
+		addStmt(fmt.Sprintf("DROP SEARCH INDEX %s", db.Quote(idxName)))
+	}
+	vectorIdxSet := make(map[string]bool)
+	for _, idxName := range objs.vectorIndexes {
+		vectorIdxSet[idxName] = true
+		addStmt(fmt.Sprintf("DROP VECTOR INDEX %s", db.Quote(idxName)))
+	}
+	for _, idxName := range objs.indexes {
+		if !searchIdxSet[idxName] && !vectorIdxSet[idxName] {
+			addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
+		}
+	}
+	orderedViews := sortViewsDependenciesFirst(objs.views, objs.viewDefs)
+	for _, vName := range orderedViews {
+		addStmt(fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
+	}
+	for _, mName := range objs.models {
+		addStmt(fmt.Sprintf("DROP MODEL %s", db.Quote(mName)))
+	}
+	for _, pgName := range objs.propertyGraphs {
+		addStmt(fmt.Sprintf("DROP PROPERTY GRAPH %s", db.Quote(pgName)))
+	}
+	orderedTables := sortTablesChildrenFirst(objs.tables, objs.tableParents)
+	for _, tName := range orderedTables {
+		if excludeMap != nil && excludeMap[tName] {
+			preservedTables[tName] = true
+			continue
+		}
+		addStmt(fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
+	}
+	for _, seqName := range objs.sequences {
+		addStmt(fmt.Sprintf("DROP SEQUENCE %s", db.Quote(seqName)))
+	}
+	return ddlStatements, preservedTables
 }
 
 // SchemaEmpty checks if the database has no user tables (excluding schema history table).
@@ -653,9 +742,9 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 		iter.Stop()
 	}
 
-	// 3. Secondary indexes
+	// 3. Secondary indexes (including search and vector indexes)
 	if infoSchemaErr == nil {
-		idxSQL := `SELECT INDEX_NAME, TABLE_NAME 
+		idxSQL := `SELECT INDEX_NAME, TABLE_NAME, INDEX_TYPE 
 		           FROM INFORMATION_SCHEMA.INDEXES 
 		           WHERE INDEX_TYPE != 'PRIMARY_KEY' AND TABLE_SCHEMA = '' AND NOT IS_MANAGED`
 		iter = db.client.Single().Query(ctx, spanner.NewStatement(idxSQL))
@@ -669,11 +758,23 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 				break
 			}
 			var idxName, tName string
-			if err := row.Columns(&idxName, &tName); err != nil {
+			var idxType spanner.NullString
+			if err := row.Columns(&idxName, &tName, &idxType); err != nil {
 				infoSchemaErr = err
 				break
 			}
-			addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
+			t := ""
+			if idxType.Valid {
+				t = strings.ToUpper(idxType.StringVal)
+			}
+			switch t {
+			case "SEARCH":
+				addStmt(fmt.Sprintf("DROP SEARCH INDEX %s", db.Quote(idxName)))
+			case "VECTOR":
+				addStmt(fmt.Sprintf("DROP VECTOR INDEX %s", db.Quote(idxName)))
+			default:
+				addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
+			}
 		}
 		iter.Stop()
 	}
@@ -730,6 +831,32 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 				break
 			}
 			addStmt(fmt.Sprintf("DROP MODEL %s", db.Quote(mName)))
+		}
+		iter.Stop()
+	}
+
+	// 5b. Property Graphs (must be dropped before base tables)
+	if infoSchemaErr == nil {
+		pgSQL := `SELECT PROPERTY_GRAPH_NAME FROM INFORMATION_SCHEMA.PROPERTY_GRAPHS WHERE PROPERTY_GRAPH_SCHEMA = ''`
+		iter = db.client.Single().Query(ctx, spanner.NewStatement(pgSQL))
+		for {
+			row, err := iter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				if isInformationSchemaMissingError(err) || status.Code(err) == codes.NotFound || strings.Contains(strings.ToLower(err.Error()), "not found") {
+					break
+				}
+				infoSchemaErr = err
+				break
+			}
+			var pgName string
+			if err := row.Column(0, &pgName); err != nil {
+				infoSchemaErr = err
+				break
+			}
+			addStmt(fmt.Sprintf("DROP PROPERTY GRAPH %s", db.Quote(pgName)))
 		}
 		iter.Stop()
 	}
@@ -808,33 +935,7 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 			preservedTables = make(map[string]bool)
 
 			if objs, ddlErr := db.inspectDDL(ctx); ddlErr == nil {
-				for _, csName := range objs.changeStreams {
-					addStmt(fmt.Sprintf("DROP CHANGE STREAM %s", db.Quote(csName)))
-				}
-				for _, fk := range objs.constraints {
-					addStmt(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(fk.table), db.Quote(fk.constraint)))
-				}
-				for _, idxName := range objs.indexes {
-					addStmt(fmt.Sprintf("DROP INDEX %s", db.Quote(idxName)))
-				}
-				orderedViews := sortViewsDependenciesFirst(objs.views, objs.viewDefs)
-				for _, vName := range orderedViews {
-					addStmt(fmt.Sprintf("DROP VIEW %s", db.Quote(vName)))
-				}
-				for _, mName := range objs.models {
-					addStmt(fmt.Sprintf("DROP MODEL %s", db.Quote(mName)))
-				}
-				orderedTables := sortTablesChildrenFirst(objs.tables, objs.tableParents)
-				for _, tName := range orderedTables {
-					if excludeMap[tName] {
-						preservedTables[tName] = true
-						continue
-					}
-					addStmt(fmt.Sprintf("DROP TABLE %s", db.Quote(tName)))
-				}
-				for _, seqName := range objs.sequences {
-					addStmt(fmt.Sprintf("DROP SEQUENCE %s", db.Quote(seqName)))
-				}
+				ddlStatements, preservedTables = db.dropStatementsFromDDLObjects(objs, excludeMap)
 			} else {
 				return fmt.Errorf("failed to inspect Spanner DDL for clean: %w", ddlErr)
 			}

@@ -17,11 +17,63 @@ type CleanResult struct {
 
 // Clean drops all objects (tables, views, materialized views, routines) in the configured schemas.
 func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
-	return m.cleanInternal(ctx, "")
+	if m.config.CleanDisabled {
+		return nil, fmt.Errorf("clean failed: flyway.cleanDisabled is set to true. Set cleanDisabled=false in config or -cleanDisabled=false on CLI to enable clean")
+	}
+
+	defaultSchema := m.config.GetDefaultSchema()
+	table := m.config.Table
+	if table == "" {
+		table = "flyway_schema_history"
+	}
+
+	exists, err := m.db.HistoryTableExists(ctx, defaultSchema, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed checking history table: %w", err)
+	}
+
+	if exists {
+		unlock, err := m.db.Lock(ctx, defaultSchema, table)
+		if err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterCleanError")
+			return nil, fmt.Errorf("failed to acquire database lock for clean: %w", err)
+		}
+		defer func() {
+			if unlock != nil {
+				_ = unlock(context.Background())
+			}
+		}()
+
+		res, err := m.cleanInternal(ctx, table, false)
+		if err != nil {
+			return nil, err
+		}
+
+		if unlock != nil {
+			if uErr := unlock(context.Background()); uErr != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterCleanError")
+				return nil, uErr
+			}
+			unlock = nil
+		}
+
+		if err := m.db.CleanSchema(ctx, defaultSchema); err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterCleanError")
+			return nil, fmt.Errorf("failed dropping schema history table '%s': %w", table, err)
+		}
+
+		if err := m.callbackRunner.Fire(ctx, "afterClean"); err != nil {
+			return nil, err
+		}
+
+		return res, nil
+	}
+
+	return m.cleanInternal(ctx, "", true)
 }
 
 // cleanInternal cleans the schemas, optionally preserving a specified table (e.g. the schema history table to retain the active lock).
-func (m *Migrator) cleanInternal(ctx context.Context, preserveTable string) (*CleanResult, error) {
+func (m *Migrator) cleanInternal(ctx context.Context, preserveTable string, fireAfterClean bool) (*CleanResult, error) {
 	if m.config.CleanDisabled {
 		return nil, fmt.Errorf("clean failed: flyway.cleanDisabled is set to true. Set cleanDisabled=false in config or -cleanDisabled=false on CLI to enable clean")
 	}
@@ -73,8 +125,10 @@ func (m *Migrator) cleanInternal(ctx context.Context, preserveTable string) (*Cl
 	}
 
 	// 3. Fire afterClean callbacks
-	if err := m.callbackRunner.Fire(ctx, "afterClean"); err != nil {
-		return nil, err
+	if fireAfterClean {
+		if err := m.callbackRunner.Fire(ctx, "afterClean"); err != nil {
+			return nil, err
+		}
 	}
 
 	return result, nil

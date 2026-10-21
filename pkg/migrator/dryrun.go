@@ -274,11 +274,12 @@ func (m *Migrator) migrateDryRun(
 		if mig.Config.PlaceholderReplacement != nil {
 			shouldReplace = *mig.Config.PlaceholderReplacement
 		}
-		if shouldReplace {
+		if shouldReplace && m.replacer != nil {
 			replaced, err := m.replacer.ReplaceContent(sql, m.builtins)
-			if err == nil {
-				sql = replaced
+			if err != nil {
+				return nil, fmt.Errorf("error replacing placeholders in %s: %w", mig.Script, err)
 			}
+			sql = replaced
 		}
 
 		builder.WriteMigration(mig, sql, nextInstalledRank, user)
@@ -331,11 +332,12 @@ func (m *Migrator) migrateDryRun(
 		if mig.Config.PlaceholderReplacement != nil {
 			shouldReplace = *mig.Config.PlaceholderReplacement
 		}
-		if shouldReplace {
+		if shouldReplace && m.replacer != nil {
 			replaced, err := m.replacer.ReplaceContent(sql, m.builtins)
-			if err == nil {
-				sql = replaced
+			if err != nil {
+				return nil, fmt.Errorf("error replacing placeholders in %s: %w", mig.Script, err)
 			}
+			sql = replaced
 		}
 
 		builder.WriteMigration(mig, sql, nextInstalledRank, user)

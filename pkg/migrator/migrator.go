@@ -414,7 +414,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 		}
 		if !valRes.Valid {
 			if m.config.CleanOnValidationError && !m.config.CleanDisabled {
-				if _, err := m.cleanInternal(ctx, table); err != nil {
+				if _, err := m.cleanInternal(ctx, table, true); err != nil {
 					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 					return nil, fmt.Errorf("cleanOnValidationError failed: %w", err)
 				}
@@ -845,11 +845,12 @@ func (m *Migrator) executeScriptMigration(
 	if mig.Config.PlaceholderReplacement != nil {
 		shouldReplace = *mig.Config.PlaceholderReplacement
 	}
-	if shouldReplace {
+	if shouldReplace && m.replacer != nil {
 		replaced, err := m.replacer.ReplaceContent(scriptContent, m.builtins)
-		if err == nil {
-			scriptContent = replaced
+		if err != nil {
+			return nil, fmt.Errorf("error replacing placeholders in %s: %w", mig.Script, err)
 		}
+		scriptContent = replaced
 	}
 
 	var scriptPath string
@@ -858,7 +859,6 @@ func (m *Migrator) executeScriptMigration(
 	if mig.PhysicalLocation != "" && scriptContent == mig.Content {
 		if fi, err := os.Stat(mig.PhysicalLocation); err == nil && !fi.IsDir() {
 			scriptPath = mig.PhysicalLocation
-			_ = os.Chmod(scriptPath, 0644)
 		}
 	}
 
@@ -877,7 +877,7 @@ func (m *Migrator) executeScriptMigration(
 			return nil, fmt.Errorf("failed writing temp script for %s: %w", mig.Script, err)
 		}
 		tmpFile.Close()
-		_ = os.Chmod(tmpFile.Name(), 0644)
+		_ = os.Chmod(tmpFile.Name(), 0700)
 		scriptPath = tmpFile.Name()
 		cleanup = func() { _ = os.Remove(tmpFile.Name()) }
 	}

@@ -941,3 +941,67 @@ func TestSpannerCleanSchema_ViewsDependencyOrder_WithBackticks(t *testing.T) {
 	}
 }
 
+func TestSpannerCleanSchema_SearchVectorIndexAndPropertyGraph(t *testing.T) {
+	_, db := setupSpannerTestDB(t)
+
+	statements := []string{
+		"CREATE TABLE `Accounts` (`Id` INT64) PRIMARY KEY(`Id`)",
+		"CREATE TABLE `Users` (`Id` INT64, `Email` STRING(100)) PRIMARY KEY(`Id`)",
+		"CREATE INDEX `UsersByEmail` ON `Users`(`Email`)",
+		"CREATE SEARCH INDEX `AlbumsSearchIndex` ON `Albums`(`Title`)",
+		"CREATE VECTOR INDEX `SingerVectorIndex` ON `Singers`(`Embedding`)",
+		"CREATE PROPERTY GRAPH `FinGraph` NODE TABLES (`Accounts`)",
+	}
+
+	objs := parseDDLStatements(statements)
+
+	if len(objs.searchIndexes) != 1 || objs.searchIndexes[0] != "AlbumsSearchIndex" {
+		t.Errorf("expected searchIndex 'AlbumsSearchIndex', got %v", objs.searchIndexes)
+	}
+	if len(objs.vectorIndexes) != 1 || objs.vectorIndexes[0] != "SingerVectorIndex" {
+		t.Errorf("expected vectorIndex 'SingerVectorIndex', got %v", objs.vectorIndexes)
+	}
+	if len(objs.indexes) != 1 || objs.indexes[0] != "UsersByEmail" {
+		t.Errorf("expected standard index 'UsersByEmail', got %v", objs.indexes)
+	}
+	if len(objs.propertyGraphs) != 1 || objs.propertyGraphs[0] != "FinGraph" {
+		t.Errorf("expected propertyGraph 'FinGraph', got %v", objs.propertyGraphs)
+	}
+
+	stmts, _ := db.dropStatementsFromDDLObjects(objs, nil)
+
+	// Verify generated DROP statements
+	expectedDrops := map[string]bool{
+		"DROP SEARCH INDEX `AlbumsSearchIndex`": false,
+		"DROP VECTOR INDEX `SingerVectorIndex`": false,
+		"DROP INDEX `UsersByEmail`":             false,
+		"DROP PROPERTY GRAPH `FinGraph`":        false,
+		"DROP TABLE `Accounts`":                 false,
+		"DROP TABLE `Users`":                    false,
+	}
+
+	var graphDropPos, accountsDropPos int = -1, -1
+	for idx, s := range stmts {
+		if _, ok := expectedDrops[s]; ok {
+			expectedDrops[s] = true
+		}
+		if s == "DROP PROPERTY GRAPH `FinGraph`" {
+			graphDropPos = idx
+		}
+		if s == "DROP TABLE `Accounts`" {
+			accountsDropPos = idx
+		}
+	}
+
+	for s, found := range expectedDrops {
+		if !found {
+			t.Errorf("missing expected drop statement: %s in %v", s, stmts)
+		}
+	}
+
+	if graphDropPos == -1 || accountsDropPos == -1 || graphDropPos >= accountsDropPos {
+		t.Errorf("expected DROP PROPERTY GRAPH before DROP TABLE, got graph pos %d, table pos %d", graphDropPos, accountsDropPos)
+	}
+}
+
+

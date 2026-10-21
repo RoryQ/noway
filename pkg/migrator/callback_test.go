@@ -2,6 +2,7 @@ package migrator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -306,4 +307,133 @@ func TestCallbackRunner_FlywayUserPlaceholder(t *testing.T) {
 		t.Errorf("expected statement to contain 'updated_admin', got %v", stmts)
 	}
 }
+
+func TestCallbackRunner_ScriptPhysicalFilePreservesExecBit(t *testing.T) {
+	ctx := context.Background()
+	db := mock.NewMockDatabase()
+	tmpDir := t.TempDir()
+
+	scriptFile := filepath.Join(tmpDir, "beforeMigrate__hook.sh")
+	if err := os.WriteFile(scriptFile, []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	callbacks := map[string][]resolver.ResolvedCallback{
+		"beforeMigrate": {
+			{
+				Event:            "beforeMigrate",
+				Filename:         "beforeMigrate__hook.sh",
+				PhysicalLocation: scriptFile,
+				Content:          "#!/bin/bash\nexit 0\n",
+			},
+		},
+	}
+
+	runner := NewCallbackRunner(db, callbacks, parser.NewBigQueryParser(), parser.NewPlaceholderReplacer(parser.PlaceholderConfig{}), parser.BuiltinPlaceholders{})
+	if err := runner.Fire(ctx, "beforeMigrate"); err != nil {
+		t.Fatalf("Fire failed: %v", err)
+	}
+
+	fi, err := os.Stat(scriptFile)
+	if err != nil {
+		t.Fatalf("failed stat script: %v", err)
+	}
+	if fi.Mode().Perm()&0111 == 0 {
+		t.Errorf("expected exec bit preserved on user file, got mode: %v", fi.Mode().Perm())
+	}
+}
+
+func TestCallbackRunner_ScriptFilesystemUsesReplacedPlaceholders(t *testing.T) {
+	ctx := context.Background()
+	db := mock.NewMockDatabase()
+	tmpDir := t.TempDir()
+
+	outFile := filepath.Join(tmpDir, "ph_out.txt")
+	scriptFile := filepath.Join(tmpDir, "beforeMigrate__replace.sh")
+	scriptContent := fmt.Sprintf("#!/bin/bash\necho \"VAL=${custom_val}\" > %s\n", outFile)
+	if err := os.WriteFile(scriptFile, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	replacer := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values: map[string]string{
+			"custom_val": "hello_from_placeholder",
+		},
+	})
+
+	callbacks := map[string][]resolver.ResolvedCallback{
+		"beforeMigrate": {
+			{
+				Event:            "beforeMigrate",
+				Filename:         "beforeMigrate__replace.sh",
+				PhysicalLocation: scriptFile,
+				Content:          scriptContent,
+			},
+		},
+	}
+
+	runner := NewCallbackRunner(db, callbacks, parser.NewBigQueryParser(), replacer, parser.BuiltinPlaceholders{})
+	if err := runner.Fire(ctx, "beforeMigrate"); err != nil {
+		t.Fatalf("Fire failed: %v", err)
+	}
+
+	outData, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if !strings.Contains(string(outData), "VAL=hello_from_placeholder") {
+		t.Errorf("expected placeholder replaced in executed script, got: %s", string(outData))
+	}
+
+	// Also verify the physical file on disk was NOT mutated or stripped of permissions
+	fi, _ := os.Stat(scriptFile)
+	if fi.Mode().Perm()&0111 == 0 {
+		t.Errorf("expected exec bit preserved on user file, got mode: %v", fi.Mode().Perm())
+	}
+	diskContent, _ := os.ReadFile(scriptFile)
+	if !strings.Contains(string(diskContent), "${custom_val}") {
+		t.Errorf("expected original file on disk to remain unchanged, got: %s", string(diskContent))
+	}
+}
+
+func TestCallbackRunner_ScriptPlaceholderError(t *testing.T) {
+	ctx := context.Background()
+	db := mock.NewMockDatabase()
+	tmpDir := t.TempDir()
+
+	scriptFile := filepath.Join(tmpDir, "beforeMigrate__missing.sh")
+	scriptContent := "#!/bin/bash\necho \"${missing_ph}\"\n"
+	_ = os.WriteFile(scriptFile, []byte(scriptContent), 0755)
+
+	replacer := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values:  map[string]string{},
+	})
+
+	callbacks := map[string][]resolver.ResolvedCallback{
+		"beforeMigrate": {
+			{
+				Event:            "beforeMigrate",
+				Filename:         "beforeMigrate__missing.sh",
+				PhysicalLocation: scriptFile,
+				Content:          scriptContent,
+			},
+		},
+	}
+
+	runner := NewCallbackRunner(db, callbacks, parser.NewBigQueryParser(), replacer, parser.BuiltinPlaceholders{})
+	err := runner.Fire(ctx, "beforeMigrate")
+	if err == nil {
+		t.Fatalf("expected placeholder error for missing placeholder, got nil")
+	}
+	if !strings.Contains(err.Error(), "error replacing placeholders") {
+		t.Errorf("expected placeholder error message, got: %v", err)
+	}
+}
+
 

@@ -39,6 +39,7 @@ func NewCallbackRunner(
 		parser:    parser,
 		replacer:  replacer,
 		builtins:  builtins,
+		config:    *config.NewDefaultConfiguration(),
 	}
 }
 
@@ -98,18 +99,21 @@ func (c *CallbackRunner) Fire(ctx context.Context, event string) error {
 
 func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.ResolvedCallback, event string) error {
 	content := cb.Content
-	replaced, err := c.replacer.Replace(content, c.builtins)
-	if err == nil {
+	shouldReplace := c.config.PlaceholderReplacement
+	if shouldReplace && c.replacer != nil {
+		replaced, err := c.replacer.ReplaceContent(content, c.builtins)
+		if err != nil {
+			return fmt.Errorf("error replacing placeholders in callback '%s': %w", cb.Filename, err)
+		}
 		content = replaced
 	}
 
 	var scriptPath string
 	var cleanup func()
 
-	if cb.PhysicalLocation != "" {
+	if cb.PhysicalLocation != "" && content == cb.Content {
 		if fi, err := os.Stat(cb.PhysicalLocation); err == nil && !fi.IsDir() {
 			scriptPath = cb.PhysicalLocation
-			_ = os.Chmod(scriptPath, 0644)
 		}
 	}
 
@@ -128,7 +132,7 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 			return fmt.Errorf("failed writing temp callback script for %s: %w", cb.Filename, err)
 		}
 		tmpFile.Close()
-		_ = os.Chmod(tmpFile.Name(), 0644)
+		_ = os.Chmod(tmpFile.Name(), 0700)
 		scriptPath = tmpFile.Name()
 		cleanup = func() { _ = os.Remove(tmpFile.Name()) }
 	}

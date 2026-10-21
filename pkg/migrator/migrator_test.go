@@ -2,6 +2,8 @@ package migrator
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -1501,3 +1503,117 @@ func TestInfo_RepeatableMatchedByDescription(t *testing.T) {
 		t.Errorf("expected repeatable migration to be recognized as StateSuccess by description, got state=%s", item.State)
 	}
 }
+
+func TestScriptMigration_PhysicalFilePreservesExecBit(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	scriptPath := filepath.Join(tmpDir, "V1__script.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.Locations = []string{"filesystem:" + tmpDir}
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if res.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+
+	fi, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatalf("failed to stat script: %v", err)
+	}
+	if fi.Mode().Perm()&0111 == 0 {
+		t.Errorf("expected exec bit to be preserved on user file, got permissions: %v", fi.Mode().Perm())
+	}
+}
+
+func TestScriptMigration_PlaceholderError(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	scriptPath := filepath.Join(tmpDir, "V1__ph_err.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho \"${missing_variable}\"\n"), 0755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.Locations = []string{"filesystem:" + tmpDir}
+	cfg.PlaceholderReplacement = true
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+
+	_, err = m.Migrate(ctx)
+	if err == nil {
+		t.Fatalf("expected placeholder error during script migration, got nil")
+	}
+	if !strings.Contains(err.Error(), "error replacing placeholders") {
+		t.Errorf("expected error message to mention placeholder error, got: %v", err)
+	}
+}
+
+func TestStandaloneClean_TakesLock(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.CleanDisabled = false
+
+	db := mock.NewMockDatabase()
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "user_table")
+
+	// 1. If database is already locked by another process, Clean() must fail
+	unlock, err := db.Lock(ctx, "test_ds", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("setup lock failed: %v", err)
+	}
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+
+	_, err = m.Clean(ctx)
+	if err == nil {
+		t.Fatalf("expected Clean to fail when database is locked, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to acquire database lock for clean") {
+		t.Errorf("expected lock error message, got: %v", err)
+	}
+
+	// Release lock
+	_ = unlock(ctx)
+
+	// 2. Standalone clean should succeed, acquiring lock and dropping tables
+	cleanRes, err := m.Clean(ctx)
+	if err != nil {
+		t.Fatalf("Clean failed: %v", err)
+	}
+	if len(cleanRes.SchemasCleaned) != 1 {
+		t.Errorf("expected 1 schema cleaned, got %d", len(cleanRes.SchemasCleaned))
+	}
+
+	// Verify history table is dropped
+	histExists, _ := db.HistoryTableExists(ctx, "test_ds", "flyway_schema_history")
+	if histExists {
+		t.Errorf("expected history table to be dropped by standalone clean")
+	}
+}
+
