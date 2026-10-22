@@ -128,9 +128,9 @@ func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table st
 	rec := database.HistoryRecord{
 		InstalledRank: nextRank,
 		Version:       &bVer,
-		Description:   bDesc,
+		Description:   database.AbbreviateDescription(bDesc),
 		Type:          "BASELINE",
-		Script:        bDesc,
+		Script:        database.AbbreviateScript(bDesc),
 		Checksum:      nil,
 		InstalledBy:   user,
 		InstalledOn:   time.Now(),

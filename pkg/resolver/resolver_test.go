@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -844,6 +845,210 @@ func TestRepeatableScriptMigrationChecksum(t *testing.T) {
 	}
 	if resolved1.RepeatableMigrations[0].Checksum == resolved2.RepeatableMigrations[0].Checksum {
 		t.Errorf("expected different checksums when placeholder changes")
+	}
+}
+
+func TestResolverHiddenDirectories(t *testing.T) {
+	// Test fs.FS scanning skips hidden directories such as Kubernetes ConfigMap ..data/
+	mockFS := fstest.MapFS{
+		"migrations/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+		"migrations/..data/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+		"migrations/.git/V1__git.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+	}
+
+	res := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"migrations"},
+	})
+
+	resolved, err := res.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected error with hidden directory in FS: %v", err)
+	}
+	if len(resolved.VersionedMigrations) != 1 {
+		t.Fatalf("expected 1 migration, got %d", len(resolved.VersionedMigrations))
+	}
+
+	// Test real filesystem scanning skips hidden directories
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(tmpDir+"/V1__init.sql", []byte("CREATE TABLE users (id INT64);"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	hiddenSubDir := tmpDir + "/..data"
+	if err := os.Mkdir(hiddenSubDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hiddenSubDir+"/V1__init.sql", []byte("CREATE TABLE users (id INT64);"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resDir := NewResolver(ResolverConfig{
+		Locations: []string{tmpDir},
+	})
+	resolvedDir, err := resDir.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected error with hidden directory on filesystem: %v", err)
+	}
+	if len(resolvedDir.VersionedMigrations) != 1 {
+		t.Fatalf("expected 1 migration from filesystem, got %d", len(resolvedDir.VersionedMigrations))
+	}
+}
+
+func TestResolverEncodingLatin1(t *testing.T) {
+	// Latin-1 byte 0xE9 represents 'é'.
+	// Raw bytes in Go string give raw checksum.
+	// Flyway decodes Latin-1 to UTF-8 [0xC3, 0xA9] and calculates checksum on UTF-8 bytes.
+	latin1Data := []byte{0xE9}
+	rawCs, err := checksum.CalculateString(string(latin1Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	utf8Cs, err := checksum.CalculateString("é")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawCs == utf8Cs {
+		t.Fatalf("expected raw Latin-1 checksum to differ from decoded UTF-8 checksum")
+	}
+
+	mockFS := fstest.MapFS{
+		"migrations/V1__global_latin1.sql": &fstest.MapFile{
+			Data: latin1Data,
+		},
+		"migrations/V2__per_script_latin1.sql": &fstest.MapFile{
+			Data: latin1Data,
+		},
+		"migrations/V2__per_script_latin1.sql.conf": &fstest.MapFile{
+			Data: []byte("encoding=Latin-1\n"),
+		},
+	}
+
+	// 1. Global encoding Latin-1
+	resGlobal := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"migrations"},
+		Encoding:  "Latin-1",
+	})
+	resolvedGlobal, err := resGlobal.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+	if len(resolvedGlobal.VersionedMigrations) != 2 {
+		t.Fatalf("expected 2 migrations, got %d", len(resolvedGlobal.VersionedMigrations))
+	}
+	if resolvedGlobal.VersionedMigrations[0].Checksum != utf8Cs {
+		t.Errorf("expected checksum %d for Latin-1 'é' under global encoding, got %d", utf8Cs, resolvedGlobal.VersionedMigrations[0].Checksum)
+	}
+	if resolvedGlobal.VersionedMigrations[0].Content != "é" {
+		t.Errorf("expected decoded content 'é', got %q", resolvedGlobal.VersionedMigrations[0].Content)
+	}
+
+	// 2. Default UTF-8 with per-script Latin-1 config on V2
+	resPerScript := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"migrations"},
+		Encoding:  "UTF-8",
+	})
+	resolvedPerScript, err := resPerScript.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+	if len(resolvedPerScript.VersionedMigrations) != 2 {
+		t.Fatalf("expected 2 migrations, got %d", len(resolvedPerScript.VersionedMigrations))
+	}
+	// V1 without per-script config uses UTF-8, treating byte 0xE9 as raw byte -> rawCs
+	if resolvedPerScript.VersionedMigrations[0].Checksum != rawCs {
+		t.Errorf("expected checksum %d for raw byte under UTF-8, got %d", rawCs, resolvedPerScript.VersionedMigrations[0].Checksum)
+	}
+	// V2 has encoding=Latin-1 in .conf -> decoded to UTF-8 -> utf8Cs
+	if resolvedPerScript.VersionedMigrations[1].Checksum != utf8Cs {
+		t.Errorf("expected checksum %d for per-script Latin-1 'é', got %d", utf8Cs, resolvedPerScript.VersionedMigrations[1].Checksum)
+	}
+	if resolvedPerScript.VersionedMigrations[1].Content != "é" {
+		t.Errorf("expected decoded content 'é', got %q", resolvedPerScript.VersionedMigrations[1].Content)
+	}
+}
+
+func TestResolverCaseInsensitiveSuffix(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"migrations/V1__init.SQL": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+		"migrations/V1__init.SQL.conf": &fstest.MapFile{
+			Data: []byte("shouldExecute=true\n"),
+		},
+		"migrations/R__view.SQL": &fstest.MapFile{
+			Data: []byte("CREATE VIEW v AS SELECT 1;"),
+		},
+		"migrations/U1__undo.SQL": &fstest.MapFile{
+			Data: []byte("DROP TABLE users;"),
+		},
+		"migrations/B1__base.SQL": &fstest.MapFile{
+			Data: []byte("CREATE TABLE users (id INT64);"),
+		},
+		"migrations/beforeMigrate.SQL": &fstest.MapFile{
+			Data: []byte("-- before migrate"),
+		},
+		"migrations/V2__batch.SH": &fstest.MapFile{
+			Data: []byte("#!/bin/bash\necho done\n"),
+		},
+	}
+
+	res := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"migrations"},
+	})
+
+	resolved, err := res.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected resolve error with uppercase suffixes: %v", err)
+	}
+
+	if len(resolved.VersionedMigrations) != 2 {
+		t.Fatalf("expected 2 versioned migrations, got %d", len(resolved.VersionedMigrations))
+	}
+	v1 := resolved.VersionedMigrations[0]
+	if v1.Version.String() != "1" || v1.Description != "init" {
+		t.Errorf("expected V1 with desc 'init', got version %s, desc %s", v1.Version.String(), v1.Description)
+	}
+	if v1.Config.ShouldExecute != "true" {
+		t.Errorf("expected shouldExecute=true from V1__init.SQL.conf, got %q", v1.Config.ShouldExecute)
+	}
+
+	v2 := resolved.VersionedMigrations[1]
+	if v2.Version.String() != "2" || v2.Description != "batch" || !v2.IsScript {
+		t.Errorf("expected V2 script with desc 'batch', got version %s, desc %s, isScript %v", v2.Version.String(), v2.Description, v2.IsScript)
+	}
+
+	if len(resolved.RepeatableMigrations) != 1 {
+		t.Fatalf("expected 1 repeatable migration, got %d", len(resolved.RepeatableMigrations))
+	}
+	if resolved.RepeatableMigrations[0].Description != "view" {
+		t.Errorf("expected repeatable desc 'view', got %s", resolved.RepeatableMigrations[0].Description)
+	}
+
+	if len(resolved.UndoMigrations) != 1 {
+		t.Fatalf("expected 1 undo migration, got %d", len(resolved.UndoMigrations))
+	}
+	if resolved.UndoMigrations[0].Description != "undo" {
+		t.Errorf("expected undo desc 'undo', got %s", resolved.UndoMigrations[0].Description)
+	}
+
+	if len(resolved.BaselineMigrations) != 1 {
+		t.Fatalf("expected 1 baseline migration, got %d", len(resolved.BaselineMigrations))
+	}
+	if resolved.BaselineMigrations[0].Description != "base" {
+		t.Errorf("expected baseline desc 'base', got %s", resolved.BaselineMigrations[0].Description)
+	}
+
+	if len(resolved.Callbacks["beforeMigrate"]) != 1 {
+		t.Fatalf("expected 1 beforeMigrate callback, got %d", len(resolved.Callbacks["beforeMigrate"]))
 	}
 }
 

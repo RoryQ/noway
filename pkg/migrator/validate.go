@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/earthboundkid/versioninfo/v2"
+	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/resolver"
 	"github.com/roryq/noway/pkg/version"
 )
@@ -200,7 +201,9 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 	resolvedRepeatableByScript := make(map[string]resolver.ResolvedMigration)
 	for _, res := range resolved.RepeatableMigrations {
 		resolvedRepeatableByDesc[res.Description] = res
+		resolvedRepeatableByDesc[database.AbbreviateDescription(res.Description)] = res
 		resolvedRepeatableByScript[res.Script] = res
+		resolvedRepeatableByScript[database.AbbreviateScript(res.Script)] = res
 	}
 
 	// Extract metadata from history: maxAppliedVersion and baselineVersion
@@ -270,7 +273,7 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 				}
 
 				// Check description
-				if app.Description != res.Description {
+				if app.Description != res.Description && app.Description != database.AbbreviateDescription(res.Description) {
 					result.Valid = false
 					result.Errors = append(result.Errors, ValidationError{
 						Version:     app.Version,
@@ -345,7 +348,7 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 			}
 
 			// Check description
-			if app.Description != res.Description {
+			if app.Description != res.Description && app.Description != database.AbbreviateDescription(res.Description) {
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
 					Version:     app.Version,
@@ -389,7 +392,7 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 			}
 
 			// Check description
-			if app.Description != res.Description {
+			if app.Description != res.Description && app.Description != database.AbbreviateDescription(res.Description) {
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
 					Version:     nil,

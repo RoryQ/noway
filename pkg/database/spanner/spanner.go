@@ -1140,6 +1140,16 @@ func extractLockOwner(verNull spanner.NullString, instBy string) string {
 	return instBy
 }
 
+// AbbreviateDescription truncates description to at most 200 runes (first 197 + "...").
+func AbbreviateDescription(desc string) string {
+	return database.AbbreviateDescription(desc)
+}
+
+// AbbreviateScript truncates script to at most 1000 runes ("..." + last 997).
+func AbbreviateScript(script string) string {
+	return database.AbbreviateScript(script)
+}
+
 // InsertHistory inserts a new applied migration record into the history table.
 func (db *SpannerDatabase) InsertHistory(ctx context.Context, schema, table string, rec database.HistoryRecord) error {
 	if err := db.checkActiveLockErr(); err != nil {
@@ -1161,14 +1171,17 @@ func (db *SpannerDatabase) InsertHistory(ctx context.Context, schema, table stri
 		csVal = spanner.NullInt64{Int64: *rec.Checksum, Valid: true}
 	}
 
+	desc := AbbreviateDescription(rec.Description)
+	script := AbbreviateScript(rec.Script)
+
 	m := spanner.InsertOrUpdate(tableName,
 		[]string{"installed_rank", "version", "description", "type", "script", "checksum", "installed_by", "installed_on", "execution_time", "success"},
 		[]interface{}{
 			int64(rec.InstalledRank),
 			verVal,
-			rec.Description,
+			desc,
 			rec.Type,
-			rec.Script,
+			script,
 			csVal,
 			rec.InstalledBy,
 			spanner.CommitTimestamp,
@@ -1200,13 +1213,16 @@ func (db *SpannerDatabase) UpdateHistory(ctx context.Context, schema, table stri
 		csVal = spanner.NullInt64{Int64: *rec.Checksum, Valid: true}
 	}
 
+	desc := AbbreviateDescription(rec.Description)
+	script := AbbreviateScript(rec.Script)
+
 	m := spanner.Update(tableName,
 		[]string{"installed_rank", "description", "type", "script", "checksum"},
 		[]interface{}{
 			int64(rec.InstalledRank),
-			rec.Description,
+			desc,
 			rec.Type,
-			rec.Script,
+			script,
 			csVal,
 		},
 	)

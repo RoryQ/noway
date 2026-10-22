@@ -828,9 +828,9 @@ func (m *Migrator) executeSQLMigration(
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,
 		Version:       verStr,
-		Description:   mig.Description,
+		Description:   database.AbbreviateDescription(mig.Description),
 		Type:          recType,
-		Script:        mig.Script,
+		Script:        database.AbbreviateScript(mig.Script),
 		Checksum:      &cs,
 		InstalledBy:   user,
 		InstalledOn:   time.Now(),
@@ -1013,9 +1013,9 @@ func (m *Migrator) executeScriptMigration(
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,
 		Version:       verStr,
-		Description:   mig.Description,
+		Description:   database.AbbreviateDescription(mig.Description),
 		Type:          "SCRIPT",
-		Script:        mig.Script,
+		Script:        database.AbbreviateScript(mig.Script),
 		Checksum:      &cs,
 		InstalledBy:   user,
 		InstalledOn:   time.Now(),

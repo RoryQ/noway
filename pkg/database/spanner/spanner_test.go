@@ -1039,4 +1039,100 @@ func TestSpannerUnlock_WhenTableDropped_SucceedsWithoutError(t *testing.T) {
 	}
 }
 
+func TestAbbreviateDescriptionAndScript(t *testing.T) {
+	// 1. Description truncation (max 200 runes, first 197 + "...")
+	shortDesc := strings.Repeat("a", 200)
+	if AbbreviateDescription(shortDesc) != shortDesc {
+		t.Errorf("expected 200 char desc to remain unchanged")
+	}
+
+	longDesc := strings.Repeat("a", 197) + strings.Repeat("b", 53) // 250 chars
+	abbrDesc := AbbreviateDescription(longDesc)
+	if len([]rune(abbrDesc)) != 200 {
+		t.Errorf("expected abbreviated desc length 200, got %d", len([]rune(abbrDesc)))
+	}
+	if abbrDesc != strings.Repeat("a", 197)+"..." {
+		t.Errorf("unexpected abbreviated description: %s", abbrDesc)
+	}
+
+	// 2. Script truncation (max 1000 runes, "..." + last 997)
+	shortScript := strings.Repeat("x", 1000)
+	if AbbreviateScript(shortScript) != shortScript {
+		t.Errorf("expected 1000 char script to remain unchanged")
+	}
+
+	longScript := strings.Repeat("x", 103) + strings.Repeat("y", 997) // 1100 chars
+	abbrScript := AbbreviateScript(longScript)
+	if len([]rune(abbrScript)) != 1000 {
+		t.Errorf("expected abbreviated script length 1000, got %d", len([]rune(abbrScript)))
+	}
+	if abbrScript != "..."+strings.Repeat("y", 997) {
+		t.Errorf("unexpected abbreviated script: %s", abbrScript)
+	}
+}
+
+func TestSpannerInsertHistory_TruncatesLongDescriptionAndScript(t *testing.T) {
+	_, db := setupSpannerTestDB(t)
+	ctx := context.Background()
+
+	if err := db.EnsureHistoryTable(ctx, "", "flyway_schema_history"); err != nil {
+		t.Fatalf("EnsureHistoryTable failed: %v", err)
+	}
+
+	longDesc := strings.Repeat("d", 250)
+	longScript := strings.Repeat("s", 1200)
+	ver := "1"
+	cs := int64(12345)
+
+	rec := database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       &ver,
+		Description:   longDesc,
+		Type:          "SQL",
+		Script:        longScript,
+		Checksum:      &cs,
+		InstalledBy:   "user",
+		InstalledOn:   time.Now(),
+		ExecutionTime: 10,
+		Success:       true,
+	}
+
+	// Insert must not fail with column length limits
+	if err := db.InsertHistory(ctx, "", "flyway_schema_history", rec); err != nil {
+		t.Fatalf("InsertHistory failed on long strings: %v", err)
+	}
+
+	history, err := db.FetchHistory(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory failed: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 history record, got %d", len(history))
+	}
+	if history[0].Description != strings.Repeat("d", 197)+"..." {
+		t.Errorf("expected abbreviated description in DB, got: %s", history[0].Description)
+	}
+	if history[0].Script != "..."+strings.Repeat("s", 997) {
+		t.Errorf("expected abbreviated script in DB, got: %s", history[0].Script)
+	}
+
+	// Update must also truncate safely
+	rec.Description = strings.Repeat("u", 260)
+	rec.Script = strings.Repeat("v", 1300)
+	if err := db.UpdateHistory(ctx, "", "flyway_schema_history", rec); err != nil {
+		t.Fatalf("UpdateHistory failed on long strings: %v", err)
+	}
+
+	historyUpdated, err := db.FetchHistory(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory failed: %v", err)
+	}
+	if historyUpdated[0].Description != strings.Repeat("u", 197)+"..." {
+		t.Errorf("expected updated abbreviated description in DB, got: %s", historyUpdated[0].Description)
+	}
+	if historyUpdated[0].Script != "..."+strings.Repeat("v", 997) {
+		t.Errorf("expected updated abbreviated script in DB, got: %s", historyUpdated[0].Script)
+	}
+}
+
 

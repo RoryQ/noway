@@ -12,6 +12,7 @@ import (
 	"github.com/roryq/noway/pkg/checksum"
 	"github.com/roryq/noway/pkg/parser"
 	"github.com/roryq/noway/pkg/version"
+	"golang.org/x/text/encoding/htmlindex"
 )
 
 // ResolverConfig configures how migrations are discovered and parsed.
@@ -251,6 +252,43 @@ func isScriptFile(filename string) bool {
 		strings.HasSuffix(lower, ".py")
 }
 
+func hasSuffixFold(s, suffix string) bool {
+	if len(s) < len(suffix) {
+		return false
+	}
+	return strings.EqualFold(s[len(s)-len(suffix):], suffix)
+}
+
+func trimSuffixFold(s, suffix string) string {
+	if hasSuffixFold(s, suffix) {
+		return s[:len(s)-len(suffix)]
+	}
+	return s
+}
+
+func decodeContent(rawData []byte, encoding string) (string, error) {
+	encName := strings.TrimSpace(encoding)
+	if encName == "" || strings.EqualFold(encName, "utf-8") || strings.EqualFold(encName, "utf8") {
+		return string(rawData), nil
+	}
+	enc, err := htmlindex.Get(encName)
+	if err != nil {
+		normalized := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(encName), "-", ""), "_", "")
+		if enc2, err2 := htmlindex.Get(normalized); err2 == nil {
+			enc = enc2
+			err = nil
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("unsupported encoding '%s': %w", encoding, err)
+	}
+	decoded, err := enc.NewDecoder().Bytes(rawData)
+	if err != nil {
+		return "", fmt.Errorf("error decoding with '%s': %w", encoding, err)
+	}
+	return string(decoded), nil
+}
+
 func (r *Resolver) loadMigrationConfig(dirPath, filename string, fileSys fs.FS) MigrationConfig {
 	cfg := MigrationConfig{
 		CustomProperties: make(map[string]string),
@@ -260,8 +298,8 @@ func (r *Resolver) loadMigrationConfig(dirPath, filename string, fileSys fs.FS) 
 		filename + ".conf", // e.g. V1__init.sql.conf or V1__init.sh.conf
 	}
 	for _, suffix := range r.config.Suffixes {
-		if strings.HasSuffix(filename, suffix) {
-			candidates = append(candidates, strings.TrimSuffix(filename, suffix)+".conf")
+		if hasSuffixFold(filename, suffix) {
+			candidates = append(candidates, trimSuffixFold(filename, suffix)+".conf")
 			break
 		}
 	}
@@ -331,6 +369,9 @@ func (r *Resolver) scanDir(locRoot, dirPath string, result *ResolveResult, seen 
 
 	for _, entry := range entries {
 		if entry.IsDir() {
+			if strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
 			subPath := filepath.Join(dirPath, entry.Name())
 			if err := r.scanDir(locRoot, subPath, result, seen); err != nil {
 				return err
@@ -363,17 +404,20 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 			return err
 		}
 		if d.IsDir() {
+			if path != cleanDir && strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir
+			}
 			return nil
 		}
 
 		filename := d.Name()
-		if strings.HasSuffix(filename, ".conf") {
+		if hasSuffixFold(filename, ".conf") {
 			return nil
 		}
 
 		hasValidSuffix := false
 		for _, suffix := range r.config.Suffixes {
-			if strings.HasSuffix(filename, suffix) {
+			if hasSuffixFold(filename, suffix) {
 				hasValidSuffix = true
 				break
 			}
@@ -393,18 +437,18 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 			relPath = filename
 		}
 		scriptPath := filepath.ToSlash(relPath)
-		return r.parseAndAddMigration(dir, filename, path, scriptPath, string(data), fileSys, result, seen)
+		return r.parseAndAddMigration(dir, filename, path, scriptPath, data, fileSys, result, seen)
 	})
 }
 
 func (r *Resolver) processFile(dir, filename, fullPath, scriptPath string, result *ResolveResult, seen *seenTracking) error {
-	if strings.HasSuffix(filename, ".conf") {
+	if hasSuffixFold(filename, ".conf") {
 		return nil
 	}
 
 	hasValidSuffix := false
 	for _, suffix := range r.config.Suffixes {
-		if strings.HasSuffix(filename, suffix) {
+		if hasSuffixFold(filename, suffix) {
 			hasValidSuffix = true
 			break
 		}
@@ -418,7 +462,7 @@ func (r *Resolver) processFile(dir, filename, fullPath, scriptPath string, resul
 		return fmt.Errorf("error reading file '%s': %w", fullPath, err)
 	}
 
-	return r.parseAndAddMigration(dir, filename, fullPath, scriptPath, string(data), nil, result, seen)
+	return r.parseAndAddMigration(dir, filename, fullPath, scriptPath, data, nil, result, seen)
 }
 
 func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool, isScript bool, filename string) (int64, *int64, error) {
@@ -464,8 +508,17 @@ func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, 
 	return cs, &eqCs, nil
 }
 
-func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, content string, fileSys fs.FS, result *ResolveResult, seen *seenTracking) error {
+func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath string, rawData []byte, fileSys fs.FS, result *ResolveResult, seen *seenTracking) error {
 	migConfig := r.loadMigrationConfig(dir, filename, fileSys)
+	encoding := r.config.Encoding
+	if migConfig.Encoding != "" {
+		encoding = migConfig.Encoding
+	}
+	content, err := decodeContent(rawData, encoding)
+	if err != nil {
+		return fmt.Errorf("failed to decode '%s': %w", filename, err)
+	}
+
 	isScript := isScriptFile(filename)
 
 	defaultType := TypeSQL
@@ -476,8 +529,8 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 	// Check for standard callbacks (e.g. beforeMigrate.sql, beforeMigrate__desc.sql, afterMigrate.sh)
 	baseWithoutExt := filename
 	for _, suffix := range r.config.Suffixes {
-		if strings.HasSuffix(baseWithoutExt, suffix) {
-			baseWithoutExt = strings.TrimSuffix(baseWithoutExt, suffix)
+		if hasSuffixFold(baseWithoutExt, suffix) {
+			baseWithoutExt = trimSuffixFold(baseWithoutExt, suffix)
 			break
 		}
 	}
@@ -518,8 +571,8 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 	if strings.HasPrefix(filename, r.config.RepeatablePrefix+r.config.Separator) {
 		desc := strings.TrimPrefix(filename, r.config.RepeatablePrefix+r.config.Separator)
 		for _, suffix := range r.config.Suffixes {
-			if strings.HasSuffix(desc, suffix) {
-				desc = strings.TrimSuffix(desc, suffix)
+			if hasSuffixFold(desc, suffix) {
+				desc = trimSuffixFold(desc, suffix)
 				break
 			}
 		}
@@ -560,8 +613,8 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 	if strings.HasPrefix(filename, r.config.UndoPrefix) {
 		verDesc := strings.TrimPrefix(filename, r.config.UndoPrefix)
 		for _, suffix := range r.config.Suffixes {
-			if strings.HasSuffix(verDesc, suffix) {
-				verDesc = strings.TrimSuffix(verDesc, suffix)
+			if hasSuffixFold(verDesc, suffix) {
+				verDesc = trimSuffixFold(verDesc, suffix)
 				break
 			}
 		}
@@ -602,8 +655,8 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 		verDesc := strings.TrimPrefix(filename, r.config.BaselinePrefix)
 		verDesc = strings.TrimPrefix(verDesc, r.config.Separator)
 		for _, suffix := range r.config.Suffixes {
-			if strings.HasSuffix(verDesc, suffix) {
-				verDesc = strings.TrimSuffix(verDesc, suffix)
+			if hasSuffixFold(verDesc, suffix) {
+				verDesc = trimSuffixFold(verDesc, suffix)
 				break
 			}
 		}
@@ -645,8 +698,8 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 	if strings.HasPrefix(filename, r.config.Prefix) {
 		verDesc := strings.TrimPrefix(filename, r.config.Prefix)
 		for _, suffix := range r.config.Suffixes {
-			if strings.HasSuffix(verDesc, suffix) {
-				verDesc = strings.TrimSuffix(verDesc, suffix)
+			if hasSuffixFold(verDesc, suffix) {
+				verDesc = trimSuffixFold(verDesc, suffix)
 				break
 			}
 		}

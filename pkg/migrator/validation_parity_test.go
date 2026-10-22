@@ -577,3 +577,72 @@ func TestMigrator_CherryPickAndFailOnMissingTarget(t *testing.T) {
 	}
 }
 
+func TestValidateAndRepair_LongDescriptionAndScript(t *testing.T) {
+	ctx := context.Background()
+
+	// 250 chars description
+	longDesc := strings.Repeat("d", 250)
+	filename := "V1__" + longDesc + ".sql"
+	repFilename := "R__" + longDesc + ".sql"
+
+	fs := fstest.MapFS{
+		"migrations/" + filename:    &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+		"migrations/" + repFilename: &fstest.MapFile{Data: []byte("CREATE VIEW v1 AS SELECT 1;")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_schema"
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	// 1. Migrate
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if res.MigrationsExecuted != 2 {
+		t.Fatalf("expected 2 migrations executed, got %d", res.MigrationsExecuted)
+	}
+
+	// Verify history table has abbreviated descriptions
+	history, err := db.FetchHistory(ctx, "test_schema", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("FetchHistory failed: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(history))
+	}
+	expectedAbbr := strings.Repeat("d", 197) + "..."
+	if history[0].Description != expectedAbbr {
+		t.Errorf("expected V1 history description to be truncated, got %q", history[0].Description)
+	}
+	if history[1].Description != expectedAbbr {
+		t.Errorf("expected R history description to be truncated, got %q", history[1].Description)
+	}
+
+	// 2. Validate succeeds without reporting description mismatch
+	valRes, err := m.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+	if !valRes.ValidationSuccessful {
+		t.Fatalf("Validate failed on long descriptions: %v", valRes.Error())
+	}
+
+	// 3. Repair succeeds without rewriting/misaligning
+	repRes, err := m.Repair(ctx)
+	if err != nil {
+		t.Fatalf("Repair returned error: %v", err)
+	}
+	if len(repRes.MigrationsAligned) != 0 {
+		t.Errorf("expected no alignments needed, got %+v", repRes.MigrationsAligned)
+	}
+}
+
+

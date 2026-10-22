@@ -117,6 +117,7 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 	resolvedRepeatableByDesc := make(map[string]resolver.ResolvedMigration)
 	for _, res := range resolved.RepeatableMigrations {
 		resolvedRepeatableByDesc[res.Description] = res
+		resolvedRepeatableByDesc[database.AbbreviateDescription(res.Description)] = res
 	}
 
 	user := m.config.InstalledBy
@@ -170,7 +171,7 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 				if app.Checksum == nil || *app.Checksum != res.Checksum {
 					needsUpdate = true
 				}
-				if app.Description != res.Description || app.Type != string(res.Type) {
+				if (app.Description != res.Description && app.Description != database.AbbreviateDescription(res.Description)) || app.Type != string(res.Type) {
 					needsUpdate = true
 				}
 
@@ -184,9 +185,9 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 					rec := database.HistoryRecord{
 						InstalledRank: app.InstalledRank,
 						Version:       verStr,
-						Description:   res.Description,
+						Description:   database.AbbreviateDescription(res.Description),
 						Type:          string(res.Type),
-						Script:        res.Script,
+						Script:        database.AbbreviateScript(res.Script),
 						Checksum:      &cs,
 					}
 					if err := m.db.UpdateHistory(ctx, defaultSchema, table, rec); err != nil {
@@ -250,9 +251,9 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 					rec := database.HistoryRecord{
 						InstalledRank: app.InstalledRank,
 						Version:       nil,
-						Description:   res.Description,
+						Description:   database.AbbreviateDescription(res.Description),
 						Type:          string(res.Type),
-						Script:        res.Script,
+						Script:        database.AbbreviateScript(res.Script),
 						Checksum:      &res.Checksum,
 					}
 					if err := m.db.UpdateHistory(ctx, defaultSchema, table, rec); err != nil {
