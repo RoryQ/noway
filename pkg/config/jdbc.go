@@ -78,10 +78,12 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 			case "location", "region":
 				params.Location = val
 			case "oauthtype", "oauth_type":
-				if num, err := strconv.Atoi(val); err == nil {
-					params.OAuthType = num
-					params.OAuthTypeSet = true
+				num, err := strconv.Atoi(strings.TrimSpace(val))
+				if err != nil {
+					return nil, fmt.Errorf("invalid integer value %q for %s", val, key)
 				}
+				params.OAuthType = num
+				params.OAuthTypeSet = true
 			case "oauthpkeyfile", "oauth_pkey_file", "keyfile", "credentials_file", "oauthpvtkeypath", "oauth_pvt_key_path":
 				params.ServiceAccountFile = val
 			case "oauthserviceacctemail", "oauth_service_acct_email", "service_account_email":
@@ -89,9 +91,11 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 			case "oauthaccesstoken", "oauth_access_token", "access_token":
 				params.AccessToken = val
 			case "timeout":
-				if num, err := strconv.Atoi(val); err == nil {
-					params.TimeoutSeconds = num
+				num, err := strconv.Atoi(strings.TrimSpace(val))
+				if err != nil {
+					return nil, fmt.Errorf("invalid integer value %q for %s", val, key)
 				}
+				params.TimeoutSeconds = num
 			}
 		}
 
@@ -125,10 +129,12 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 			params.ServiceAccountFile = kp
 		}
 		if ot := q.Get("oauthtype"); ot != "" {
-			if num, err := strconv.Atoi(ot); err == nil {
-				params.OAuthType = num
-				params.OAuthTypeSet = true
+			num, err := strconv.Atoi(strings.TrimSpace(ot))
+			if err != nil {
+				return nil, fmt.Errorf("invalid integer value %q for oauthtype", ot)
 			}
+			params.OAuthType = num
+			params.OAuthTypeSet = true
 		}
 		if at := q.Get("oauthaccesstoken"); at != "" {
 			params.AccessToken = at

@@ -357,6 +357,10 @@ func (c *Configuration) Finalize() error {
 		c.ScriptPlaceholderSuffix = "__"
 	}
 
+	if c.GCPAccessToken != "" && (c.GCPOAuthType == nil || *c.GCPOAuthType != 2) {
+		return fmt.Errorf("OAuthAccessToken is only valid when OAuthType is 2")
+	}
+
 	return nil
 }
 

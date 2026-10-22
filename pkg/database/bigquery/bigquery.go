@@ -114,6 +114,8 @@ func New(ctx context.Context, cfg *config.Configuration) (*BigQueryDatabase, err
 			endpoint += "bigquery/v2/"
 		}
 		opts = append(opts, option.WithEndpoint(endpoint), option.WithoutAuthentication())
+	} else if cfg.GCPAccessToken != "" && (cfg.GCPOAuthType == nil || *cfg.GCPOAuthType != 2) {
+		return nil, fmt.Errorf("OAuthAccessToken is only valid when OAuthType is 2")
 	} else if cfg.GCPOAuthType != nil {
 		switch *cfg.GCPOAuthType {
 		case 0:

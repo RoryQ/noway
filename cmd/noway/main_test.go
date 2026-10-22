@@ -354,6 +354,32 @@ func TestParseCLIArgs_FlagsAndOptions(t *testing.T) {
 	}
 }
 
+func TestParseCLIArgs_InvalidIntegersAndOAuthValidation(t *testing.T) {
+	// 1. Invalid connectRetries
+	_, err := parseCLIArgs([]string{"-connectRetries=abc"})
+	if err == nil || !strings.Contains(err.Error(), "invalid integer value") {
+		t.Errorf("expected error for invalid connectRetries, got: %v", err)
+	}
+
+	// 2. Invalid lockRetryCount
+	_, err = parseCLIArgs([]string{"-lockRetryCount=xyz"})
+	if err == nil || !strings.Contains(err.Error(), "invalid integer value") {
+		t.Errorf("expected error for invalid lockRetryCount, got: %v", err)
+	}
+
+	// 3. Invalid oauthType
+	_, err = parseCLIArgs([]string{"-oauthType=notanumber"})
+	if err == nil || !strings.Contains(err.Error(), "invalid integer value") {
+		t.Errorf("expected error for invalid oauthType, got: %v", err)
+	}
+
+	// 4. OAuthAccessToken set when OAuthType is not 2
+	_, err = parseCLIArgs([]string{"-oauthAccessToken=mytoken", "-oauthType=0"})
+	if err == nil || !strings.Contains(err.Error(), "OAuthAccessToken is only valid when OAuthType is 2") {
+		t.Errorf("expected error when OAuthAccessToken is set with OAuthType != 2, got: %v", err)
+	}
+}
+
 
 
 

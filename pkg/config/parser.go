@@ -603,9 +603,11 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "DRIVER":
 		cfg.Driver = val
 	case "LOCK_RETRY_COUNT", "LOCKRETRYCOUNT":
-		if n, err := strconv.Atoi(val); err == nil {
-			cfg.LockRetryCount = n
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil {
+			return fmt.Errorf("invalid integer value %q for %s", val, key)
 		}
+		cfg.LockRetryCount = n
 	case "SCHEMAS":
 		cfg.Schemas = splitAndTrim(val, ",")
 	case "CREATE_SCHEMAS", "CREATESCHEMAS":
@@ -746,9 +748,11 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "INSTALLED_BY", "INSTALLEDBY":
 		cfg.InstalledBy = val
 	case "CONNECT_RETRIES", "CONNECTRETRIES":
-		if n, err := strconv.Atoi(val); err == nil {
-			cfg.ConnectRetries = n
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil {
+			return fmt.Errorf("invalid integer value %q for %s", val, key)
 		}
+		cfg.ConnectRetries = n
 	case "BASELINE_VERSION", "BASELINEVERSION":
 		cfg.BaselineVersion = val
 	case "BASELINE_DESCRIPTION", "BASELINEDESCRIPTION":
@@ -776,9 +780,11 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "GCP_BIGQUERY_ENDPOINT", "GCPBIGQUERYENDPOINT":
 		cfg.GCPBigQueryEndpoint = val
 	case "OAUTH_TYPE", "OAUTHTYPE", "GCP_OAUTH_TYPE", "GCPOAUTHTYPE":
-		if num, err := strconv.Atoi(val); err == nil {
-			cfg.GCPOAuthType = &num
+		num, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil {
+			return fmt.Errorf("invalid integer value %q for %s", val, key)
 		}
+		cfg.GCPOAuthType = &num
 	case "OAUTH_ACCESS_TOKEN", "OAUTHACCESSTOKEN", "GCP_ACCESS_TOKEN", "GCPACCESSTOKEN":
 		cfg.GCPAccessToken = val
 	case "OAUTH_PVT_KEY_PATH", "OAUTHPVTKEYPATH":
@@ -869,9 +875,11 @@ func applyProperty(cfg *Configuration, key, val string) error {
 	case "driver":
 		cfg.Driver = val
 	case "lockretrycount", "lock_retry_count", "lock-retry-count":
-		if n, err := strconv.Atoi(val); err == nil {
-			cfg.LockRetryCount = n
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil {
+			return fmt.Errorf("invalid integer value %q for %s", val, key)
 		}
+		cfg.LockRetryCount = n
 	case "schemas":
 		cfg.Schemas = splitAndTrim(val, ",")
 	case "createschemas", "create_schemas", "create-schemas":
@@ -1016,9 +1024,11 @@ func applyProperty(cfg *Configuration, key, val string) error {
 	case "installedby", "installed_by", "installed-by":
 		cfg.InstalledBy = val
 	case "connectretries", "connect_retries", "connect-retries":
-		if n, err := strconv.Atoi(val); err == nil {
-			cfg.ConnectRetries = n
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil {
+			return fmt.Errorf("invalid integer value %q for %s", val, key)
 		}
+		cfg.ConnectRetries = n
 	case "baselineversion", "baseline_version", "baseline-version":
 		cfg.BaselineVersion = val
 	case "baselinedescription", "baseline_description", "baseline-description":
@@ -1046,9 +1056,11 @@ func applyProperty(cfg *Configuration, key, val string) error {
 	case "gcpbigqueryendpoint", "bigqueryendpoint", "bigquery_endpoint", "bigquery-endpoint":
 		cfg.GCPBigQueryEndpoint = val
 	case "oauthtype", "oauth_type", "oauth-type", "gcpoauthtype":
-		if num, err := strconv.Atoi(val); err == nil {
-			cfg.GCPOAuthType = &num
+		num, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil {
+			return fmt.Errorf("invalid integer value %q for %s", val, key)
 		}
+		cfg.GCPOAuthType = &num
 	case "oauthaccesstoken", "oauth_access_token", "oauth-access-token", "gcpaccesstoken":
 		cfg.GCPAccessToken = val
 	case "oauthpvtkeypath", "oauth_pvt_key_path", "oauth-pvt-key-path":

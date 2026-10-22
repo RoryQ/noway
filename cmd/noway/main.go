@@ -434,13 +434,17 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 		case "encoding":
 			cfg.Encoding = val
 		case "connectretries", "connect-retries", "connect_retries":
-			if n, err := strconv.Atoi(val); err == nil {
-				cfg.ConnectRetries = n
+			n, err := strconv.Atoi(strings.TrimSpace(val))
+			if err != nil {
+				return nil, fmt.Errorf("invalid integer value %q for %s", val, key)
 			}
+			cfg.ConnectRetries = n
 		case "lockretrycount", "lock-retry-count", "lock_retry_count":
-			if n, err := strconv.Atoi(val); err == nil {
-				cfg.LockRetryCount = n
+			n, err := strconv.Atoi(strings.TrimSpace(val))
+			if err != nil {
+				return nil, fmt.Errorf("invalid integer value %q for %s", val, key)
 			}
+			cfg.LockRetryCount = n
 		case "outputtype", "output-type", "output_type", "output":
 			cfg.OutputType = val
 		case "dryrunoutput", "dry-run-output", "dry_run_output":
@@ -458,9 +462,11 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 		case "gcpbigqueryendpoint", "bigqueryendpoint", "bigquery-endpoint":
 			cfg.GCPBigQueryEndpoint = val
 		case "oauthtype", "oauth-type", "oauth_type", "gcpoauthtype":
-			if n, err := strconv.Atoi(val); err == nil {
-				cfg.GCPOAuthType = &n
+			n, err := strconv.Atoi(strings.TrimSpace(val))
+			if err != nil {
+				return nil, fmt.Errorf("invalid integer value %q for %s", val, key)
 			}
+			cfg.GCPOAuthType = &n
 		case "oauthaccesstoken", "oauth-access-token", "oauth_access_token", "gcpaccesstoken":
 			cfg.GCPAccessToken = val
 		case "oauthpvtkeypath", "oauth-pvt-key-path", "oauth_pvt_key_path":
