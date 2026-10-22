@@ -2,6 +2,7 @@ package migrator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1620,6 +1621,59 @@ func TestStandaloneClean_TakesLock(t *testing.T) {
 	_, lockErr := db.Lock(ctx, "test_ds", "flyway_schema_history")
 	if lockErr == nil {
 		t.Fatalf("expected lock attempt to fail because history table was dropped, got nil")
+	}
+}
+
+type unlockCheckMockDB struct {
+	*mock.MockDatabase
+	unlockCalled bool
+	failOnUnlock error
+}
+
+func (u *unlockCheckMockDB) Lock(ctx context.Context, schema, table string) (database.UnlockFunc, error) {
+	unl, err := u.MockDatabase.Lock(ctx, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) error {
+		u.unlockCalled = true
+		_ = unl(ctx)
+		if u.failOnUnlock != nil {
+			return u.failOnUnlock
+		}
+		return nil
+	}, nil
+}
+
+func TestStandaloneClean_CallsUnlockAndIgnoresTableNotExistDeleteError(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.CleanDisabled = false
+
+	baseDB := mock.NewMockDatabase()
+	_ = baseDB.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+	_ = baseDB.EnsureHistoryTable(ctx, "test_ds", "user_table")
+
+	wrapped := &unlockCheckMockDB{
+		MockDatabase: baseDB,
+		failOnUnlock: fmt.Errorf("failed to release lock: googleapi: Error 404: Not found: Table test_ds.flyway_schema_history"),
+	}
+
+	m, err := New(cfg, wrapped)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+
+	res, err := m.Clean(ctx)
+	if err != nil {
+		t.Fatalf("Clean failed: %v", err)
+	}
+	if !wrapped.unlockCalled {
+		t.Errorf("expected unlock to be called by Clean after history table dropped")
+	}
+	if len(res.SchemasCleaned) != 1 {
+		t.Errorf("expected 1 schema cleaned, got %d", len(res.SchemasCleaned))
 	}
 }
 

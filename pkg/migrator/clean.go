@@ -3,6 +3,9 @@ package migrator
 import (
 	"context"
 	"fmt"
+	"strings"
+
+	"github.com/roryq/noway/pkg/database"
 )
 
 // CleanResult contains the clean operation summary matching Flyway's output schema.
@@ -32,19 +35,52 @@ func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
 		return nil, fmt.Errorf("failed checking history table: %w", err)
 	}
 
+	var unlock database.UnlockFunc
 	if exists {
-		_, err := m.db.Lock(ctx, defaultSchema, table)
+		unlock, err = m.db.Lock(ctx, defaultSchema, table)
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterCleanError")
 			return nil, fmt.Errorf("failed to acquire database lock for clean: %w", err)
 		}
-		// Drop the history table while the lock is held, and do not call unlock
-		// because the lock row goes with the table. A waiting process then fails
-		// because the table does not exist and it does not migrate into a schema
-		// that is being cleaned.
+		defer func() {
+			if unlock != nil {
+				if uErr := unlock(context.Background()); uErr != nil {
+					_ = uErr // safely ignored
+				}
+			}
+		}()
 	}
 
-	return m.cleanInternal(ctx, "", true)
+	res, err := m.cleanInternal(ctx, "", true)
+	if unlock != nil {
+		u := unlock
+		unlock = nil
+		if uErr := u(context.Background()); uErr != nil {
+			if !isTableNotExistError(uErr) {
+				_ = m.callbackRunner.Fire(ctx, "afterCleanError")
+				return nil, uErr
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
+func isTableNotExistError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errLower := strings.ToLower(err.Error())
+	return strings.Contains(errLower, "not found") ||
+		strings.Contains(errLower, "notfound") ||
+		strings.Contains(errLower, "404") ||
+		strings.Contains(errLower, "does not exist") ||
+		strings.Contains(errLower, "doesn't exist") ||
+		strings.Contains(errLower, "table not found") ||
+		strings.Contains(errLower, "lock row missing")
 }
 
 // cleanInternal cleans the schemas, optionally preserving a specified table (e.g. the schema history table to retain the active lock).

@@ -1531,7 +1531,10 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 					if hbErr != nil {
 						unlockErr = fmt.Errorf("lock heartbeat failed: %w", hbErr)
 					} else if delErr != nil {
-						unlockErr = fmt.Errorf("failed to release Spanner lock: %w", delErr)
+						errLower := strings.ToLower(delErr.Error())
+						if status.Code(delErr) != codes.NotFound && !strings.Contains(errLower, "not found") && !strings.Contains(errLower, "lock row missing") {
+							unlockErr = fmt.Errorf("failed to release Spanner lock: %w", delErr)
+						}
 					}
 				})
 				return unlockErr

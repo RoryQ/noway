@@ -930,8 +930,11 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 				return
 			}
 			if delErr != nil {
-				unlockErr = fmt.Errorf("failed to release lock: %w", delErr)
-				return
+				errLower := strings.ToLower(delErr.Error())
+				if !strings.Contains(errLower, "not found") && !strings.Contains(errLower, "notfound") && !strings.Contains(delErr.Error(), "404") {
+					unlockErr = fmt.Errorf("failed to release lock: %w", delErr)
+					return
+				}
 			}
 		})
 		return unlockErr
