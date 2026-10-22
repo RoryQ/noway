@@ -10,11 +10,14 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/roryq/noway/pkg/checksum"
 	"github.com/roryq/noway/pkg/parser"
 	"github.com/roryq/noway/pkg/version"
-	"golang.org/x/text/encoding/htmlindex"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/charmap"
+	textunicode "golang.org/x/text/encoding/unicode"
 )
 
 // ResolverConfig configures how migrations are discovered and parsed.
@@ -285,27 +288,115 @@ func trimSuffixFold(s, suffix string) string {
 	return s
 }
 
-func decodeContent(rawData []byte, encoding string) (string, error) {
-	encName := strings.TrimSpace(encoding)
-	if encName == "" || strings.EqualFold(encName, "utf-8") || strings.EqualFold(encName, "utf8") {
-		return string(rawData), nil
+func javaCharset(name string) (encoding.Encoding, string, error) {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	switch upper {
+	case "", "UTF-8", "UTF8":
+		return nil, "utf-8", nil
+	case "US-ASCII", "ASCII":
+		return nil, "ascii", nil
+	case "ISO-8859-1", "ISO8859_1", "LATIN1", "LATIN-1", "ISO-LATIN-1":
+		return charmap.ISO8859_1, "", nil
+	case "ISO-8859-2", "ISO8859_2", "LATIN2":
+		return charmap.ISO8859_2, "", nil
+	case "ISO-8859-3", "ISO8859_3", "LATIN3":
+		return charmap.ISO8859_3, "", nil
+	case "ISO-8859-4", "ISO8859_4", "LATIN4":
+		return charmap.ISO8859_4, "", nil
+	case "ISO-8859-5", "ISO8859_5":
+		return charmap.ISO8859_5, "", nil
+	case "ISO-8859-6", "ISO8859_6":
+		return charmap.ISO8859_6, "", nil
+	case "ISO-8859-7", "ISO8859_7":
+		return charmap.ISO8859_7, "", nil
+	case "ISO-8859-8", "ISO8859_8":
+		return charmap.ISO8859_8, "", nil
+	case "ISO-8859-9", "ISO8859_9", "LATIN5":
+		return charmap.ISO8859_9, "", nil
+	case "ISO-8859-10", "ISO8859_10", "LATIN6":
+		return charmap.ISO8859_10, "", nil
+	case "ISO-8859-13", "ISO8859_13", "LATIN7":
+		return charmap.ISO8859_13, "", nil
+	case "ISO-8859-14", "ISO8859_14", "LATIN8":
+		return charmap.ISO8859_14, "", nil
+	case "ISO-8859-15", "ISO8859_15", "LATIN9":
+		return charmap.ISO8859_15, "", nil
+	case "ISO-8859-16", "ISO8859_16", "LATIN10":
+		return charmap.ISO8859_16, "", nil
+	case "WINDOWS-1250", "CP1250":
+		return charmap.Windows1250, "", nil
+	case "WINDOWS-1251", "CP1251":
+		return charmap.Windows1251, "", nil
+	case "WINDOWS-1252", "CP1252":
+		return charmap.Windows1252, "", nil
+	case "WINDOWS-1253", "CP1253":
+		return charmap.Windows1253, "", nil
+	case "WINDOWS-1254", "CP1254":
+		return charmap.Windows1254, "", nil
+	case "WINDOWS-1255", "CP1255":
+		return charmap.Windows1255, "", nil
+	case "WINDOWS-1256", "CP1256":
+		return charmap.Windows1256, "", nil
+	case "WINDOWS-1257", "CP1257":
+		return charmap.Windows1257, "", nil
+	case "WINDOWS-1258", "CP1258":
+		return charmap.Windows1258, "", nil
+	case "UTF-16":
+		// Java: use the BOM if there is one, and remove it. Otherwise big-endian.
+		return textunicode.UTF16(textunicode.BigEndian, textunicode.UseBOM), "", nil
+	case "UTF-16BE":
+		return textunicode.UTF16(textunicode.BigEndian, textunicode.IgnoreBOM), "", nil
+	case "UTF-16LE":
+		return textunicode.UTF16(textunicode.LittleEndian, textunicode.IgnoreBOM), "", nil
 	}
-	enc, err := htmlindex.Get(encName)
-	if err != nil {
-		normalized := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(encName), "-", ""), "_", "")
-		if enc2, err2 := htmlindex.Get(normalized); err2 == nil {
-			enc = enc2
-			err = nil
+	return nil, "", fmt.Errorf("unsupported encoding '%s'", name)
+}
+
+func decodeUTF8(b []byte) string {
+	var sb strings.Builder
+	sb.Grow(len(b))
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
+		sb.WriteRune(r) // utf8.RuneError (U+FFFD) for an invalid byte
+		b = b[size:]
+	}
+	return sb.String()
+}
+
+func decodeASCII(b []byte) string {
+	var sb strings.Builder
+	sb.Grow(len(b))
+	for _, c := range b {
+		if c <= 0x7F {
+			sb.WriteByte(c)
+		} else {
+			sb.WriteRune(utf8.RuneError)
 		}
 	}
+	return sb.String()
+}
+
+func decodeContent(rawData []byte, encodingName string) (string, error) {
+	enc, special, err := javaCharset(encodingName)
 	if err != nil {
-		return "", fmt.Errorf("unsupported encoding '%s': %w", encoding, err)
+		return "", err
 	}
-	decoded, err := enc.NewDecoder().Bytes(rawData)
-	if err != nil {
-		return "", fmt.Errorf("error decoding with '%s': %w", encoding, err)
+	var text string
+	switch special {
+	case "utf-8":
+		text = decodeUTF8(rawData)
+	case "ascii":
+		text = decodeASCII(rawData)
+	default:
+		decoded, err := enc.NewDecoder().Bytes(rawData)
+		if err != nil {
+			return "", fmt.Errorf("error decoding with '%s': %w", encodingName, err)
+		}
+		text = string(decoded)
 	}
-	return string(decoded), nil
+	// For every encoding, strip leading BOM before checksum and SQL execution
+	text = strings.TrimPrefix(text, "\uFEFF")
+	return text, nil
 }
 
 func (r *Resolver) loadMigrationConfig(dirPath, filename string, fileSys fs.FS) MigrationConfig {

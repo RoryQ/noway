@@ -962,9 +962,16 @@ func TestResolverEncodingLatin1(t *testing.T) {
 	if len(resolvedPerScript.VersionedMigrations) != 2 {
 		t.Fatalf("expected 2 migrations, got %d", len(resolvedPerScript.VersionedMigrations))
 	}
-	// V1 without per-script config uses UTF-8, treating byte 0xE9 as raw byte -> rawCs
-	if resolvedPerScript.VersionedMigrations[0].Checksum != rawCs {
-		t.Errorf("expected checksum %d for raw byte under UTF-8, got %d", rawCs, resolvedPerScript.VersionedMigrations[0].Checksum)
+	// V1 without per-script config uses UTF-8, replacing invalid byte 0xE9 with U+FFFD
+	utf8ErrorCs, err := checksum.CalculateString("\uFFFD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedPerScript.VersionedMigrations[0].Checksum != utf8ErrorCs {
+		t.Errorf("expected checksum %d for U+FFFD under UTF-8, got %d", utf8ErrorCs, resolvedPerScript.VersionedMigrations[0].Checksum)
+	}
+	if resolvedPerScript.VersionedMigrations[0].Content != "\uFFFD" {
+		t.Errorf("expected decoded content '\\uFFFD', got %q", resolvedPerScript.VersionedMigrations[0].Content)
 	}
 	// V2 has encoding=Latin-1 in .conf -> decoded to UTF-8 -> utf8Cs
 	if resolvedPerScript.VersionedMigrations[1].Checksum != utf8Cs {
@@ -972,6 +979,80 @@ func TestResolverEncodingLatin1(t *testing.T) {
 	}
 	if resolvedPerScript.VersionedMigrations[1].Content != "é" {
 		t.Errorf("expected decoded content 'é', got %q", resolvedPerScript.VersionedMigrations[1].Content)
+	}
+}
+
+func TestResolverJavaCharsetsAndBOM(t *testing.T) {
+	// 1. ISO-8859-1 vs Windows-1252 on byte 0x80
+	isoText, err := decodeContent([]byte{0x80, 0xE9}, "ISO-8859-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if isoText != "\u0080é" {
+		t.Errorf("expected ISO-8859-1 to decode 0x80 to \\u0080 and 0xE9 to é, got %q", isoText)
+	}
+
+	winText, err := decodeContent([]byte{0x80, 0xE9}, "WINDOWS-1252")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if winText != "€é" {
+		t.Errorf("expected Windows-1252 to decode 0x80 to € and 0xE9 to é, got %q", winText)
+	}
+
+	// 2. US-ASCII on bytes > 0x7F
+	asciiText, err := decodeContent([]byte{0x41, 0x80, 0xE9}, "US-ASCII")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if asciiText != "A\uFFFD\uFFFD" {
+		t.Errorf("expected US-ASCII to replace bytes >0x7F with \\uFFFD, got %q", asciiText)
+	}
+
+	// 3. UTF-16 with Big-Endian BOM
+	utf16BEBOM := []byte{0xFE, 0xFF, 0x00, 0x41, 0x00, 0x42}
+	utf16Text, err := decodeContent(utf16BEBOM, "UTF-16")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if utf16Text != "AB" {
+		t.Errorf("expected UTF-16 with BOM to strip BOM and return 'AB', got %q", utf16Text)
+	}
+
+	// 4. UTF-16 without BOM (Java defaults to big-endian)
+	utf16NoBOM := []byte{0x00, 0x41, 0x00, 0x42}
+	utf16NoBOMText, err := decodeContent(utf16NoBOM, "UTF-16")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if utf16NoBOMText != "AB" {
+		t.Errorf("expected UTF-16 without BOM to decode as big-endian 'AB', got %q", utf16NoBOMText)
+	}
+
+	// 5. UTF-8 with BOM
+	utf8WithBOM := []byte{0xEF, 0xBB, 0xBF, 'S', 'E', 'L', 'E', 'C', 'T'}
+	utf8Text, err := decodeContent(utf8WithBOM, "UTF-8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if utf8Text != "SELECT" {
+		t.Errorf("expected UTF-8 BOM to be stripped, got %q", utf8Text)
+	}
+
+	// 6. UTF-8 invalid bytes replaced with U+FFFD (finding 9)
+	utf8Invalid := []byte{0x61, 0xE9}
+	utf8InvalidText, err := decodeContent(utf8Invalid, "UTF-8")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if utf8InvalidText != "a\uFFFD" {
+		t.Errorf("expected invalid UTF-8 byte to be replaced with \\uFFFD, got %q", utf8InvalidText)
+	}
+
+	// 7. Unsupported encoding fails
+	_, err = decodeContent([]byte("test"), "foo_bar_encoding")
+	if err == nil {
+		t.Errorf("expected error for unsupported encoding, got nil")
 	}
 }
 
