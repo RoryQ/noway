@@ -585,6 +585,79 @@ func TestMigrator_CherryPickAndFailOnMissingTarget(t *testing.T) {
 	}
 }
 
+func TestMigrator_CherryPick_ConsecutiveRuns(t *testing.T) {
+	ctx := context.Background()
+
+	fs := fstest.MapFS{
+		"migrations/V1__one.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+		"migrations/V2__two.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t2 (id INT64);")},
+		"migrations/V3__three.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t3 (id INT64);")},
+		"migrations/V4__four.sql":  &fstest.MapFile{Data: []byte("CREATE TABLE t4 (id INT64);")},
+		"migrations/R__view.sql":   &fstest.MapFile{Data: []byte("CREATE VIEW v1 AS SELECT 1;")},
+		"migrations/.keep":         &fstest.MapFile{Data: []byte("")},
+	}
+
+	db := mock.NewMockDatabase()
+
+	// 1. First run: cherry-pick V3
+	cfg1 := config.NewDefaultConfiguration()
+	cfg1.DefaultSchema = "test_schema"
+	cfg1.FS = fs
+	cfg1.Locations = []string{"migrations"}
+	cfg1.CherryPick = []string{"3"}
+
+	m1, err := migrator.New(cfg1, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+	res1, err := m1.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("first Migrate failed: %v", err)
+	}
+	if res1.MigrationsExecuted != 1 || res1.ExecutedMigrations[0].Version != "3" {
+		t.Fatalf("expected only V3 to be executed, got %+v", res1.ExecutedMigrations)
+	}
+
+	// 2. Second run: cherry-pick V4 on the same database
+	// This must succeed without failing validation for unapplied V1 and V2
+	cfg2 := config.NewDefaultConfiguration()
+	cfg2.DefaultSchema = "test_schema"
+	cfg2.FS = fs
+	cfg2.Locations = []string{"migrations"}
+	cfg2.CherryPick = []string{"4"}
+
+	m2, err := migrator.New(cfg2, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+	res2, err := m2.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("second Migrate failed: %v", err)
+	}
+	if res2.MigrationsExecuted != 1 || res2.ExecutedMigrations[0].Version != "4" {
+		t.Fatalf("expected only V4 to be executed, got %+v", res2.ExecutedMigrations)
+	}
+
+	// 3. Third run: cherry-pick repeatable migration
+	cfg3 := config.NewDefaultConfiguration()
+	cfg3.DefaultSchema = "test_schema"
+	cfg3.FS = fs
+	cfg3.Locations = []string{"migrations"}
+	cfg3.CherryPick = []string{"view"}
+
+	m3, err := migrator.New(cfg3, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+	res3, err := m3.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("third Migrate failed: %v", err)
+	}
+	if res3.MigrationsExecuted != 1 || res3.ExecutedMigrations[0].Description != "view" {
+		t.Fatalf("expected only R__view to be executed, got %+v", res3.ExecutedMigrations)
+	}
+}
+
 func TestValidateAndRepair_LongDescriptionAndScript(t *testing.T) {
 	ctx := context.Background()
 

@@ -320,6 +320,39 @@ func (c *Configuration) Finalize() error {
 	return nil
 }
 
+// IsPicked checks whether a migration is selected by the cherryPick configuration.
+// If cherryPick is empty, all migrations are considered picked.
+// For versioned migrations (v != nil), it matches against version strings.
+// For repeatable migrations (v == nil), it matches against the migration description.
+func (c *Configuration) IsPicked(v *version.Version, description string) bool {
+	if len(c.CherryPick) == 0 {
+		return true
+	}
+	if v != nil {
+		vStr := v.String()
+		vNorm := v.Normalized()
+		for _, cp := range c.CherryPick {
+			cpTrim := strings.TrimSpace(cp)
+			if cpTrim == vStr || cpTrim == vNorm {
+				return true
+			}
+			if parsed, err := version.Parse(cpTrim); err == nil {
+				if parsed.Normalized() == vNorm {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, cp := range c.CherryPick {
+		cpTrim := strings.TrimSpace(cp)
+		if strings.EqualFold(cpTrim, description) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsIgnored checks whether a given migration state matches IgnoreMigrationPatterns.
 // Supported states include: "future", "missing", "pending", "outdated", "ignored".
 // Pattern format is [type_or_version:]<state>, e.g.: "*:future", "repeatable:missing", "*:pending".

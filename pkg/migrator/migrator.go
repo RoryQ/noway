@@ -457,10 +457,23 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	if len(m.config.CherryPick) > 0 && m.config.FailOnMissingTarget {
 		for _, cp := range m.config.CherryPick {
 			found := false
+			singleCfg := config.Configuration{CherryPick: []string{cp}}
 			for _, res := range resolved.VersionedMigrations {
-				if matchesCherryPick(res.Version, []string{cp}) {
+				if singleCfg.IsPicked(res.Version, res.Description) {
 					found = true
 					break
+				}
+			}
+			if !found {
+				for _, res := range resolved.RepeatableMigrations {
+					key := res.Description
+					if key == "" {
+						key = res.Script
+					}
+					if singleCfg.IsPicked(nil, key) {
+						found = true
+						break
+					}
 				}
 			}
 			if !found {
@@ -584,7 +597,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 
 		// Check cherryPick
 		if len(m.config.CherryPick) > 0 {
-			if !matchesCherryPick(res.Version, m.config.CherryPick) {
+			if !m.config.IsPicked(res.Version, res.Description) {
 				continue
 			}
 		}
@@ -608,6 +621,9 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 		key := res.Description
 		if key == "" {
 			key = res.Script
+		}
+		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(nil, key) {
+			continue
 		}
 		lastRun, wasApplied := appliedRepeatables[key]
 		if !wasApplied {
@@ -1064,24 +1080,4 @@ func (m *Migrator) executeScriptMigration(
 		Script:        mig.Script,
 		ExecutionTime: execTime,
 	}, nil
-}
-
-func matchesCherryPick(v *version.Version, cherryPicks []string) bool {
-	if v == nil {
-		return false
-	}
-	vStr := v.String()
-	vNorm := v.Normalized()
-	for _, cp := range cherryPicks {
-		cpTrim := strings.TrimSpace(cp)
-		if cpTrim == vStr || cpTrim == vNorm {
-			return true
-		}
-		if parsed, err := version.Parse(cpTrim); err == nil {
-			if parsed.Normalized() == vNorm {
-				return true
-			}
-		}
-	}
-	return false
 }

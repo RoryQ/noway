@@ -242,6 +242,10 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 			continue
 		}
 
+		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(app.Version, app.Description) {
+			continue
+		}
+
 		// Versioned migration validation
 		if app.Version != nil && !app.Version.IsEmpty() {
 			verKey := app.Version.Normalized()
@@ -370,6 +374,9 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 
 	for _, res := range resolved.VersionedMigrations {
 		if res.Version == nil || res.Version.IsEmpty() {
+			continue
+		}
+		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(res.Version, res.Description) {
 			continue
 		}
 		verKey := res.Version.Normalized()
