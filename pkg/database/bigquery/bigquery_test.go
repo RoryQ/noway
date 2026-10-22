@@ -17,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/roryq/noway/pkg/config"
 	"github.com/roryq/noway/pkg/database"
@@ -2178,6 +2180,67 @@ func TestBigQueryHeartbeatTickTimeout(t *testing.T) {
 	// Active lock error should NOT be set because retry recovered after tick timeout
 	if err := db.checkActiveLockErr(); err != nil {
 		t.Errorf("expected activeLockErr to be nil after timeout recovery, got: %v", err)
+	}
+}
+
+func TestIsNotFoundError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "googleapi 404",
+			err:      &googleapi.Error{Code: 404},
+			expected: true,
+		},
+		{
+			name:     "wrapped googleapi 404",
+			err:      fmt.Errorf("dataset error: %w", &googleapi.Error{Code: 404}),
+			expected: true,
+		},
+		{
+			name:     "grpc NotFound",
+			err:      status.Error(codes.NotFound, "not found"),
+			expected: true,
+		},
+		{
+			name:     "wrapped grpc NotFound",
+			err:      fmt.Errorf("query error: %w", status.Error(codes.NotFound, "not found")),
+			expected: true,
+		},
+		{
+			name: "googleapi 400 with 404 in job UUID or message",
+			err: &googleapi.Error{
+				Code:    400,
+				Message: "invalid query in job_404abc_def",
+			},
+			expected: false,
+		},
+		{
+			name:     "plain error mentioning 404 in text",
+			err:      fmt.Errorf("error running job_404_some_uuid: syntax error"),
+			expected: false,
+		},
+		{
+			name:     "plain error mentioning not found",
+			err:      errors.New("dataset not found"),
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isNotFoundError(tc.err)
+			if got != tc.expected {
+				t.Errorf("isNotFoundError(%v) = %v; want %v", tc.err, got, tc.expected)
+			}
+		})
 	}
 }
 

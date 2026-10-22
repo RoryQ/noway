@@ -585,6 +585,9 @@ func (db *SpannerDatabase) dropStatementsFromDDLObjects(objs *spannerDDLObjects,
 	for _, fk := range objs.constraints {
 		addStmt(fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", db.Quote(fk.table), db.Quote(fk.constraint)))
 	}
+	for _, pgName := range objs.propertyGraphs {
+		addStmt(fmt.Sprintf("DROP PROPERTY GRAPH %s", db.Quote(pgName)))
+	}
 	searchIdxSet := make(map[string]bool)
 	for _, idxName := range objs.searchIndexes {
 		searchIdxSet[idxName] = true
@@ -606,9 +609,6 @@ func (db *SpannerDatabase) dropStatementsFromDDLObjects(objs *spannerDDLObjects,
 	}
 	for _, mName := range objs.models {
 		addStmt(fmt.Sprintf("DROP MODEL %s", db.Quote(mName)))
-	}
-	for _, pgName := range objs.propertyGraphs {
-		addStmt(fmt.Sprintf("DROP PROPERTY GRAPH %s", db.Quote(pgName)))
 	}
 	orderedTables := sortTablesChildrenFirst(objs.tables, objs.tableParents)
 	for _, tName := range orderedTables {
@@ -742,7 +742,30 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 		iter.Stop()
 	}
 
-	// 3. Secondary indexes (including search and vector indexes)
+	// 3. Property Graphs (must be dropped before views and base tables)
+	if infoSchemaErr == nil {
+		pgSQL := `SELECT PROPERTY_GRAPH_NAME FROM INFORMATION_SCHEMA.PROPERTY_GRAPHS WHERE PROPERTY_GRAPH_SCHEMA = ''`
+		iter = db.client.Single().Query(ctx, spanner.NewStatement(pgSQL))
+		for {
+			row, err := iter.Next()
+			if err == iterator.Done {
+				break
+			}
+			if err != nil {
+				infoSchemaErr = err
+				break
+			}
+			var pgName string
+			if err := row.Column(0, &pgName); err != nil {
+				infoSchemaErr = err
+				break
+			}
+			addStmt(fmt.Sprintf("DROP PROPERTY GRAPH %s", db.Quote(pgName)))
+		}
+		iter.Stop()
+	}
+
+	// 4. Secondary indexes (including search and vector indexes)
 	if infoSchemaErr == nil {
 		idxSQL := `SELECT INDEX_NAME, TABLE_NAME, INDEX_TYPE 
 		           FROM INFORMATION_SCHEMA.INDEXES 
@@ -779,7 +802,7 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 		iter.Stop()
 	}
 
-	// 4. Views (dropped in dependency order: leaf views first)
+	// 5. Views (dropped in dependency order: leaf views first)
 	if infoSchemaErr == nil {
 		viewsSQL := `SELECT TABLE_NAME, VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = ''`
 		iter = db.client.Single().Query(ctx, spanner.NewStatement(viewsSQL))
@@ -812,7 +835,7 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 		}
 	}
 
-	// 5. Machine learning models
+	// 6. Machine learning models
 	if infoSchemaErr == nil {
 		modelSQL := `SELECT MODEL_NAME FROM INFORMATION_SCHEMA.MODELS WHERE MODEL_SCHEMA = ''`
 		iter = db.client.Single().Query(ctx, spanner.NewStatement(modelSQL))
@@ -831,32 +854,6 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 				break
 			}
 			addStmt(fmt.Sprintf("DROP MODEL %s", db.Quote(mName)))
-		}
-		iter.Stop()
-	}
-
-	// 5b. Property Graphs (must be dropped before base tables)
-	if infoSchemaErr == nil {
-		pgSQL := `SELECT PROPERTY_GRAPH_NAME FROM INFORMATION_SCHEMA.PROPERTY_GRAPHS WHERE PROPERTY_GRAPH_SCHEMA = ''`
-		iter = db.client.Single().Query(ctx, spanner.NewStatement(pgSQL))
-		for {
-			row, err := iter.Next()
-			if err == iterator.Done {
-				break
-			}
-			if err != nil {
-				if isInformationSchemaMissingError(err) || status.Code(err) == codes.NotFound || strings.Contains(strings.ToLower(err.Error()), "not found") {
-					break
-				}
-				infoSchemaErr = err
-				break
-			}
-			var pgName string
-			if err := row.Column(0, &pgName); err != nil {
-				infoSchemaErr = err
-				break
-			}
-			addStmt(fmt.Sprintf("DROP PROPERTY GRAPH %s", db.Quote(pgName)))
 		}
 		iter.Stop()
 	}
@@ -1531,8 +1528,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 					if hbErr != nil {
 						unlockErr = fmt.Errorf("lock heartbeat failed: %w", hbErr)
 					} else if delErr != nil {
-						errLower := strings.ToLower(delErr.Error())
-						if status.Code(delErr) != codes.NotFound && !strings.Contains(errLower, "not found") && !strings.Contains(errLower, "lock row missing") {
+						if status.Code(delErr) != codes.NotFound {
 							unlockErr = fmt.Errorf("failed to release Spanner lock: %w", delErr)
 						}
 					}

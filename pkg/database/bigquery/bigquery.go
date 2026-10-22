@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -15,12 +16,31 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/roryq/noway/pkg/config"
 	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/resolver"
 	"github.com/roryq/noway/pkg/version"
 )
+
+// isNotFoundError checks if an error represents a Not Found (HTTP 404 or gRPC NotFound) condition.
+// It uses structured error inspection (errors.As for *googleapi.Error and status.Code for gRPC)
+// rather than substring matching, avoiding false positives when query job UUIDs contain "404".
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) && gErr.Code == http.StatusNotFound {
+		return true
+	}
+	if status.Code(err) == codes.NotFound {
+		return true
+	}
+	return false
+}
 
 var (
 	// ErrLockRowMissing indicates that the lock row was deleted from the schema history table during heartbeat.
@@ -193,8 +213,7 @@ func (db *BigQueryDatabase) SchemaExists(ctx context.Context, schema string) (bo
 		}
 		return true, nil
 	}
-	errLower := strings.ToLower(err.Error())
-	if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+	if isNotFoundError(err) {
 		return false, nil
 	}
 
@@ -203,8 +222,7 @@ func (db *BigQueryDatabase) SchemaExists(ctx context.Context, schema string) (bo
 	q := db.client.Query(sql)
 	it, err := q.Read(ctx)
 	if err != nil {
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+		if isNotFoundError(err) {
 			return false, nil
 		}
 		return false, err
@@ -215,8 +233,7 @@ func (db *BigQueryDatabase) SchemaExists(ctx context.Context, schema string) (bo
 	}
 	err = it.Next(&row)
 	if err != nil && err != iterator.Done {
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+		if isNotFoundError(err) {
 			return false, nil
 		}
 		return false, err
@@ -301,8 +318,7 @@ func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string, excl
 		}
 		it, err := q.Read(ctx)
 		if err != nil {
-			errLower := strings.ToLower(err.Error())
-			if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+			if isNotFoundError(err) {
 				return nil
 			}
 			return err
@@ -348,8 +364,7 @@ func (db *BigQueryDatabase) CleanSchema(ctx context.Context, schema string, excl
 		}
 		it, err := q.Read(ctx)
 		if err != nil {
-			errLower := strings.ToLower(err.Error())
-			if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+			if isNotFoundError(err) {
 				return nil
 			}
 			return err
@@ -429,8 +444,7 @@ func (db *BigQueryDatabase) HistoryTableExists(ctx context.Context, schema, tabl
 		}
 		return true, nil
 	}
-	errLower := strings.ToLower(err.Error())
-	if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+	if isNotFoundError(err) {
 		return false, nil
 	}
 
@@ -442,8 +456,7 @@ func (db *BigQueryDatabase) HistoryTableExists(ctx context.Context, schema, tabl
 	}
 	it, err := q.Read(ctx)
 	if err != nil {
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+		if isNotFoundError(err) {
 			return false, nil
 		}
 		return false, err
@@ -453,8 +466,7 @@ func (db *BigQueryDatabase) HistoryTableExists(ctx context.Context, schema, tabl
 		Count int64 `bigquery:"count"`
 	}
 	if err := it.Next(&row); err != nil {
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "not found") || strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
+		if isNotFoundError(err) {
 			return false, nil
 		}
 		return false, err
@@ -930,8 +942,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 				return
 			}
 			if delErr != nil {
-				errLower := strings.ToLower(delErr.Error())
-				if !strings.Contains(errLower, "not found") && !strings.Contains(errLower, "notfound") && !strings.Contains(delErr.Error(), "404") {
+				if !isNotFoundError(delErr) {
 					unlockErr = fmt.Errorf("failed to release lock: %w", delErr)
 					return
 				}

@@ -950,6 +950,7 @@ func TestSpannerCleanSchema_SearchVectorIndexAndPropertyGraph(t *testing.T) {
 		"CREATE INDEX `UsersByEmail` ON `Users`(`Email`)",
 		"CREATE SEARCH INDEX `AlbumsSearchIndex` ON `Albums`(`Title`)",
 		"CREATE VECTOR INDEX `SingerVectorIndex` ON `Singers`(`Embedding`)",
+		"CREATE VIEW `AccountSummary` SQL SECURITY INVOKER AS SELECT `Id` FROM `Accounts`",
 		"CREATE PROPERTY GRAPH `FinGraph` NODE TABLES (`Accounts`)",
 	}
 
@@ -964,6 +965,9 @@ func TestSpannerCleanSchema_SearchVectorIndexAndPropertyGraph(t *testing.T) {
 	if len(objs.indexes) != 1 || objs.indexes[0] != "UsersByEmail" {
 		t.Errorf("expected standard index 'UsersByEmail', got %v", objs.indexes)
 	}
+	if len(objs.views) != 1 || objs.views[0] != "AccountSummary" {
+		t.Errorf("expected view 'AccountSummary', got %v", objs.views)
+	}
 	if len(objs.propertyGraphs) != 1 || objs.propertyGraphs[0] != "FinGraph" {
 		t.Errorf("expected propertyGraph 'FinGraph', got %v", objs.propertyGraphs)
 	}
@@ -976,17 +980,21 @@ func TestSpannerCleanSchema_SearchVectorIndexAndPropertyGraph(t *testing.T) {
 		"DROP VECTOR INDEX `SingerVectorIndex`": false,
 		"DROP INDEX `UsersByEmail`":             false,
 		"DROP PROPERTY GRAPH `FinGraph`":        false,
+		"DROP VIEW `AccountSummary`":            false,
 		"DROP TABLE `Accounts`":                 false,
 		"DROP TABLE `Users`":                    false,
 	}
 
-	var graphDropPos, accountsDropPos int = -1, -1
+	var graphDropPos, viewDropPos, accountsDropPos int = -1, -1, -1
 	for idx, s := range stmts {
 		if _, ok := expectedDrops[s]; ok {
 			expectedDrops[s] = true
 		}
 		if s == "DROP PROPERTY GRAPH `FinGraph`" {
 			graphDropPos = idx
+		}
+		if s == "DROP VIEW `AccountSummary`" {
+			viewDropPos = idx
 		}
 		if s == "DROP TABLE `Accounts`" {
 			accountsDropPos = idx
@@ -999,8 +1007,35 @@ func TestSpannerCleanSchema_SearchVectorIndexAndPropertyGraph(t *testing.T) {
 		}
 	}
 
+	if graphDropPos == -1 || viewDropPos == -1 || graphDropPos >= viewDropPos {
+		t.Errorf("expected DROP PROPERTY GRAPH before DROP VIEW, got graph pos %d, view pos %d", graphDropPos, viewDropPos)
+	}
 	if graphDropPos == -1 || accountsDropPos == -1 || graphDropPos >= accountsDropPos {
 		t.Errorf("expected DROP PROPERTY GRAPH before DROP TABLE, got graph pos %d, table pos %d", graphDropPos, accountsDropPos)
+	}
+}
+
+func TestSpannerUnlock_WhenTableDropped_SucceedsWithoutError(t *testing.T) {
+	_, db := setupSpannerTestDB(t)
+	ctx := context.Background()
+
+	if err := db.EnsureHistoryTable(ctx, "", "flyway_schema_history"); err != nil {
+		t.Fatalf("EnsureHistoryTable failed: %v", err)
+	}
+
+	unlock, err := db.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+
+	// Drop schema including the history table
+	if err := db.CleanSchema(ctx, ""); err != nil {
+		t.Fatalf("CleanSchema failed: %v", err)
+	}
+
+	// Unlock must safely ignore codes.NotFound from the dropped table
+	if err := unlock(ctx); err != nil {
+		t.Fatalf("expected unlock to succeed when table dropped, got error: %v", err)
 	}
 }
 

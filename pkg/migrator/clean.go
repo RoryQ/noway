@@ -3,9 +3,6 @@ package migrator
 import (
 	"context"
 	"fmt"
-	"strings"
-
-	"github.com/roryq/noway/pkg/database"
 )
 
 // CleanResult contains the clean operation summary matching Flyway's output schema.
@@ -19,7 +16,7 @@ type CleanResult struct {
 }
 
 // Clean drops all objects (tables, views, materialized views, routines) in the configured schemas.
-func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
+func (m *Migrator) Clean(ctx context.Context) (res *CleanResult, retErr error) {
 	if m.config.CleanDisabled {
 		return nil, fmt.Errorf("clean failed: flyway.cleanDisabled is set to true. Set cleanDisabled=false in config or -cleanDisabled=false on CLI to enable clean")
 	}
@@ -35,52 +32,21 @@ func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
 		return nil, fmt.Errorf("failed checking history table: %w", err)
 	}
 
-	var unlock database.UnlockFunc
 	if exists {
-		unlock, err = m.db.Lock(ctx, defaultSchema, table)
+		unlock, err := m.db.Lock(ctx, defaultSchema, table)
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterCleanError")
 			return nil, fmt.Errorf("failed to acquire database lock for clean: %w", err)
 		}
 		defer func() {
-			if unlock != nil {
-				if uErr := unlock(context.Background()); uErr != nil {
-					_ = uErr // safely ignored
-				}
+			if uErr := unlock(context.Background()); uErr != nil && retErr == nil {
+				_ = m.callbackRunner.Fire(ctx, "afterCleanError")
+				retErr = uErr
 			}
 		}()
 	}
 
-	res, err := m.cleanInternal(ctx, "", true)
-	if unlock != nil {
-		u := unlock
-		unlock = nil
-		if uErr := u(context.Background()); uErr != nil {
-			if !isTableNotExistError(uErr) {
-				_ = m.callbackRunner.Fire(ctx, "afterCleanError")
-				return nil, uErr
-			}
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	return res, nil
-}
-
-func isTableNotExistError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errLower := strings.ToLower(err.Error())
-	return strings.Contains(errLower, "not found") ||
-		strings.Contains(errLower, "notfound") ||
-		strings.Contains(errLower, "404") ||
-		strings.Contains(errLower, "does not exist") ||
-		strings.Contains(errLower, "doesn't exist") ||
-		strings.Contains(errLower, "table not found") ||
-		strings.Contains(errLower, "lock row missing")
+	return m.cleanInternal(ctx, "", true)
 }
 
 // cleanInternal cleans the schemas, optionally preserving a specified table (e.g. the schema history table to retain the active lock).

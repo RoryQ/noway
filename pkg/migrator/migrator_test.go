@@ -1645,7 +1645,7 @@ func (u *unlockCheckMockDB) Lock(ctx context.Context, schema, table string) (dat
 	}, nil
 }
 
-func TestStandaloneClean_CallsUnlockAndIgnoresTableNotExistDeleteError(t *testing.T) {
+func TestStandaloneClean_CallsUnlock(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.NewDefaultConfiguration()
 	cfg.DefaultSchema = "test_ds"
@@ -1657,7 +1657,6 @@ func TestStandaloneClean_CallsUnlockAndIgnoresTableNotExistDeleteError(t *testin
 
 	wrapped := &unlockCheckMockDB{
 		MockDatabase: baseDB,
-		failOnUnlock: fmt.Errorf("failed to release lock: googleapi: Error 404: Not found: Table test_ds.flyway_schema_history"),
 	}
 
 	m, err := New(cfg, wrapped)
@@ -1674,6 +1673,35 @@ func TestStandaloneClean_CallsUnlockAndIgnoresTableNotExistDeleteError(t *testin
 	}
 	if len(res.SchemasCleaned) != 1 {
 		t.Errorf("expected 1 schema cleaned, got %d", len(res.SchemasCleaned))
+	}
+}
+
+func TestStandaloneClean_PropagatesUnlockError(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.CleanDisabled = false
+
+	baseDB := mock.NewMockDatabase()
+	_ = baseDB.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+
+	expectedErr := fmt.Errorf("lock heartbeat failed: lock lost")
+	wrapped := &unlockCheckMockDB{
+		MockDatabase: baseDB,
+		failOnUnlock: expectedErr,
+	}
+
+	m, err := New(cfg, wrapped)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+
+	_, err = m.Clean(ctx)
+	if err == nil || !strings.Contains(err.Error(), "lock heartbeat failed") {
+		t.Fatalf("expected unlock error to be propagated by Clean, got %v", err)
+	}
+	if !wrapped.unlockCalled {
+		t.Errorf("expected unlock to be called by Clean")
 	}
 }
 
