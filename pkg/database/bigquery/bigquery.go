@@ -44,8 +44,8 @@ func isNotFoundError(err error) bool {
 }
 
 // isConflictError checks if an error represents an Already Exists / Conflict (HTTP 409 or gRPC AlreadyExists) condition.
-// It uses structured error inspection (errors.As for *googleapi.Error and status.Code for gRPC)
-// rather than substring matching "409", avoiding false positives when query job UUIDs or project numbers contain "409".
+// It uses structured error inspection (errors.As for *googleapi.Error, status.Code for gRPC, and bigquery.Error{Reason: "duplicate"})
+// rather than substring matching, avoiding false positives on SQL syntax errors (e.g. duplicate column) or project IDs.
 func isConflictError(err error) bool {
 	if err == nil {
 		return false
@@ -57,8 +57,11 @@ func isConflictError(err error) bool {
 	if status.Code(err) == codes.AlreadyExists {
 		return true
 	}
-	errLower := strings.ToLower(err.Error())
-	return strings.Contains(errLower, "already exists") || strings.Contains(errLower, "duplicate")
+	var bqErr *bigquery.Error
+	if errors.As(err, &bqErr) && bqErr.Reason == "duplicate" {
+		return true
+	}
+	return false
 }
 
 var (

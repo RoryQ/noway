@@ -2314,5 +2314,43 @@ func TestBigQueryDatabase_DefaultDatasetHelper(t *testing.T) {
 	}
 }
 
+func TestIsConflictError(t *testing.T) {
+	// 1. nil error
+	if isConflictError(nil) {
+		t.Errorf("expected false for nil error")
+	}
+
+	// 2. HTTP 409 Conflict googleapi.Error
+	gErr := &googleapi.Error{Code: http.StatusConflict, Message: "Conflict"}
+	if !isConflictError(gErr) {
+		t.Errorf("expected true for HTTP 409 googleapi.Error")
+	}
+
+	// 3. gRPC AlreadyExists error
+	grpcErr := status.Error(codes.AlreadyExists, "table already exists")
+	if !isConflictError(grpcErr) {
+		t.Errorf("expected true for gRPC AlreadyExists")
+	}
+
+	// 4. bigquery.Error with Reason: "duplicate"
+	bqDuplicateErr := &bigquery.Error{Reason: "duplicate", Message: "Already Exists: Table test:ds.t"}
+	if !isConflictError(bqDuplicateErr) {
+		t.Errorf("expected true for bigquery.Error with Reason duplicate")
+	}
+
+	// 5. Arbitrary error containing "duplicate" in text (e.g. SQL syntax error) MUST NOT be treated as conflict
+	sqlSyntaxErr := errors.New("Duplicate column name 'id' in query")
+	if isConflictError(sqlSyntaxErr) {
+		t.Errorf("expected false for arbitrary error containing 'duplicate', got true")
+	}
+
+	// 6. Arbitrary error containing "already exists" in text MUST NOT be treated as conflict
+	otherErr := errors.New("something already exists in some other context")
+	if isConflictError(otherErr) {
+		t.Errorf("expected false for arbitrary text containing 'already exists', got true")
+	}
+}
+
+
 
 
