@@ -513,4 +513,54 @@ user = "prod_user"
 	}
 }
 
+func TestKnownUnsupportedFlywayKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	confPath := filepath.Join(tmpDir, "flyway.conf")
+	confContent := `
+flyway.reportEnabled=false
+flyway.connectRetriesInterval=10
+flyway.callbacks=com.example.Callback
+flyway.skipDefaultCallbacks=true
+flyway.jdbcProperties.ApplicationName=MyApp
+flyway.plugins.myplugin=active
+`
+	if err := os.WriteFile(confPath, []byte(confContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFromFile(confPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile should succeed for known unsupported Flyway keys, got error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatalf("expected non-nil config")
+	}
+
+	// Bogus key should fail with unknown property error
+	badConf := filepath.Join(tmpDir, "bad.conf")
+	_ = os.WriteFile(badConf, []byte("flyway.totallyBogusKey=123\n"), 0644)
+	_, err = LoadFromFile(badConf)
+	if err == nil || !strings.Contains(err.Error(), "Unknown configuration property") {
+		t.Fatalf("expected unknown property error for totallyBogusKey, got: %v", err)
+	}
+
+	// Unknown key in [environments.<name>] should log warning and not fail
+	tomlPath := filepath.Join(tmpDir, "env.toml")
+	tomlContent := `
+[environments.default]
+url = "jdbc:bigquery:;ProjectId=p;DefaultDataset=d;"
+customEnvProp = "custom"
+`
+	_ = os.WriteFile(tomlPath, []byte(tomlContent), 0644)
+	cfgEnv, err := LoadFromFile(tomlPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile should succeed for unknown key in environment, got error: %v", err)
+	}
+	_ = cfgEnv.Finalize()
+	if cfgEnv.GCPDataset != "d" {
+		t.Errorf("expected dataset 'd', got %q", cfgEnv.GCPDataset)
+	}
+}
+
+
 

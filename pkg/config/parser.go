@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -431,13 +432,14 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 			return fmt.Errorf("environment '%s' not found in config", targetEnv)
 		}
 	} else {
-		// Apply environment properties
+		// Apply environment properties (Flyway only warns for unknown keys inside environments)
 		for k, v := range envObj {
 			if strings.EqualFold(k, "flyway") {
 				continue
 			}
 			if err := applyAnyValue(cfg, k, v); err != nil {
-				return err
+				log.Printf("WARNING: %v", err)
+				continue
 			}
 		}
 		// Apply nested [environments.<env>.flyway]
@@ -446,7 +448,8 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 				if envFlywayMap, ok := v.(map[string]any); ok {
 					for fk, fv := range envFlywayMap {
 						if err := applyAnyValue(cfg, fk, fv); err != nil {
-							return err
+							log.Printf("WARNING: %v", err)
+							continue
 						}
 					}
 				}
@@ -1054,9 +1057,49 @@ func applyProperty(cfg *Configuration, key, val string) error {
 			cfg.Placeholders[phKey] = val
 			return nil
 		}
+		if strings.HasPrefix(cleanKeyLower, "jdbcproperties.") || strings.HasPrefix(cleanKeyLower, "plugins.") || strings.HasPrefix(cleanKeyLower, "configurations.") {
+			log.Printf("WARNING: %s is not supported by noway and is ignored", key)
+			return nil
+		}
+		normKey := strings.ReplaceAll(strings.ReplaceAll(cleanKeyLower, "-", ""), "_", "")
+		if unsupportedFlywayKeys[normKey] {
+			log.Printf("WARNING: %s is not supported by noway and is ignored", key)
+			return nil
+		}
 		return UnknownPropertyError(cleanKey)
 	}
 	return nil
+}
+
+// unsupportedFlywayKeys lists known Flyway keys that noway does not currently support.
+// When present in configuration, noway logs a warning and ignores them rather than failing.
+var unsupportedFlywayKeys = map[string]bool{
+	"callbacks":                 true,
+	"callbacklocations":         true,
+	"skipdefaultcallbacks":      true,
+	"resolvers":                 true,
+	"skipdefaultresolvers":      true,
+	"erroroverrides":            true,
+	"outputqueryresults":        true,
+	"outputlogsinjson":          true,
+	"outputprogress":            true,
+	"kerberosconfigfile":        true,
+	"executeintransaction":      true,
+	"detectencoding":            true,
+	"configfileencoding":        true,
+	"reportenabled":             true,
+	"reportfilename":            true,
+	"communitydbsupportenabled": true,
+	"connectretriesinterval":    true,
+	"initsql":                   true,
+	"jardirs":                   true,
+	"licensekey":                true,
+	"loggers":                   true,
+	"powershellexecutable":      true,
+	"stream":                    true,
+	"tablespace":                true,
+	"workingdirectory":          true,
+	"ignoreignoredmigrations":   true,
 }
 
 func splitAndTrim(s, sep string) []string {
@@ -1101,6 +1144,7 @@ var KnownProperties = []string{
 	"cleanOnValidationError",
 	"ignoreFutureMigrations",
 	"ignoreMissingMigrations",
+	"ignoreIgnoredMigrations",
 	"ignorePendingMigrations",
 	"ignoreMigrationPatterns",
 	"skipExecutingMigrations",
@@ -1117,6 +1161,8 @@ var KnownProperties = []string{
 	"placeholderPrefix",
 	"placeholderSuffix",
 	"placeholderSeparator",
+	"scriptPlaceholderPrefix",
+	"scriptPlaceholderSuffix",
 	"sqlMigrationPrefix",
 	"repeatableSqlMigrationPrefix",
 	"undoSqlMigrationPrefix",
@@ -1127,13 +1173,38 @@ var KnownProperties = []string{
 	"group",
 	"batch",
 	"connectRetries",
+	"connectRetriesInterval",
 	"lockRetryCount",
 	"createSchemas",
 	"environment",
 	"configFile",
 	"configFiles",
+	"configFileEncoding",
 	"outputType",
 	"dryRunOutput",
+	"callbacks",
+	"callbackLocations",
+	"skipDefaultCallbacks",
+	"resolvers",
+	"skipDefaultResolvers",
+	"errorOverrides",
+	"outputQueryResults",
+	"outputLogsInJson",
+	"outputProgress",
+	"kerberosConfigFile",
+	"executeInTransaction",
+	"detectEncoding",
+	"reportEnabled",
+	"reportFilename",
+	"communityDBSupportEnabled",
+	"initSql",
+	"jarDirs",
+	"licenseKey",
+	"loggers",
+	"powershellExecutable",
+	"stream",
+	"tablespace",
+	"workingDirectory",
 	"oauthType",
 	"oauthAccessToken",
 	"oauthPvtKeyPath",
