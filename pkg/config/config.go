@@ -65,11 +65,13 @@ type Configuration struct {
 	WorkingDirectory          string   `json:"workingDirectory" yaml:"workingDirectory" toml:"workingDirectory"`
 
 	// Placeholder replacement
-	PlaceholderReplacement bool              `json:"placeholderReplacement" yaml:"placeholderReplacement" toml:"placeholderReplacement"` // default: true
-	PlaceholderPrefix      string            `json:"placeholderPrefix" yaml:"placeholderPrefix" toml:"placeholderPrefix"`                 // default: ${
-	PlaceholderSuffix      string            `json:"placeholderSuffix" yaml:"placeholderSuffix" toml:"placeholderSuffix"`                 // default: }
-	PlaceholderSeparator   string            `json:"placeholderSeparator" yaml:"placeholderSeparator" toml:"placeholderSeparator"`       // default: :
-	Placeholders           map[string]string `json:"placeholders" yaml:"placeholders" toml:"placeholders"`
+	PlaceholderReplacement  bool              `json:"placeholderReplacement" yaml:"placeholderReplacement" toml:"placeholderReplacement"` // default: true
+	PlaceholderPrefix       string            `json:"placeholderPrefix" yaml:"placeholderPrefix" toml:"placeholderPrefix"`                 // default: ${
+	PlaceholderSuffix       string            `json:"placeholderSuffix" yaml:"placeholderSuffix" toml:"placeholderSuffix"`                 // default: }
+	PlaceholderSeparator    string            `json:"placeholderSeparator" yaml:"placeholderSeparator" toml:"placeholderSeparator"`       // default: :
+	ScriptPlaceholderPrefix string            `json:"scriptPlaceholderPrefix" yaml:"scriptPlaceholderPrefix" toml:"scriptPlaceholderPrefix"` // default: FP__
+	ScriptPlaceholderSuffix string            `json:"scriptPlaceholderSuffix" yaml:"scriptPlaceholderSuffix" toml:"scriptPlaceholderSuffix"` // default: __
+	Placeholders            map[string]string `json:"placeholders" yaml:"placeholders" toml:"placeholders"`
 
 	// Execution & Validation Control
 	Target                  string           `json:"target" yaml:"target" toml:"target"`                                                 // default: latest
@@ -143,6 +145,8 @@ func NewDefaultConfiguration() *Configuration {
 		PlaceholderPrefix:            "${",
 		PlaceholderSuffix:            "}",
 		PlaceholderSeparator:         ":",
+		ScriptPlaceholderPrefix:      "FP__",
+		ScriptPlaceholderSuffix:      "__",
 		Placeholders:                 make(map[string]string),
 		Target:                       "latest",
 		OutOfOrder:                   false,
@@ -344,6 +348,13 @@ func (c *Configuration) Finalize() error {
 				c.Locations[i] = prefix + filepath.Join(c.WorkingDirectory, p)
 			}
 		}
+	}
+
+	if c.ScriptPlaceholderPrefix == "" {
+		c.ScriptPlaceholderPrefix = "FP__"
+	}
+	if c.ScriptPlaceholderSuffix == "" {
+		c.ScriptPlaceholderSuffix = "__"
 	}
 
 	return nil

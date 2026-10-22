@@ -86,11 +86,13 @@ func New(in *config.Configuration, db database.Database) (*Migrator, error) {
 
 	bqParser := parser.NewBigQueryParser()
 	replacer := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
-		Enabled:   cfg.PlaceholderReplacement,
-		Prefix:    cfg.PlaceholderPrefix,
-		Suffix:    cfg.PlaceholderSuffix,
-		Separator: cfg.PlaceholderSeparator,
-		Values:    cfg.Placeholders,
+		Enabled:        cfg.PlaceholderReplacement,
+		Prefix:         cfg.PlaceholderPrefix,
+		Suffix:         cfg.PlaceholderSuffix,
+		Separator:      cfg.PlaceholderSeparator,
+		Values:         cfg.Placeholders,
+		ScriptPrefix:   cfg.ScriptPlaceholderPrefix,
+		ScriptSuffix:   cfg.ScriptPlaceholderSuffix,
 	})
 
 	defaultSchema := cfg.GetDefaultSchema()
@@ -108,6 +110,7 @@ func New(in *config.Configuration, db database.Database) (*Migrator, error) {
 		Database:      cfg.GCPProjectID,
 		User:          user,
 		Timestamp:     time.Now(),
+		Environment:   cfg.Environment,
 	}
 
 	res := resolver.NewResolver(resolver.ResolverConfig{
@@ -967,54 +970,84 @@ func (m *Migrator) executeScriptMigration(
 	}
 
 	env := os.Environ()
-	env = append(env,
-		"FLYWAY_DATABASE="+schema,
-		"NOWAY_DATABASE="+schema,
-		"FLYWAY_USER="+user,
-		"NOWAY_USER="+user,
-		"FLYWAY_DEFAULT_SCHEMA="+schema,
-		"NOWAY_DEFAULT_SCHEMA="+schema,
-		"FLYWAY_SCHEMAS="+strings.Join(m.config.Schemas, ","),
-		"NOWAY_SCHEMAS="+strings.Join(m.config.Schemas, ","),
-		"FLYWAY_TABLE="+table,
-		"NOWAY_TABLE="+table,
-		"FLYWAY_TYPE=SCRIPT",
-		"NOWAY_TYPE=SCRIPT",
-		"FLYWAY_SCRIPT="+mig.Script,
-		"NOWAY_SCRIPT="+mig.Script,
-		"FLYWAY_DESCRIPTION="+mig.Description,
-		"NOWAY_DESCRIPTION="+mig.Description,
-		"FLYWAY_GCP_PROJECT_ID="+m.config.GCPProjectID,
-		"NOWAY_GCP_PROJECT_ID="+m.config.GCPProjectID,
-		"FLYWAY_GCP_DATASET="+m.config.GCPDataset,
-		"NOWAY_GCP_DATASET="+m.config.GCPDataset,
-		"FLYWAY_GCP_LOCATION="+m.config.GCPLocation,
-		"NOWAY_GCP_LOCATION="+m.config.GCPLocation,
-		"FLYWAY_BIGQUERY_ENDPOINT="+m.config.GCPBigQueryEndpoint,
-		"NOWAY_BIGQUERY_ENDPOINT="+m.config.GCPBigQueryEndpoint,
-		"FP__flyway_defaultSchema__="+schema,
-		"FP__flyway_table__="+table,
-		"FP__flyway_user__="+user,
-		"FP__flyway_database__="+schema,
-		"FP__flyway_filename__="+filepath.Base(mig.Script),
-	)
-	if m.builtins.WorkingDirectory != "" {
-		env = append(env, "FP__flyway_workingDirectory__="+m.builtins.WorkingDirectory)
-	} else if wd, err := os.Getwd(); err == nil {
-		env = append(env, "FP__flyway_workingDirectory__="+wd)
+	setIfNotEmpty := func(k, v string) {
+		if v != "" {
+			env = append(env, k+"="+v)
+		}
 	}
+
+	setIfNotEmpty("FLYWAY_URL", m.config.URL)
+	setIfNotEmpty("NOWAY_URL", m.config.URL)
+
+	userIfKnown := m.config.User
+	if userIfKnown == "" && m.config.InstalledBy != "" {
+		userIfKnown = m.config.InstalledBy
+	} else if userIfKnown == "" && user != "flyway" && user != "" {
+		userIfKnown = user
+	}
+	setIfNotEmpty("FLYWAY_USER", userIfKnown)
+	setIfNotEmpty("NOWAY_USER", userIfKnown)
+	setIfNotEmpty("FLYWAY_PASSWORD", m.config.Password)
+	setIfNotEmpty("NOWAY_PASSWORD", m.config.Password)
+
+	setIfNotEmpty("FLYWAY_DATABASE", schema)
+	setIfNotEmpty("NOWAY_DATABASE", schema)
+	setIfNotEmpty("FLYWAY_DEFAULT_SCHEMA", schema)
+	setIfNotEmpty("NOWAY_DEFAULT_SCHEMA", schema)
+	setIfNotEmpty("FLYWAY_SCHEMAS", strings.Join(m.config.Schemas, ","))
+	setIfNotEmpty("NOWAY_SCHEMAS", strings.Join(m.config.Schemas, ","))
+	setIfNotEmpty("FLYWAY_TABLE", table)
+	setIfNotEmpty("NOWAY_TABLE", table)
+	setIfNotEmpty("FLYWAY_TYPE", "SCRIPT")
+	setIfNotEmpty("NOWAY_TYPE", "SCRIPT")
+	setIfNotEmpty("FLYWAY_SCRIPT", mig.Script)
+	setIfNotEmpty("NOWAY_SCRIPT", mig.Script)
+	setIfNotEmpty("FLYWAY_DESCRIPTION", mig.Description)
+	setIfNotEmpty("NOWAY_DESCRIPTION", mig.Description)
+	setIfNotEmpty("FLYWAY_GCP_PROJECT_ID", m.config.GCPProjectID)
+	setIfNotEmpty("NOWAY_GCP_PROJECT_ID", m.config.GCPProjectID)
+	setIfNotEmpty("FLYWAY_GCP_DATASET", m.config.GCPDataset)
+	setIfNotEmpty("NOWAY_GCP_DATASET", m.config.GCPDataset)
+	setIfNotEmpty("FLYWAY_GCP_LOCATION", m.config.GCPLocation)
+	setIfNotEmpty("NOWAY_GCP_LOCATION", m.config.GCPLocation)
+	setIfNotEmpty("FLYWAY_BIGQUERY_ENDPOINT", m.config.GCPBigQueryEndpoint)
+	setIfNotEmpty("NOWAY_BIGQUERY_ENDPOINT", m.config.GCPBigQueryEndpoint)
+
+	scriptPfx := m.config.ScriptPlaceholderPrefix
+	if scriptPfx == "" {
+		scriptPfx = "FP__"
+	}
+	scriptSfx := m.config.ScriptPlaceholderSuffix
+	if scriptSfx == "" {
+		scriptSfx = "__"
+	}
+
+	setIfNotEmpty(scriptPfx+"flyway_defaultSchema"+scriptSfx, schema)
+	setIfNotEmpty(scriptPfx+"flyway_table"+scriptSfx, table)
+	setIfNotEmpty(scriptPfx+"flyway_user"+scriptSfx, userIfKnown)
+	setIfNotEmpty(scriptPfx+"flyway_database"+scriptSfx, schema)
+	setIfNotEmpty(scriptPfx+"flyway_filename"+scriptSfx, filepath.Base(mig.Script))
+
+	wd := m.builtins.WorkingDirectory
+	if wd == "" {
+		if getwd, err := os.Getwd(); err == nil {
+			wd = getwd
+		}
+	}
+	setIfNotEmpty(scriptPfx+"flyway_workingDirectory"+scriptSfx, wd)
+
 	if !m.builtins.Timestamp.IsZero() {
-		env = append(env, "FP__flyway_timestamp__="+m.builtins.Timestamp.Format("2006-01-02 15:04:05"))
+		setIfNotEmpty(scriptPfx+"flyway_timestamp"+scriptSfx, m.builtins.Timestamp.Format("2006-01-02 15:04:05"))
 	}
+	setIfNotEmpty(scriptPfx+"flyway_environment"+scriptSfx, m.config.Environment)
+
 	if mig.Version != nil {
-		env = append(env,
-			"FLYWAY_VERSION="+mig.Version.String(),
-			"NOWAY_VERSION="+mig.Version.String(),
-		)
+		setIfNotEmpty("FLYWAY_VERSION", mig.Version.String())
+		setIfNotEmpty("NOWAY_VERSION", mig.Version.String())
 	}
 	for k, v := range m.config.Placeholders {
 		cleanK := strings.ReplaceAll(k, ":", "_")
-		env = append(env, "FP__"+cleanK+"__="+v)
+		setIfNotEmpty(scriptPfx+cleanK+scriptSfx, v)
 	}
 	cmd.Env = env
 

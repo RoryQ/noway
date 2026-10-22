@@ -280,3 +280,28 @@ func TestScriptReplacer_NoEscapesAndChecksum(t *testing.T) {
 	}
 }
 
+func TestScriptReplacer_CustomPrefixSuffixAndEnvironment(t *testing.T) {
+	cfg := PlaceholderConfig{
+		Enabled:      true,
+		Prefix:       "${",
+		Suffix:       "}",
+		ScriptPrefix: "CUSTOM__",
+		ScriptSuffix: "__END",
+		Values: map[string]string{
+			"db_host": "localhost",
+		},
+	}
+	replacer := NewPlaceholderReplacer(cfg)
+	scriptReplacer := replacer.ScriptReplacer()
+
+	scriptInput := "HOST=CUSTOM__db_host__END ENV=CUSTOM__flyway_environment__END"
+	res, err := scriptReplacer.Replace(scriptInput, BuiltinPlaceholders{Environment: "production"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := "HOST=localhost ENV=production"
+	if res != expected {
+		t.Fatalf("expected %q, got %q", expected, res)
+	}
+}
+

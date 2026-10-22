@@ -16,16 +16,20 @@ type PlaceholderConfig struct {
 	Values         map[string]string
 	DisableEscapes bool
 	ScriptMode     bool
+	ScriptPrefix   string
+	ScriptSuffix   string
 }
 
 // DefaultPlaceholderConfig returns the standard Flyway placeholder settings.
 func DefaultPlaceholderConfig() PlaceholderConfig {
 	return PlaceholderConfig{
-		Enabled:   true,
-		Prefix:    "${",
-		Suffix:    "}",
-		Separator: ":",
-		Values:    make(map[string]string),
+		Enabled:      true,
+		Prefix:       "${",
+		Suffix:       "}",
+		Separator:    ":",
+		ScriptPrefix: "FP__",
+		ScriptSuffix: "__",
+		Values:       make(map[string]string),
 	}
 }
 
@@ -45,6 +49,12 @@ func NewPlaceholderReplacer(cfg PlaceholderConfig) *PlaceholderReplacer {
 	if cfg.Separator == "" {
 		cfg.Separator = ":"
 	}
+	if cfg.ScriptPrefix == "" {
+		cfg.ScriptPrefix = "FP__"
+	}
+	if cfg.ScriptSuffix == "" {
+		cfg.ScriptSuffix = "__"
+	}
 	if cfg.Values == nil {
 		cfg.Values = make(map[string]string)
 	}
@@ -57,14 +67,24 @@ func (p *PlaceholderReplacer) ScriptReplacer() *PlaceholderReplacer {
 	for k, v := range p.config.Values {
 		scriptValues[strings.ReplaceAll(k, ":", "_")] = v
 	}
+	sPrefix := p.config.ScriptPrefix
+	if sPrefix == "" {
+		sPrefix = "FP__"
+	}
+	sSuffix := p.config.ScriptSuffix
+	if sSuffix == "" {
+		sSuffix = "__"
+	}
 	cfg := PlaceholderConfig{
 		Enabled:        p.config.Enabled,
-		Prefix:         "FP__",
-		Suffix:         "__",
+		Prefix:         sPrefix,
+		Suffix:         sSuffix,
 		Separator:      "",
 		Values:         scriptValues,
 		DisableEscapes: true,
 		ScriptMode:     true,
+		ScriptPrefix:   sPrefix,
+		ScriptSuffix:   sSuffix,
 	}
 	return NewPlaceholderReplacer(cfg)
 }

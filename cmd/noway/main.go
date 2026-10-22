@@ -415,6 +415,10 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.PlaceholderSuffix = val
 		case "placeholderseparator", "placeholder-separator", "placeholder_separator":
 			cfg.PlaceholderSeparator = val
+		case "scriptplaceholderprefix", "script-placeholder-prefix", "script_placeholder_prefix":
+			cfg.ScriptPlaceholderPrefix = val
+		case "scriptplaceholdersuffix", "script-placeholder-suffix", "script_placeholder_suffix":
+			cfg.ScriptPlaceholderSuffix = val
 		case "sqlmigrationprefix", "sql-migration-prefix", "sql_migration_prefix":
 			cfg.SQLMigrationPrefix = val
 		case "repeatablesqlmigrationprefix", "repeatable-sql-migration-prefix", "repeatable_sql_migration_prefix":

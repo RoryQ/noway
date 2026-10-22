@@ -463,5 +463,90 @@ func TestMigrate_ValidateOnMigrate_PreservesMigrateOperation(t *testing.T) {
 	}
 }
 
+func TestScriptMigration_EnvironmentVariables(t *testing.T) {
+	ctx := context.Background()
+	db := mock.NewMockDatabase()
+	tmpDir := t.TempDir()
+
+	outFile := filepath.Join(tmpDir, "script_env.txt")
+	scriptFile := filepath.Join(tmpDir, "V1__script.sh")
+	scriptContent := fmt.Sprintf(`#!/bin/bash
+echo "URL=$FLYWAY_URL" > %s
+echo "PWD=$FLYWAY_PASSWORD" >> %s
+echo "USER=$FLYWAY_USER" >> %s
+echo "APP=$MY_PFX_app_id_MY_SFX" >> %s
+echo "ENV=$MY_PFX_flyway_environment_MY_SFX" >> %s
+exit 0
+`, outFile, outFile, outFile, outFile, outFile)
+	_ = os.WriteFile(scriptFile, []byte(scriptContent), 0755)
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.Locations = []string{tmpDir}
+	cfg.URL = "jdbc:spanner://localhost/projects/p/instances/i/databases/d"
+	cfg.Password = "secretpass"
+	cfg.User = "custom_user"
+	cfg.Environment = "staging"
+	cfg.ScriptPlaceholderPrefix = "MY_PFX_"
+	cfg.ScriptPlaceholderSuffix = "_MY_SFX"
+	cfg.Placeholders = map[string]string{
+		"app_id": "12345",
+	}
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	_, err = m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	outData, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	content := string(outData)
+	if !strings.Contains(content, "URL=jdbc:spanner://localhost/projects/p/instances/i/databases/d") {
+		t.Errorf("expected FLYWAY_URL in script env, got: %s", content)
+	}
+	if !strings.Contains(content, "PWD=secretpass") {
+		t.Errorf("expected FLYWAY_PASSWORD in script env, got: %s", content)
+	}
+	if !strings.Contains(content, "USER=custom_user") {
+		t.Errorf("expected FLYWAY_USER=custom_user in script env, got: %s", content)
+	}
+	if !strings.Contains(content, "APP=12345") {
+		t.Errorf("expected custom script placeholder in script env, got: %s", content)
+	}
+	if !strings.Contains(content, "ENV=staging") {
+		t.Errorf("expected flyway_environment in script env, got: %s", content)
+	}
+
+	// Also verify that when User is not set, FLYWAY_USER does NOT fall back to "flyway"
+	outFileNoUser := filepath.Join(tmpDir, "script_nouser.txt")
+	scriptFile2 := filepath.Join(tmpDir, "V2__nouser.sh")
+	scriptContent2 := fmt.Sprintf("#!/bin/bash\necho \"USER=${FLYWAY_USER:-none}\" > %s\nexit 0\n", outFileNoUser)
+	_ = os.WriteFile(scriptFile2, []byte(scriptContent2), 0755)
+
+	cfg2 := config.NewDefaultConfiguration()
+	cfg2.DefaultSchema = "test_ds"
+	cfg2.Locations = []string{tmpDir}
+	m2, err := New(cfg2, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+	_, err = m2.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("second Migrate failed: %v", err)
+	}
+	outData2, _ := os.ReadFile(outFileNoUser)
+	if strings.Contains(string(outData2), "USER=flyway") {
+		t.Errorf("expected FLYWAY_USER not to default to 'flyway' when unknown, got: %s", string(outData2))
+	}
+}
+
+
 
 

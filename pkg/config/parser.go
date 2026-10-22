@@ -642,6 +642,10 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 		cfg.PlaceholderSuffix = val
 	case "PLACEHOLDER_SEPARATOR", "PLACEHOLDERSEPARATOR":
 		cfg.PlaceholderSeparator = val
+	case "SCRIPT_PLACEHOLDER_PREFIX", "SCRIPTPLACEHOLDERPREFIX":
+		cfg.ScriptPlaceholderPrefix = val
+	case "SCRIPT_PLACEHOLDER_SUFFIX", "SCRIPTPLACEHOLDERSUFFIX":
+		cfg.ScriptPlaceholderSuffix = val
 	case "TARGET":
 		cfg.Target = val
 	case "OUT_OF_ORDER", "OUTOFORDER":
@@ -908,6 +912,10 @@ func applyProperty(cfg *Configuration, key, val string) error {
 		cfg.PlaceholderSuffix = val
 	case "placeholderseparator", "placeholder.separator", "placeholder_separator", "placeholder-separator":
 		cfg.PlaceholderSeparator = val
+	case "scriptplaceholderprefix", "script.placeholder.prefix", "script_placeholder_prefix", "script-placeholder-prefix":
+		cfg.ScriptPlaceholderPrefix = val
+	case "scriptplaceholdersuffix", "script.placeholder.suffix", "script_placeholder_suffix", "script-placeholder-suffix":
+		cfg.ScriptPlaceholderSuffix = val
 	case "target":
 		cfg.Target = val
 	case "outoforder", "out_of_order", "out-of-order":

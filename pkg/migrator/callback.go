@@ -178,55 +178,81 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		}
 	}
 
-	cbUser := c.builtins.User
-	if cbUser == "" {
-		cbUser = "flyway"
+	cbUserIfKnown := c.config.User
+	if cbUserIfKnown == "" && c.config.InstalledBy != "" {
+		cbUserIfKnown = c.config.InstalledBy
+	} else if cbUserIfKnown == "" && c.builtins.User != "flyway" && c.builtins.User != "" {
+		cbUserIfKnown = c.builtins.User
 	}
 
 	env := os.Environ()
-	env = append(env,
-		"FLYWAY_OPERATION="+op,
-		"NOWAY_OPERATION="+op,
-		"FLYWAY_EVENT="+event,
-		"NOWAY_EVENT="+event,
-		"FLYWAY_CALLBACK="+cb.Filename,
-		"NOWAY_CALLBACK="+cb.Filename,
-		"FLYWAY_USER="+cbUser,
-		"NOWAY_USER="+cbUser,
-		"FLYWAY_DATABASE="+dbName,
-		"NOWAY_DATABASE="+dbName,
-		"FLYWAY_DEFAULT_SCHEMA="+c.builtins.DefaultSchema,
-		"NOWAY_DEFAULT_SCHEMA="+c.builtins.DefaultSchema,
-		"FLYWAY_SCHEMAS="+schemasStr,
-		"NOWAY_SCHEMAS="+schemasStr,
-		"FLYWAY_TABLE="+c.builtins.Table,
-		"NOWAY_TABLE="+c.builtins.Table,
-		"FLYWAY_GCP_PROJECT_ID="+c.config.GCPProjectID,
-		"NOWAY_GCP_PROJECT_ID="+c.config.GCPProjectID,
-		"FLYWAY_GCP_DATASET="+c.config.GCPDataset,
-		"NOWAY_GCP_DATASET="+c.config.GCPDataset,
-		"FLYWAY_GCP_LOCATION="+c.config.GCPLocation,
-		"NOWAY_GCP_LOCATION="+c.config.GCPLocation,
-		"FLYWAY_BIGQUERY_ENDPOINT="+c.config.GCPBigQueryEndpoint,
-		"NOWAY_BIGQUERY_ENDPOINT="+c.config.GCPBigQueryEndpoint,
-		"FP__flyway_defaultSchema__="+c.builtins.DefaultSchema,
-		"FP__flyway_table__="+c.builtins.Table,
-		"FP__flyway_user__="+cbUser,
-		"FP__flyway_database__="+dbName,
-		"FP__flyway_filename__="+cb.Filename,
-	)
-	if c.builtins.WorkingDirectory != "" {
-		env = append(env, "FP__flyway_workingDirectory__="+c.builtins.WorkingDirectory)
-	} else if wd, err := os.Getwd(); err == nil {
-		env = append(env, "FP__flyway_workingDirectory__="+wd)
+	setIfNotEmpty := func(k, v string) {
+		if v != "" {
+			env = append(env, k+"="+v)
+		}
 	}
+
+	setIfNotEmpty("FLYWAY_URL", c.config.URL)
+	setIfNotEmpty("NOWAY_URL", c.config.URL)
+	setIfNotEmpty("FLYWAY_USER", cbUserIfKnown)
+	setIfNotEmpty("NOWAY_USER", cbUserIfKnown)
+	setIfNotEmpty("FLYWAY_PASSWORD", c.config.Password)
+	setIfNotEmpty("NOWAY_PASSWORD", c.config.Password)
+
+	setIfNotEmpty("FLYWAY_OPERATION", op)
+	setIfNotEmpty("NOWAY_OPERATION", op)
+	setIfNotEmpty("FLYWAY_EVENT", event)
+	setIfNotEmpty("NOWAY_EVENT", event)
+	setIfNotEmpty("FLYWAY_CALLBACK", cb.Filename)
+	setIfNotEmpty("NOWAY_CALLBACK", cb.Filename)
+	setIfNotEmpty("FLYWAY_DATABASE", dbName)
+	setIfNotEmpty("NOWAY_DATABASE", dbName)
+	setIfNotEmpty("FLYWAY_DEFAULT_SCHEMA", c.builtins.DefaultSchema)
+	setIfNotEmpty("NOWAY_DEFAULT_SCHEMA", c.builtins.DefaultSchema)
+	setIfNotEmpty("FLYWAY_SCHEMAS", schemasStr)
+	setIfNotEmpty("NOWAY_SCHEMAS", schemasStr)
+	setIfNotEmpty("FLYWAY_TABLE", c.builtins.Table)
+	setIfNotEmpty("NOWAY_TABLE", c.builtins.Table)
+	setIfNotEmpty("FLYWAY_GCP_PROJECT_ID", c.config.GCPProjectID)
+	setIfNotEmpty("NOWAY_GCP_PROJECT_ID", c.config.GCPProjectID)
+	setIfNotEmpty("FLYWAY_GCP_DATASET", c.config.GCPDataset)
+	setIfNotEmpty("NOWAY_GCP_DATASET", c.config.GCPDataset)
+	setIfNotEmpty("FLYWAY_GCP_LOCATION", c.config.GCPLocation)
+	setIfNotEmpty("NOWAY_GCP_LOCATION", c.config.GCPLocation)
+	setIfNotEmpty("FLYWAY_BIGQUERY_ENDPOINT", c.config.GCPBigQueryEndpoint)
+	setIfNotEmpty("NOWAY_BIGQUERY_ENDPOINT", c.config.GCPBigQueryEndpoint)
+
+	scriptPfx := c.config.ScriptPlaceholderPrefix
+	if scriptPfx == "" {
+		scriptPfx = "FP__"
+	}
+	scriptSfx := c.config.ScriptPlaceholderSuffix
+	if scriptSfx == "" {
+		scriptSfx = "__"
+	}
+
+	setIfNotEmpty(scriptPfx+"flyway_defaultSchema"+scriptSfx, c.builtins.DefaultSchema)
+	setIfNotEmpty(scriptPfx+"flyway_table"+scriptSfx, c.builtins.Table)
+	setIfNotEmpty(scriptPfx+"flyway_user"+scriptSfx, cbUserIfKnown)
+	setIfNotEmpty(scriptPfx+"flyway_database"+scriptSfx, dbName)
+	setIfNotEmpty(scriptPfx+"flyway_filename"+scriptSfx, cb.Filename)
+
+	wd := c.builtins.WorkingDirectory
+	if wd == "" {
+		if getwd, err := os.Getwd(); err == nil {
+			wd = getwd
+		}
+	}
+	setIfNotEmpty(scriptPfx+"flyway_workingDirectory"+scriptSfx, wd)
+
 	if !c.builtins.Timestamp.IsZero() {
-		env = append(env, "FP__flyway_timestamp__="+c.builtins.Timestamp.Format("2006-01-02 15:04:05"))
+		setIfNotEmpty(scriptPfx+"flyway_timestamp"+scriptSfx, c.builtins.Timestamp.Format("2006-01-02 15:04:05"))
 	}
+	setIfNotEmpty(scriptPfx+"flyway_environment"+scriptSfx, c.config.Environment)
 
 	for k, v := range c.config.Placeholders {
 		cleanK := strings.ReplaceAll(k, ":", "_")
-		env = append(env, "FP__"+cleanK+"__="+v)
+		setIfNotEmpty(scriptPfx+cleanK+scriptSfx, v)
 	}
 	cmd.Env = env
 
