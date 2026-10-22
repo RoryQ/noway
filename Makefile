@@ -16,7 +16,7 @@ build:
 
 ## test: Run unit tests across all packages
 test:
-	go test -v -count=1 ./...
+	go test -race -v -count=1 ./...
 
 ## test-floci: Start floci-gcp emulator via docker compose and run integration tests
 test-floci: floci-up

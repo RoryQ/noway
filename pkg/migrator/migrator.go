@@ -59,7 +59,11 @@ type ExecutedSummary struct {
 }
 
 // New creates a new Migrator instance.
-func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
+func New(in *config.Configuration, db database.Database) (*Migrator, error) {
+	if in == nil {
+		in = config.NewDefaultConfiguration()
+	}
+	cfg := in.Clone()
 	if err := cfg.Finalize(); err != nil {
 		return nil, fmt.Errorf("configuration error: %w", err)
 	}

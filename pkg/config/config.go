@@ -3,12 +3,40 @@ package config
 import (
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/roryq/noway/pkg/version"
 )
+
+// Clone returns a deep copy that shares no slices, maps, or mutable pointer values with c.
+// FS can be shared as it is read-only.
+func (c *Configuration) Clone() *Configuration {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	cp.Schemas = slices.Clone(c.Schemas)
+	cp.Locations = slices.Clone(c.Locations)
+	cp.SQLMigrationSuffixes = slices.Clone(c.SQLMigrationSuffixes)
+	if c.Placeholders != nil {
+		cp.Placeholders = maps.Clone(c.Placeholders)
+	}
+	cp.IgnoreMigrationPatterns = slices.Clone(c.IgnoreMigrationPatterns)
+	cp.CherryPick = slices.Clone(c.CherryPick)
+	if c.TargetVersion != nil {
+		tv := *c.TargetVersion
+		cp.TargetVersion = &tv
+	}
+	if c.GCPOAuthType != nil {
+		ot := *c.GCPOAuthType
+		cp.GCPOAuthType = &ot
+	}
+	return &cp
+}
 
 // Configuration represents complete configuration for noway / flyway operations.
 type Configuration struct {

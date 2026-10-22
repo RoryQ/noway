@@ -263,7 +263,7 @@ func New(opts ...Option) (*Noway, error) {
 			return nil, err
 		}
 	} else if options.baseCfg != nil {
-		cfg = options.baseCfg
+		cfg = options.baseCfg.Clone()
 	} else {
 		if autoConf := config.FindConfigFile(); autoConf != "" {
 			cfg, err = config.LoadFromFile(autoConf)

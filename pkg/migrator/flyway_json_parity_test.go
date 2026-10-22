@@ -585,14 +585,14 @@ func TestFlywayJSON_EndToEndOperations(t *testing.T) {
 	}
 
 	// 5. Clean operation
-	cRes, err := mig.Clean(ctx)
+	cfg.CleanDisabled = false
+	migClean, err := New(cfg, mockDB)
 	if err != nil {
-		// If cleanDisabled is true by default, reconfigure and retry
-		cfg.CleanDisabled = false
-		cRes, err = mig.Clean(ctx)
-		if err != nil {
-			t.Fatalf("Clean error: %v", err)
-		}
+		t.Fatalf("Failed to create migrator for clean: %v", err)
+	}
+	cRes, err := migClean.Clean(ctx)
+	if err != nil {
+		t.Fatalf("Clean error: %v", err)
 	}
 	cData, err := json.Marshal(cRes)
 	if err != nil {
