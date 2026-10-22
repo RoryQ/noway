@@ -340,6 +340,12 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 				return nil, err
 			}
 			cfg.IgnorePendingMigrations = b
+		case "ignoreignoredmigrations", "ignore-ignored-migrations", "ignore_ignored_migrations":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.IgnoreIgnoredMigrations = b
 		case "ignoremigrationpatterns", "ignore-migration-patterns", "ignore_migration_patterns":
 			cfg.IgnoreMigrationPatterns = splitAndTrimCLI(val, ",")
 			cfg.IgnoreMigrationPatternsExplicitlySet = true

@@ -674,6 +674,12 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 			return err
 		}
 		cfg.IgnorePendingMigrations = b
+	case "IGNORE_IGNORED_MIGRATIONS", "IGNOREIGNOREDMIGRATIONS":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.IgnoreIgnoredMigrations = b
 	case "IGNORE_MIGRATION_PATTERNS", "IGNOREMIGRATIONPATTERNS":
 		cfg.IgnoreMigrationPatterns = splitAndTrim(val, ",")
 		cfg.IgnoreMigrationPatternsExplicitlySet = true
@@ -934,6 +940,12 @@ func applyProperty(cfg *Configuration, key, val string) error {
 			return err
 		}
 		cfg.IgnorePendingMigrations = b
+	case "ignoreignoredmigrations", "ignore_ignored_migrations", "ignore-ignored-migrations":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.IgnoreIgnoredMigrations = b
 	case "ignoremigrationpatterns", "ignore_migration_patterns", "ignore-migration-patterns":
 		cfg.IgnoreMigrationPatterns = splitAndTrim(val, ",")
 		cfg.IgnoreMigrationPatternsExplicitlySet = true

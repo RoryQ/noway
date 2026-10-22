@@ -289,4 +289,96 @@ func TestTask10ConfigurationOptions(t *testing.T) {
 	}
 }
 
+func TestValidatePatternParsingAndMatching(t *testing.T) {
+	// 1. Invalid patterns fail
+	invalidPatterns := []string{
+		"foo",
+		"*:bogus",
+		"a:b:c",
+		"bar:missing",
+		"",
+		":",
+	}
+	for _, p := range invalidPatterns {
+		_, err := ParseValidatePattern(p)
+		if err == nil {
+			t.Errorf("expected error parsing invalid pattern %q, got nil", p)
+		}
+	}
+
+	// 2. Valid patterns succeed
+	validPatterns := []string{
+		"*:*",
+		"versioned:missing",
+		"repeatable:pending",
+		"*:future",
+		"*:ignored",
+	}
+	for _, p := range validPatterns {
+		vp, err := ParseValidatePattern(p)
+		if err != nil {
+			t.Errorf("unexpected error parsing valid pattern %q: %v", p, err)
+		}
+		if vp.Type == "" || vp.State == "" {
+			t.Errorf("expected non-empty fields in %v", vp)
+		}
+	}
+
+	// 3. Pattern Matching semantics
+	vpVM, _ := ParseValidatePattern("versioned:missing")
+	if !vpVM.Matches(true, "missing") {
+		t.Errorf("expected versioned:missing to match versioned missing")
+	}
+	if vpVM.Matches(false, "missing") {
+		t.Errorf("expected versioned:missing NOT to match repeatable missing")
+	}
+
+	vpRM, _ := ParseValidatePattern("repeatable:missing")
+	if vpRM.Matches(true, "missing") {
+		t.Errorf("expected repeatable:missing NOT to match versioned missing")
+	}
+	if !vpRM.Matches(false, "missing") {
+		t.Errorf("expected repeatable:missing to match repeatable missing")
+	}
+
+	vpPending, _ := ParseValidatePattern("*:pending")
+	if !vpPending.Matches(true, "pending") {
+		t.Errorf("expected *:pending to match pending versioned")
+	}
+	if !vpPending.Matches(false, "pending") {
+		t.Errorf("expected *:pending to match pending repeatable")
+	}
+	if !vpPending.Matches(false, "outdated") {
+		t.Errorf("expected *:pending to match outdated repeatable")
+	}
+	if vpPending.Matches(true, "ignored") {
+		t.Errorf("expected *:pending NOT to match ignored")
+	}
+
+	vpIgnored, _ := ParseValidatePattern("*:ignored")
+	if !vpIgnored.Matches(true, "ignored") {
+		t.Errorf("expected *:ignored to match ignored")
+	}
+	if vpIgnored.Matches(true, "pending") {
+		t.Errorf("expected *:ignored NOT to match pending")
+	}
+
+	// 4. Legacy booleans mapping and ignoreFutureMigrations=false on user-set list
+	cfg := NewDefaultConfiguration()
+	cfg.IgnoreMigrationPatterns = []string{"*:future"}
+	cfg.IgnoreMigrationPatternsExplicitlySet = true
+	cfg.IgnoreFutureMigrations = false
+	cfg.IgnoreIgnoredMigrations = true
+	if err := cfg.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+	// User set patterns must NOT have future removed even when IgnoreFutureMigrations=false
+	if !cfg.MatchesPattern(true, "future") {
+		t.Errorf("expected future to remain when user explicitly set IgnoreMigrationPatterns")
+	}
+	if !cfg.MatchesPattern(true, "ignored") {
+		t.Errorf("expected ignored to be matched when IgnoreIgnoredMigrations=true")
+	}
+}
+
 

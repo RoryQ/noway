@@ -267,6 +267,7 @@ func TestChallenger_RepairMissingVersionedMigration_MarkedDeleteAndValidatePasse
 	t.Run("SingleVersioned_DeletedFromDisk_MarkedDelete_ValidatePasses", func(t *testing.T) {
 		fs := fstest.MapFS{
 			"migrations/V1__init.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+			"migrations/V2__next.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t2 (id INT64);")},
 			"migrations/.keep":        &fstest.MapFile{Data: []byte("")},
 		}
 
@@ -286,7 +287,7 @@ func TestChallenger_RepairMissingVersionedMigration_MarkedDeleteAndValidatePasse
 			t.Fatalf("Migrate failed: %v", err)
 		}
 
-		// Delete V1 from disk
+		// Delete V1 from disk (V2 remains on disk, so maxResolvedVersion=2 and V1 is missing)
 		delete(fs, "migrations/V1__init.sql")
 
 		// Before Repair: Validate MUST fail
@@ -309,17 +310,17 @@ func TestChallenger_RepairMissingVersionedMigration_MarkedDeleteAndValidatePasse
 
 		// Verify separate DELETE record in history
 		history, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-		if err != nil || len(history) != 2 {
-			t.Fatalf("expected 2 history records (original SQL + inserted DELETE), len=%d", len(history))
+		if err != nil || len(history) != 3 {
+			t.Fatalf("expected 3 history records (original SQL + inserted DELETE), len=%d", len(history))
 		}
-		if history[0].Type != "SQL" {
-			t.Errorf("expected original record type 'SQL', got %q", history[0].Type)
+		if history[0].Type != "SQL" || history[1].Type != "SQL" {
+			t.Errorf("expected original records type 'SQL'")
 		}
-		if history[1].Type != "DELETE" {
-			t.Errorf("expected separate record type 'DELETE', got %q", history[1].Type)
+		if history[2].Type != "DELETE" {
+			t.Errorf("expected separate record type 'DELETE', got %q", history[2].Type)
 		}
-		if history[1].Version == nil || history[1].Version.String() != "1" {
-			t.Errorf("expected version 1 preserved in delete record, got %v", history[1].Version)
+		if history[2].Version == nil || history[2].Version.String() != "1" {
+			t.Errorf("expected version 1 preserved in delete record, got %v", history[2].Version)
 		}
 
 		// After Repair: Validate MUST pass
@@ -418,6 +419,7 @@ func TestChallenger_RepairMissingVersionedMigration_MarkedDeleteAndValidatePasse
 	t.Run("Idempotency_RepeatRepairOnDeletedVersioned", func(t *testing.T) {
 		fs := fstest.MapFS{
 			"migrations/V1__init.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
+			"migrations/V2__next.sql": &fstest.MapFile{Data: []byte("SELECT 2;")},
 			"migrations/.keep":        &fstest.MapFile{Data: []byte("")},
 		}
 

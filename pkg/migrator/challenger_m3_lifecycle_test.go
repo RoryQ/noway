@@ -667,6 +667,9 @@ func TestChallenger_ValidateLifecycle_ValidAndInvalidStates(t *testing.T) {
 			"migrations/V1__init.sql": &fstest.MapFile{
 				Data: []byte("CREATE TABLE users (id INT64);"),
 			},
+			"migrations/V2__next.sql": &fstest.MapFile{
+				Data: []byte("CREATE TABLE next_table (id INT64);"),
+			},
 			"migrations/beforeValidate.sql": &fstest.MapFile{
 				Data: []byte("CREATE TABLE val_miss_before (v INT64);"),
 			},

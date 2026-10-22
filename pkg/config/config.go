@@ -26,6 +26,7 @@ func (c *Configuration) Clone() *Configuration {
 		cp.Placeholders = maps.Clone(c.Placeholders)
 	}
 	cp.IgnoreMigrationPatterns = slices.Clone(c.IgnoreMigrationPatterns)
+	cp.ParsedIgnorePatterns = slices.Clone(c.ParsedIgnorePatterns)
 	cp.CherryPick = slices.Clone(c.CherryPick)
 	if c.TargetVersion != nil {
 		tv := *c.TargetVersion
@@ -78,7 +79,9 @@ type Configuration struct {
 	IgnoreFutureMigrations  bool             `json:"ignoreFutureMigrations" yaml:"ignoreFutureMigrations" toml:"ignoreFutureMigrations"` // default: true
 	IgnoreMissingMigrations bool             `json:"ignoreMissingMigrations" yaml:"ignoreMissingMigrations" toml:"ignoreMissingMigrations"` // default: false
 	IgnorePendingMigrations bool             `json:"ignorePendingMigrations" yaml:"ignorePendingMigrations" toml:"ignorePendingMigrations"` // default: false
+	IgnoreIgnoredMigrations bool             `json:"ignoreIgnoredMigrations" yaml:"ignoreIgnoredMigrations" toml:"ignoreIgnoredMigrations"` // default: false
 	IgnoreMigrationPatterns              []string         `json:"ignoreMigrationPatterns" yaml:"ignoreMigrationPatterns" toml:"ignoreMigrationPatterns"` // default: ["*:future"]
+	ParsedIgnorePatterns                 []ValidatePattern `json:"-" yaml:"-" toml:"-"`
 	SkipExecutingMigrations              bool             `json:"skipExecutingMigrations" yaml:"skipExecutingMigrations" toml:"skipExecutingMigrations"` // default: false
 	CherryPick                           []string         `json:"cherryPick" yaml:"cherryPick" toml:"cherryPick"`
 	FailOnMissingTarget                  bool             `json:"failOnMissingTarget" yaml:"failOnMissingTarget" toml:"failOnMissingTarget"`             // default: false
@@ -276,18 +279,44 @@ func (c *Configuration) Finalize() error {
 
 	// Map old booleans onto IgnoreMigrationPatterns
 	if len(c.IgnoreMigrationPatterns) == 0 {
-		c.IgnoreMigrationPatterns = []string{"*:future"}
+		if c.IgnoreFutureMigrations {
+			c.IgnoreMigrationPatterns = []string{"*:future"}
+		}
+	} else if !c.IgnoreMigrationPatternsExplicitlySet && !c.IgnoreFutureMigrations {
+		var filtered []string
+		for _, p := range c.IgnoreMigrationPatterns {
+			if strings.ToLower(strings.TrimSpace(p)) != "*:future" {
+				filtered = append(filtered, p)
+			}
+		}
+		c.IgnoreMigrationPatterns = filtered
 	}
-	if !c.IgnoreFutureMigrations {
-		c.IgnoreMigrationPatterns = removeStateFromPatterns(c.IgnoreMigrationPatterns, "future")
-	} else if !c.IsIgnored("future", "", nil) && !c.IgnoreMigrationPatternsExplicitlySet {
-		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:future")
+
+	norm := make([]string, len(c.IgnoreMigrationPatterns))
+	for i, p := range c.IgnoreMigrationPatterns {
+		norm[i] = strings.ToLower(strings.TrimSpace(p))
 	}
-	if c.IgnoreMissingMigrations && !c.IsIgnored("missing", "", nil) {
+	if c.IgnoreMissingMigrations && !slices.Contains(norm, "*:missing") {
 		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:missing")
+		norm = append(norm, "*:missing")
 	}
-	if c.IgnorePendingMigrations && !c.IsIgnored("pending", "", nil) {
-		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:pending", "*:outdated")
+	if c.IgnoreIgnoredMigrations && !slices.Contains(norm, "*:ignored") {
+		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:ignored")
+		norm = append(norm, "*:ignored")
+	}
+	if c.IgnorePendingMigrations && !slices.Contains(norm, "*:pending") {
+		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:pending")
+		norm = append(norm, "*:pending")
+	}
+
+	// Parse and validate patterns
+	c.ParsedIgnorePatterns = make([]ValidatePattern, 0, len(c.IgnoreMigrationPatterns))
+	for _, p := range c.IgnoreMigrationPatterns {
+		vp, err := ParseValidatePattern(p)
+		if err != nil {
+			return err
+		}
+		c.ParsedIgnorePatterns = append(c.ParsedIgnorePatterns, vp)
 	}
 
 	c.OutputType = strings.ToLower(strings.TrimSpace(c.OutputType))
@@ -353,70 +382,64 @@ func (c *Configuration) IsPicked(v *version.Version, description string) bool {
 	return false
 }
 
-// IsIgnored checks whether a given migration state matches IgnoreMigrationPatterns.
-// Supported states include: "future", "missing", "pending", "outdated", "ignored".
-// Pattern format is [type_or_version:]<state>, e.g.: "*:future", "repeatable:missing", "*:pending".
-func (c *Configuration) IsIgnored(state string, migType string, ver *version.Version) bool {
-	targetState := strings.ToLower(strings.TrimSpace(state))
-	if targetState == "" {
+// ValidatePattern represents a pattern for ignoring migrations during validation.
+type ValidatePattern struct {
+	Type  string
+	State string
+}
+
+var validTypes = map[string]bool{"*": true, "versioned": true, "repeatable": true}
+var validStates = map[string]bool{"*": true, "missing": true, "pending": true, "ignored": true, "future": true}
+
+// ParseValidatePattern parses a pattern string of the form <migration_type>:<migration_state>.
+func ParseValidatePattern(p string) (ValidatePattern, error) {
+	parts := strings.Split(p, ":")
+	if len(parts) != 2 {
+		return ValidatePattern{}, fmt.Errorf("invalid pattern '%s': pattern must be of the form <migration_type>:<migration_state>", p)
+	}
+	t := strings.ToLower(strings.TrimSpace(parts[0]))
+	s := strings.ToLower(strings.TrimSpace(parts[1]))
+	if !validTypes[t] {
+		return ValidatePattern{}, fmt.Errorf("invalid migration type '%s': valid types are *, repeatable, versioned", parts[0])
+	}
+	if !validStates[s] {
+		return ValidatePattern{}, fmt.Errorf("invalid migration state '%s': valid states are *, missing, pending, ignored, future", parts[1])
+	}
+	return ValidatePattern{Type: t, State: s}, nil
+}
+
+// Matches returns whether the pattern matches the given migration type and state.
+func (v ValidatePattern) Matches(isVersioned bool, state string) bool {
+	matchedState := v.State == "*" || v.State == state || (v.State == "pending" && state == "outdated")
+	if !matchedState {
 		return false
 	}
+	return v.Type == "*" || (isVersioned && v.Type == "versioned") || (!isVersioned && v.Type == "repeatable")
+}
 
-	for _, rawPattern := range c.IgnoreMigrationPatterns {
-		pattern := strings.ToLower(strings.TrimSpace(rawPattern))
-		if pattern == "" {
-			continue
+// MatchesPattern checks whether any configured ValidatePattern matches the given migration type and state.
+func (c *Configuration) MatchesPattern(isVersioned bool, state string) bool {
+	patterns := c.ParsedIgnorePatterns
+	if len(patterns) == 0 && len(c.IgnoreMigrationPatterns) > 0 {
+		for _, p := range c.IgnoreMigrationPatterns {
+			if vp, err := ParseValidatePattern(p); err == nil {
+				patterns = append(patterns, vp)
+			}
 		}
-
-		rulePattern := "*"
-		ruleState := pattern
-		if idx := strings.Index(pattern, ":"); idx != -1 {
-			rulePattern = strings.TrimSpace(pattern[:idx])
-			ruleState = strings.TrimSpace(pattern[idx+1:])
-		}
-
-		matchedState := false
-		if ruleState == targetState || ruleState == "*" {
-			matchedState = true
-		} else if ruleState == "pending" && targetState == "outdated" {
-			matchedState = true
-		}
-
-		if !matchedState {
-			continue
-		}
-
-		if rulePattern == "*" {
-			return true
-		}
-		if migType != "" && strings.EqualFold(rulePattern, migType) {
-			return true
-		}
-		if ver == nil && strings.EqualFold(rulePattern, "repeatable") {
-			return true
-		}
-		if ver != nil && (rulePattern == strings.ToLower(ver.String()) || rulePattern == strings.ToLower(ver.Normalized())) {
+	}
+	for _, p := range patterns {
+		if p.Matches(isVersioned, state) {
 			return true
 		}
 	}
-
 	return false
 }
 
-func removeStateFromPatterns(patterns []string, state string) []string {
-	stateLower := strings.ToLower(strings.TrimSpace(state))
-	var res []string
-	for _, p := range patterns {
-		clean := strings.ToLower(strings.TrimSpace(p))
-		ruleState := clean
-		if idx := strings.Index(clean, ":"); idx != -1 {
-			ruleState = strings.TrimSpace(clean[idx+1:])
-		}
-		if ruleState != stateLower {
-			res = append(res, p)
-		}
-	}
-	return res
+// IsIgnored checks whether a given migration state matches IgnoreMigrationPatterns.
+// Supported states include: "future", "missing", "pending", "outdated", "ignored".
+func (c *Configuration) IsIgnored(state string, migType string, ver *version.Version) bool {
+	isVersioned := (ver != nil && !ver.IsEmpty()) || strings.EqualFold(migType, "versioned")
+	return c.MatchesPattern(isVersioned, strings.ToLower(strings.TrimSpace(state)))
 }
 
 // GetDefaultSchema returns the effective default schema name.

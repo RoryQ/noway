@@ -258,7 +258,7 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 			res, found := resolvedByVersion[verKey]
 			if !found {
 				// Check if it's future
-				if maxResolvedVersion != nil && app.Version.IsNewerThan(*maxResolvedVersion) {
+				if maxResolvedVersion == nil || app.Version.IsNewerThan(*maxResolvedVersion) {
 					if !m.isIgnored("future", app) {
 						result.Valid = false
 						result.Errors = append(result.Errors, ValidationError{
@@ -402,34 +402,20 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 			}
 		}
 
-		// Check if it's outdated or pending
-		isOutdated := maxAppliedVersion != nil && maxAppliedVersion.IsNewerThan(*res.Version)
-		if isOutdated {
-			if m.config.OutOfOrder {
-				// With OutOfOrder enabled, in Flyway its state becomes PENDING
-				if !ignorePendingArg && !m.isIgnored("pending", res) {
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Version:     res.Version,
-						Description: res.Description,
-						File:        res.Script,
-						Message:     fmt.Sprintf("Detected resolved migration not applied to database: %s", res.Version),
-					})
-				}
-			} else {
-				// OutOfOrder disabled: state is OUTDATED
-				if !m.isIgnored("outdated", res) && !m.isIgnored("pending", res) {
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Version:     res.Version,
-						Description: res.Description,
-						File:        res.Script,
-						Message:     fmt.Sprintf("Detected resolved migration not applied to database: %s", res.Version),
-					})
-				}
+		// Check if it's ignored or pending
+		isIgnored := maxAppliedVersion != nil && maxAppliedVersion.IsNewerThan(*res.Version) && !m.config.OutOfOrder
+		if isIgnored {
+			if !m.isIgnored("ignored", res) {
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Version:     res.Version,
+					Description: res.Description,
+					File:        res.Script,
+					Message:     fmt.Sprintf("Detected resolved migration not applied to database: %s. To ignore this migration, set -ignoreMigrationPatterns='*:ignored'. To allow executing this migration, set -outOfOrder=true.", res.Version),
+				})
 			}
 		} else {
-			// Normal pending migration
+			// Normal pending migration (or out-of-order pending migration)
 			if !ignorePendingArg && !m.isIgnored("pending", res) {
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
@@ -464,23 +450,20 @@ func (m *Migrator) isIgnored(state string, migDetails ...any) bool {
 	if m.config == nil {
 		return false
 	}
-	var migType string
-	var ver *version.Version
+	isVersioned := false
 	for _, d := range migDetails {
 		switch v := d.(type) {
-		case string:
-			migType = v
 		case *version.Version:
-			ver = v
+			isVersioned = v != nil && !v.IsEmpty()
 		case version.Version:
-			ver = &v
+			isVersioned = !v.IsEmpty()
 		case resolver.ResolvedMigration:
-			migType = string(v.Type)
-			ver = v.Version
+			isVersioned = v.Version != nil && !v.Version.IsEmpty()
+		case database.HistoryRecord:
+			isVersioned = v.Version != nil && *v.Version != ""
 		case resolver.AppliedMigration:
-			migType = v.Type
-			ver = v.Version
+			isVersioned = v.Version != nil && !v.Version.IsEmpty()
 		}
 	}
-	return m.config.IsIgnored(state, migType, ver)
+	return m.config.MatchesPattern(isVersioned, state)
 }

@@ -94,6 +94,9 @@ func TestRepairMarksMissingVersionedMigrationAsDeleted(t *testing.T) {
 		"migrations/V1__init.sql": &fstest.MapFile{
 			Data: []byte("CREATE TABLE t1 (id INT64);"),
 		},
+		"migrations/V2__next.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t2 (id INT64);"),
+		},
 		"migrations/.keep": &fstest.MapFile{
 			Data: []byte("keep dir"),
 		},
@@ -116,7 +119,7 @@ func TestRepairMarksMissingVersionedMigrationAsDeleted(t *testing.T) {
 		t.Fatalf("initial Migrate failed: %v", err)
 	}
 
-	// 2. Remove V1 from disk
+	// 2. Remove V1 from disk (V2 remains, so maxResolvedVersion=2 and V1 is missing)
 	delete(fs, "migrations/V1__init.sql")
 
 	// 3. Before repair, Validate fails because applied migration is missing locally
@@ -139,14 +142,14 @@ func TestRepairMarksMissingVersionedMigrationAsDeleted(t *testing.T) {
 
 	// 5. Verify separate DELETE record in history
 	history, err := db.FetchHistory(ctx, "test_ds", "flyway_schema_history")
-	if err != nil || len(history) != 2 {
-		t.Fatalf("expected 2 history records, got %d", len(history))
+	if err != nil || len(history) != 3 {
+		t.Fatalf("expected 3 history records, got %d", len(history))
 	}
-	if history[0].Type != "SQL" {
-		t.Errorf("expected original history record type 'SQL', got %q", history[0].Type)
+	if history[0].Type != "SQL" || history[1].Type != "SQL" {
+		t.Errorf("expected original history records type 'SQL'")
 	}
-	if history[1].Type != "DELETE" {
-		t.Errorf("expected separate history record type 'DELETE', got %q", history[1].Type)
+	if history[2].Type != "DELETE" {
+		t.Errorf("expected separate history record type 'DELETE', got %q", history[2].Type)
 	}
 
 	// 6. After repair, Validate should succeed because DELETE records are ignored (F14)

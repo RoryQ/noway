@@ -212,12 +212,13 @@ func TestValidate_IgnorePendingMigrations(t *testing.T) {
 		}
 	})
 
-	t.Run("IgnorePendingMigrations_True_Passes", func(t *testing.T) {
+	t.Run("IgnorePendingMigrations_True_OutOfOrder_True_Passes", func(t *testing.T) {
 		cfg := config.NewDefaultConfiguration()
 		cfg.DefaultSchema = "test_schema"
 		cfg.FS = fs
 		cfg.Locations = []string{"migrations"}
 		cfg.IgnorePendingMigrations = true
+		cfg.OutOfOrder = true
 
 		m, err := migrator.New(cfg, db)
 		if err != nil {
@@ -229,7 +230,28 @@ func TestValidate_IgnorePendingMigrations(t *testing.T) {
 			t.Fatalf("Validate error: %v", err)
 		}
 		if !valRes.Valid {
-			t.Fatalf("expected Validate to pass with IgnorePendingMigrations=true, got: %s", valRes.Error())
+			t.Fatalf("expected Validate to pass with IgnorePendingMigrations=true and OutOfOrder=true, got: %s", valRes.Error())
+		}
+	})
+
+	t.Run("IgnoreIgnoredMigrations_True_Passes", func(t *testing.T) {
+		cfg := config.NewDefaultConfiguration()
+		cfg.DefaultSchema = "test_schema"
+		cfg.FS = fs
+		cfg.Locations = []string{"migrations"}
+		cfg.IgnoreIgnoredMigrations = true
+
+		m, err := migrator.New(cfg, db)
+		if err != nil {
+			t.Fatalf("failed to create migrator: %v", err)
+		}
+
+		valRes, err := m.Validate(ctx)
+		if err != nil {
+			t.Fatalf("Validate error: %v", err)
+		}
+		if !valRes.Valid {
+			t.Fatalf("expected Validate to pass with IgnoreIgnoredMigrations=true, got: %s", valRes.Error())
 		}
 	})
 }
