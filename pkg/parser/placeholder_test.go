@@ -216,3 +216,67 @@ func TestPlaceholderUndefinedFailsWithoutDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestScriptReplacer_NoEscapesAndChecksum(t *testing.T) {
+	sqlCfg := PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values: map[string]string{
+			"k": "A",
+		},
+	}
+	replacerA := NewPlaceholderReplacer(sqlCfg)
+	scriptReplacerA := replacerA.ScriptReplacer()
+
+	scriptInput := "echo $FP__k__\n"
+	resA, err := scriptReplacerA.Replace(scriptInput, BuiltinPlaceholders{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resA != "echo $A\n" {
+		t.Fatalf("expected 'echo $A\\n', got %q", resA)
+	}
+
+	sqlCfgB := PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values: map[string]string{
+			"k": "B",
+		},
+	}
+	replacerB := NewPlaceholderReplacer(sqlCfgB)
+	scriptReplacerB := replacerB.ScriptReplacer()
+
+	resB, err := scriptReplacerB.Replace(scriptInput, BuiltinPlaceholders{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resB != "echo $B\n" {
+		t.Fatalf("expected 'echo $B\\n', got %q", resB)
+	}
+
+	if resA == resB {
+		t.Fatalf("expected different replaced contents for different placeholder values")
+	}
+
+	// Unknown script placeholder must fail
+	unknownInput := "echo $FP__unknown__\n"
+	_, err = scriptReplacerA.Replace(unknownInput, BuiltinPlaceholders{})
+	if err == nil {
+		t.Fatalf("expected error for undefined script placeholder, got nil")
+	}
+
+	// SQL mode rejects underscore builtins like ${flyway_user}
+	_, err = replacerA.Replace("SELECT '${flyway_user}';", BuiltinPlaceholders{User: "test_user"})
+	if err == nil {
+		t.Fatalf("expected SQL replacer to reject ${flyway_user}, got nil")
+	}
+	// SQL mode accepts colon form ${flyway:user}
+	sqlRes, err := replacerA.Replace("SELECT '${flyway:user}';", BuiltinPlaceholders{User: "test_user"})
+	if err != nil || sqlRes != "SELECT 'test_user';" {
+		t.Fatalf("expected SQL replacer to accept ${flyway:user}, got %q, err: %v", sqlRes, err)
+	}
+}
+

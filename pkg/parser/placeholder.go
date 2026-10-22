@@ -9,11 +9,13 @@ import (
 
 // PlaceholderConfig holds the configuration for placeholder replacement.
 type PlaceholderConfig struct {
-	Enabled   bool
-	Prefix    string
-	Suffix    string
-	Separator string
-	Values    map[string]string
+	Enabled        bool
+	Prefix         string
+	Suffix         string
+	Separator      string
+	Values         map[string]string
+	DisableEscapes bool
+	ScriptMode     bool
 }
 
 // DefaultPlaceholderConfig returns the standard Flyway placeholder settings.
@@ -56,11 +58,13 @@ func (p *PlaceholderReplacer) ScriptReplacer() *PlaceholderReplacer {
 		scriptValues[strings.ReplaceAll(k, ":", "_")] = v
 	}
 	cfg := PlaceholderConfig{
-		Enabled:   p.config.Enabled,
-		Prefix:    "FP__",
-		Suffix:    "__",
-		Separator: "",
-		Values:    scriptValues,
+		Enabled:        p.config.Enabled,
+		Prefix:         "FP__",
+		Suffix:         "__",
+		Separator:      "",
+		Values:         scriptValues,
+		DisableEscapes: true,
+		ScriptMode:     true,
 	}
 	return NewPlaceholderReplacer(cfg)
 }
@@ -74,6 +78,7 @@ type BuiltinPlaceholders struct {
 	Timestamp        time.Time
 	Filename         string
 	WorkingDirectory string
+	Environment      string
 }
 
 // IsEnabled returns whether placeholder replacement is enabled.
@@ -93,10 +98,12 @@ func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders
 func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlaceholders) (string, error) {
 	prefix := p.config.Prefix
 	suffix := p.config.Suffix
-	escapedPrefix1 := "$" + prefix // e.g. $${ or $@[
-	var escapedPrefix2 string
-	if len(prefix) > 0 {
-		escapedPrefix2 = string(prefix[0]) + prefix // e.g. @@[ or $${
+	var escapedPrefix1, escapedPrefix2 string
+	if !p.config.DisableEscapes {
+		escapedPrefix1 = "$" + prefix // e.g. $${ or $@[
+		if len(prefix) > 0 {
+			escapedPrefix2 = string(prefix[0]) + prefix // e.g. @@[ or $${
+		}
 	}
 
 	// Build combined placeholder map and case-insensitive index (Flyway placeholder matching is case-insensitive)
@@ -121,8 +128,10 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	}
 	addBuiltin("flyway:defaultSchema", defaultSchema)
 	addBuiltin("noway:defaultSchema", defaultSchema)
-	addBuiltin("flyway_defaultSchema", defaultSchema)
-	addBuiltin("noway_defaultSchema", defaultSchema)
+	if p.config.ScriptMode {
+		addBuiltin("flyway_defaultSchema", defaultSchema)
+		addBuiltin("noway_defaultSchema", defaultSchema)
+	}
 
 	table := builtins.Table
 	if table == "" {
@@ -130,8 +139,10 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	}
 	addBuiltin("flyway:table", table)
 	addBuiltin("noway:table", table)
-	addBuiltin("flyway_table", table)
-	addBuiltin("noway_table", table)
+	if p.config.ScriptMode {
+		addBuiltin("flyway_table", table)
+		addBuiltin("noway_table", table)
+	}
 
 	user := builtins.User
 	if user == "" {
@@ -139,8 +150,10 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	}
 	addBuiltin("flyway:user", user)
 	addBuiltin("noway:user", user)
-	addBuiltin("flyway_user", user)
-	addBuiltin("noway_user", user)
+	if p.config.ScriptMode {
+		addBuiltin("flyway_user", user)
+		addBuiltin("noway_user", user)
+	}
 
 	database := builtins.Database
 	if database == "" {
@@ -148,8 +161,10 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	}
 	addBuiltin("flyway:database", database)
 	addBuiltin("noway:database", database)
-	addBuiltin("flyway_database", database)
-	addBuiltin("noway_database", database)
+	if p.config.ScriptMode {
+		addBuiltin("flyway_database", database)
+		addBuiltin("noway_database", database)
+	}
 
 	ts := builtins.Timestamp
 	if ts.IsZero() {
@@ -158,15 +173,19 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	formattedTs := ts.Format("2006-01-02 15:04:05")
 	addBuiltin("flyway:timestamp", formattedTs)
 	addBuiltin("noway:timestamp", formattedTs)
-	addBuiltin("flyway_timestamp", formattedTs)
-	addBuiltin("noway_timestamp", formattedTs)
+	if p.config.ScriptMode {
+		addBuiltin("flyway_timestamp", formattedTs)
+		addBuiltin("noway_timestamp", formattedTs)
+	}
 
 	filename := builtins.Filename
 	if filename != "" {
 		addBuiltin("flyway:filename", filename)
 		addBuiltin("noway:filename", filename)
-		addBuiltin("flyway_filename", filename)
-		addBuiltin("noway_filename", filename)
+		if p.config.ScriptMode {
+			addBuiltin("flyway_filename", filename)
+			addBuiltin("noway_filename", filename)
+		}
 	}
 
 	workingDir := builtins.WorkingDirectory
@@ -178,8 +197,19 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	if workingDir != "" {
 		addBuiltin("flyway:workingDirectory", workingDir)
 		addBuiltin("noway:workingDirectory", workingDir)
-		addBuiltin("flyway_workingDirectory", workingDir)
-		addBuiltin("noway_workingDirectory", workingDir)
+		if p.config.ScriptMode {
+			addBuiltin("flyway_workingDirectory", workingDir)
+			addBuiltin("noway_workingDirectory", workingDir)
+		}
+	}
+
+	if builtins.Environment != "" {
+		addBuiltin("flyway:environment", builtins.Environment)
+		addBuiltin("noway:environment", builtins.Environment)
+		if p.config.ScriptMode {
+			addBuiltin("flyway_environment", builtins.Environment)
+			addBuiltin("noway_environment", builtins.Environment)
+		}
 	}
 
 	lookupValue := func(key string) (string, bool) {
@@ -196,19 +226,21 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	sb.Grow(len(input))
 	i := 0
 	for i < len(input) {
-		// Check for doubled prefix escaping or $ escaping: e.g. $${...} -> ${...}, @@[...] -> @[...]
-		if escapedPrefix2 != "" && escapedPrefix2 != escapedPrefix1 && strings.HasPrefix(input[i:], escapedPrefix2) {
-			sb.WriteString(prefix)
-			i += len(escapedPrefix2)
-			continue
-		}
-		if strings.HasPrefix(input[i:], escapedPrefix1) {
-			sb.WriteString(prefix)
-			i += len(escapedPrefix1)
-			continue
+		// Check for doubled prefix escaping or $ escaping if escapes are enabled
+		if !p.config.DisableEscapes {
+			if escapedPrefix2 != "" && escapedPrefix2 != escapedPrefix1 && strings.HasPrefix(input[i:], escapedPrefix2) {
+				sb.WriteString(prefix)
+				i += len(escapedPrefix2)
+				continue
+			}
+			if strings.HasPrefix(input[i:], escapedPrefix1) {
+				sb.WriteString(prefix)
+				i += len(escapedPrefix1)
+				continue
+			}
 		}
 
-		// Check for standard placeholder prefix: ${...}
+		// Check for standard placeholder prefix: ${...} or FP__...__
 		if strings.HasPrefix(input[i:], prefix) {
 			suffixIdx := strings.Index(input[i+len(prefix):], suffix)
 			if suffixIdx != -1 {
