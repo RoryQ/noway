@@ -421,7 +421,7 @@ func (r *Resolver) processFile(dir, filename, fullPath, scriptPath string, resul
 	return r.parseAndAddMigration(dir, filename, fullPath, scriptPath, string(data), nil, result, seen)
 }
 
-func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool) (int64, *int64, error) {
+func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool, isScript bool, filename string) (int64, *int64, error) {
 	rawCs, err := checksum.CalculateString(content)
 	if err != nil {
 		return 0, nil, err
@@ -442,7 +442,15 @@ func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, 
 			shouldReplace = *migConfig.PlaceholderReplacement
 		}
 		if shouldReplace {
-			replaced, err := r.config.Replacer.ReplaceContent(content, r.config.Builtins)
+			builtins := r.config.Builtins
+			if builtins.Filename == "" {
+				builtins.Filename = filename
+			}
+			replacer := r.config.Replacer
+			if isScript {
+				replacer = replacer.ScriptReplacer()
+			}
+			replaced, err := replacer.ReplaceContent(content, builtins)
 			if err != nil {
 				return 0, nil, fmt.Errorf("failed to replace placeholders in repeatable migration: %w", err)
 			}
@@ -522,7 +530,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 		}
 		seen.repeatables[desc] = fullPath
 
-		cs, eqCs, err := r.calculateChecksum(content, migConfig, true)
+		cs, eqCs, err := r.calculateChecksum(content, migConfig, true, isScript, filename)
 		if err != nil {
 			return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 		}
@@ -564,7 +572,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 			desc := strings.ReplaceAll(parts[1], "_", " ")
 			ver, err := version.Parse(verStr)
 			if err == nil {
-				cs, _, err := r.calculateChecksum(content, migConfig, false)
+				cs, _, err := r.calculateChecksum(content, migConfig, false, isScript, filename)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
@@ -612,7 +620,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 				}
 				seen.baselineVersions[canonicalVer] = fullPath
 
-				cs, _, err := r.calculateChecksum(content, migConfig, false)
+				cs, _, err := r.calculateChecksum(content, migConfig, false, isScript, filename)
 				if err != nil {
 					return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 				}
@@ -665,7 +673,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath, con
 			}
 			seen.versions[canonicalVer] = fullPath
 
-			cs, _, err := r.calculateChecksum(content, migConfig, false)
+			cs, _, err := r.calculateChecksum(content, migConfig, false, isScript, filename)
 			if err != nil {
 				return fmt.Errorf("error calculating checksum for '%s': %w", filename, err)
 			}

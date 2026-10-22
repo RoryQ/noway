@@ -81,7 +81,11 @@ func (c *CallbackRunner) Fire(ctx context.Context, event string) error {
 			continue
 		}
 
-		sql, err := c.replacer.Replace(cb.Content, c.builtins)
+		builtins := c.builtins
+		if builtins.Filename == "" {
+			builtins.Filename = cb.Filename
+		}
+		sql, err := c.replacer.Replace(cb.Content, builtins)
 		if err != nil {
 			return fmt.Errorf("error replacing placeholders in callback '%s' (%s): %w", cb.Filename, event, err)
 		}
@@ -98,20 +102,10 @@ func (c *CallbackRunner) Fire(ctx context.Context, event string) error {
 }
 
 func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.ResolvedCallback, event string) error {
-	content := cb.Content
-	shouldReplace := c.config.PlaceholderReplacement
-	if shouldReplace && c.replacer != nil {
-		replaced, err := c.replacer.ReplaceContent(content, c.builtins)
-		if err != nil {
-			return fmt.Errorf("error replacing placeholders in callback '%s': %w", cb.Filename, err)
-		}
-		content = replaced
-	}
-
 	var scriptPath string
 	var cleanup func()
 
-	if cb.PhysicalLocation != "" && content == cb.Content {
+	if cb.PhysicalLocation != "" {
 		if fi, err := os.Stat(cb.PhysicalLocation); err == nil && !fi.IsDir() {
 			scriptPath = cb.PhysicalLocation
 		}
@@ -126,7 +120,7 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		if err != nil {
 			return fmt.Errorf("failed creating temp callback script for %s: %w", cb.Filename, err)
 		}
-		if _, err := tmpFile.WriteString(content); err != nil {
+		if _, err := tmpFile.WriteString(cb.Content); err != nil {
 			tmpFile.Close()
 			os.Remove(tmpFile.Name())
 			return fmt.Errorf("failed writing temp callback script for %s: %w", cb.Filename, err)
@@ -215,18 +209,24 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 		"NOWAY_GCP_LOCATION="+c.config.GCPLocation,
 		"FLYWAY_BIGQUERY_ENDPOINT="+c.config.GCPBigQueryEndpoint,
 		"NOWAY_BIGQUERY_ENDPOINT="+c.config.GCPBigQueryEndpoint,
-		"FP__flyway_defaultSchema="+c.builtins.DefaultSchema,
-		"FP__flyway_table="+c.builtins.Table,
-		"FP__flyway_user="+cbUser,
-		"FP__flyway_database="+dbName,
+		"FP__flyway_defaultSchema__="+c.builtins.DefaultSchema,
+		"FP__flyway_table__="+c.builtins.Table,
+		"FP__flyway_user__="+cbUser,
+		"FP__flyway_database__="+dbName,
+		"FP__flyway_filename__="+cb.Filename,
 	)
+	if c.builtins.WorkingDirectory != "" {
+		env = append(env, "FP__flyway_workingDirectory__="+c.builtins.WorkingDirectory)
+	} else if wd, err := os.Getwd(); err == nil {
+		env = append(env, "FP__flyway_workingDirectory__="+wd)
+	}
+	if !c.builtins.Timestamp.IsZero() {
+		env = append(env, "FP__flyway_timestamp__="+c.builtins.Timestamp.Format("2006-01-02 15:04:05"))
+	}
 
 	for k, v := range c.config.Placeholders {
-		env = append(env,
-			"FP__"+k+"="+v,
-			"FLYWAY_PLACEHOLDER_"+k+"="+v,
-			"NOWAY_PLACEHOLDER_"+k+"="+v,
-		)
+		cleanK := strings.ReplaceAll(k, ":", "_")
+		env = append(env, "FP__"+cleanK+"__="+v)
 	}
 	cmd.Env = env
 

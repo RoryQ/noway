@@ -53,9 +53,10 @@ func TestAdversarial_EscapedVsUnescaped(t *testing.T) {
 			expected: "${missing:default_value}",
 		},
 		{
-			name:     "unescaped placeholder with default value syntax when undefined",
-			input:    "${missing:default_value}",
-			expected: "default_value",
+			name:        "unescaped placeholder with default value syntax when undefined",
+			input:       "${missing:default_value}",
+			expectError: true,
+			errContains: "no value provided for placeholder: ${missing:default_value}",
 		},
 		{
 			name:     "escaped placeholder with default value syntax when defined",
@@ -63,9 +64,10 @@ func TestAdversarial_EscapedVsUnescaped(t *testing.T) {
 			expected: "${var:fallback}",
 		},
 		{
-			name:     "unescaped placeholder with default value syntax when defined",
-			input:    "${var:fallback}",
-			expected: "resolved_val",
+			name:        "unescaped placeholder with default value syntax when defined",
+			input:       "${var:fallback}",
+			expectError: true,
+			errContains: "no value provided for placeholder: ${var:fallback}",
 		},
 		{
 			name:     "mixed adjacent: unescaped, escaped, unescaped",
@@ -166,7 +168,7 @@ func TestAdversarial_DoubledPrefixEscaping(t *testing.T) {
 			{"$@[not_defined]", "@[not_defined]", false},
 			{"@[not_defined]", "", true},
 			{"@@[not_defined:fallback]", "@[not_defined:fallback]", false},
-			{"@[not_defined:fallback]", "fallback", false},
+			{"@[not_defined:fallback]", "", true},
 			{"@@[env]@[env]$@[env]", "@[env]production@[env]", false},
 		}
 

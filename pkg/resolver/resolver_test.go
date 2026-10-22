@@ -778,5 +778,74 @@ func TestResolver_RelativeScriptPath(t *testing.T) {
 	}
 }
 
+func TestRepeatableScriptMigrationChecksum(t *testing.T) {
+	scriptContent := "#!/bin/bash\necho ${HOME}\necho FP__cluster__\n"
+
+	mockFS := fstest.MapFS{
+		"migrations/R__deploy.sh": &fstest.MapFile{
+			Data: []byte(scriptContent),
+		},
+	}
+
+	replacer1 := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values: map[string]string{
+			"cluster": "cluster-alpha",
+		},
+	})
+
+	res1 := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"migrations"},
+		Replacer:  replacer1,
+	})
+
+	resolved1, err := res1.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected resolve error with ${HOME}: %v", err)
+	}
+	if len(resolved1.RepeatableMigrations) != 1 {
+		t.Fatalf("expected 1 repeatable script migration, got %d", len(resolved1.RepeatableMigrations))
+	}
+
+	expectedContent1 := "#!/bin/bash\necho ${HOME}\necho cluster-alpha\n"
+	expectedCs1, _ := checksum.CalculateString(expectedContent1)
+	if resolved1.RepeatableMigrations[0].Checksum != expectedCs1 {
+		t.Errorf("got checksum %d, want checksum for cluster-alpha %d", resolved1.RepeatableMigrations[0].Checksum, expectedCs1)
+	}
+
+	// Change placeholder value -> checksum changes
+	replacer2 := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values: map[string]string{
+			"cluster": "cluster-beta",
+		},
+	})
+
+	res2 := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"migrations"},
+		Replacer:  replacer2,
+	})
+
+	resolved2, err := res2.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+
+	expectedContent2 := "#!/bin/bash\necho ${HOME}\necho cluster-beta\n"
+	expectedCs2, _ := checksum.CalculateString(expectedContent2)
+	if resolved2.RepeatableMigrations[0].Checksum != expectedCs2 {
+		t.Errorf("got checksum %d, want checksum for cluster-beta %d", resolved2.RepeatableMigrations[0].Checksum, expectedCs2)
+	}
+	if resolved1.RepeatableMigrations[0].Checksum == resolved2.RepeatableMigrations[0].Checksum {
+		t.Errorf("expected different checksums when placeholder changes")
+	}
+}
+
 
 

@@ -107,27 +107,35 @@ schemas:
 }
 
 func TestChallengerM5_BooleanParsingMatrix(t *testing.T) {
-	truthy := []string{"true", "TRUE", "True", "yes", "YES", "1", "on", "ON"}
-	falsy := []string{"false", "FALSE", "False", "no", "NO", "0", "off", "OFF"}
+	truthy := []string{"true", "TRUE", "True"}
+	falsy := []string{"false", "FALSE", "False"}
+	invalid := []string{"yes", "YES", "1", "on", "ON", "no", "NO", "0", "off", "OFF", "flase", "unknown_string"}
 
 	for _, s := range truthy {
-		if !parseBool(s, false) {
-			t.Errorf("expected truthy for %q", s)
+		val, err := ParseBool(s)
+		if err != nil {
+			t.Errorf("expected no error for truthy %q, got: %v", s, err)
+		}
+		if !val {
+			t.Errorf("expected true for %q", s)
 		}
 	}
 
 	for _, s := range falsy {
-		if parseBool(s, true) {
-			t.Errorf("expected falsy for %q", s)
+		val, err := ParseBool(s)
+		if err != nil {
+			t.Errorf("expected no error for falsy %q, got: %v", s, err)
+		}
+		if val {
+			t.Errorf("expected false for %q", s)
 		}
 	}
 
-	// Unknown string returns default
-	if !parseBool("unknown_string", true) {
-		t.Errorf("expected default true")
-	}
-	if parseBool("unknown_string", false) {
-		t.Errorf("expected default false")
+	for _, s := range invalid {
+		_, err := ParseBool(s)
+		if err == nil {
+			t.Errorf("expected error for invalid boolean %q, got nil", s)
+		}
 	}
 }
 

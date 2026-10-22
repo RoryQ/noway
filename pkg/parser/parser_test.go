@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -164,7 +165,7 @@ func TestPlaceholderReplacement(t *testing.T) {
 	}
 
 	replacer := NewPlaceholderReplacer(cfg)
-	sql := "CREATE TABLE ${schema_name}.${table_name} (id INT64); SELECT '${schema_name}'; DEFAULT=${missing:fallback}; ESCAPED=$${not_replaced};"
+	sql := "CREATE TABLE ${schema_name}.${table_name} (id INT64); SELECT '${schema_name}'; ESCAPED=$${not_replaced};"
 
 	builtins := BuiltinPlaceholders{
 		DefaultSchema: "default_ds",
@@ -176,7 +177,7 @@ func TestPlaceholderReplacement(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expected := "CREATE TABLE my_dataset.my_table (id INT64); SELECT 'my_dataset'; DEFAULT=fallback; ESCAPED=${not_replaced};"
+	expected := "CREATE TABLE my_dataset.my_table (id INT64); SELECT 'my_dataset'; ESCAPED=${not_replaced};"
 	if res != expected {
 		t.Errorf("got %q, want %q", res, expected)
 	}
@@ -207,7 +208,7 @@ func TestPlaceholderCaseInsensitive(t *testing.T) {
 		},
 	}
 	replacer := NewPlaceholderReplacer(cfg)
-	sql := "SELECT * FROM ${dataset}.${MYTABLE} WHERE ds = '${DATASET}' AND schema = '${flyway:defaultschema}' AND ts = '${MISSING:fallback}';"
+	sql := "SELECT * FROM ${dataset}.${MYTABLE} WHERE ds = '${DATASET}' AND schema = '${flyway:defaultschema}';"
 	builtins := BuiltinPlaceholders{
 		DefaultSchema: "analytics",
 	}
@@ -217,9 +218,26 @@ func TestPlaceholderCaseInsensitive(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expected := "SELECT * FROM my_dataset.users WHERE ds = 'my_dataset' AND schema = 'analytics' AND ts = 'fallback';"
+	expected := "SELECT * FROM my_dataset.users WHERE ds = 'my_dataset' AND schema = 'analytics';"
 	if res != expected {
 		t.Errorf("got %q, want %q", res, expected)
+	}
+}
+
+func TestPlaceholderDefaultSyntaxReturnsError(t *testing.T) {
+	cfg := PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+		Values:  map[string]string{},
+	}
+	replacer := NewPlaceholderReplacer(cfg)
+	_, err := replacer.Replace("SELECT '${missing:x}'", BuiltinPlaceholders{})
+	if err == nil {
+		t.Fatalf("expected error for ${missing:x}, got nil")
+	}
+	if !strings.Contains(err.Error(), "no value provided for placeholder: ${missing:x}") {
+		t.Fatalf("expected error mentioning no value provided for placeholder, got: %v", err)
 	}
 }
 

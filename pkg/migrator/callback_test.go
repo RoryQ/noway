@@ -84,9 +84,7 @@ echo "NOWAY_DATABASE=$NOWAY_DATABASE" >> ` + outFile + `
 echo "FLYWAY_SCHEMAS=$FLYWAY_SCHEMAS" >> ` + outFile + `
 echo "NOWAY_SCHEMAS=$NOWAY_SCHEMAS" >> ` + outFile + `
 echo "FLYWAY_EVENT=$FLYWAY_EVENT" >> ` + outFile + `
-echo "FP__region=$FP__region" >> ` + outFile + `
-echo "FLYWAY_PLACEHOLDER_region=$FLYWAY_PLACEHOLDER_region" >> ` + outFile + `
-echo "NOWAY_PLACEHOLDER_region=$NOWAY_PLACEHOLDER_region" >> ` + outFile + `
+echo "FP__region__=$FP__region__" >> ` + outFile + `
 exit 0
 `
 
@@ -135,9 +133,7 @@ exit 0
 		"FLYWAY_SCHEMAS=dataset_a,dataset_b",
 		"NOWAY_SCHEMAS=dataset_a,dataset_b",
 		"FLYWAY_EVENT=beforeMigrate",
-		"FP__region=us-central1",
-		"FLYWAY_PLACEHOLDER_region=us-central1",
-		"NOWAY_PLACEHOLDER_region=us-central1",
+		"FP__region__=us-central1",
 	}
 
 	for _, k := range expectedKeys {
@@ -157,7 +153,7 @@ if os.environ.get("FLYWAY_OPERATION") != "VALIDATE":
     sys.exit(10)
 if os.environ.get("FLYWAY_DATABASE") != "py_dataset":
     sys.exit(11)
-if os.environ.get("FP__cluster") != "prod-cluster-1":
+if os.environ.get("FP__cluster__") != "prod-cluster-1":
     sys.exit(12)
 sys.exit(0)
 `
@@ -350,19 +346,10 @@ func TestCallbackRunner_ScriptFilesystemUsesReplacedPlaceholders(t *testing.T) {
 
 	outFile := filepath.Join(tmpDir, "ph_out.txt")
 	scriptFile := filepath.Join(tmpDir, "beforeMigrate__replace.sh")
-	scriptContent := fmt.Sprintf("#!/bin/bash\necho \"VAL=${custom_val}\" > %s\n", outFile)
+	scriptContent := fmt.Sprintf("#!/bin/bash\necho \"VAL=$FP__custom_val__\" > %s\n", outFile)
 	if err := os.WriteFile(scriptFile, []byte(scriptContent), 0755); err != nil {
 		t.Fatalf("failed to write script: %v", err)
 	}
-
-	replacer := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
-		Enabled: true,
-		Prefix:  "${",
-		Suffix:  "}",
-		Values: map[string]string{
-			"custom_val": "hello_from_placeholder",
-		},
-	})
 
 	callbacks := map[string][]resolver.ResolvedCallback{
 		"beforeMigrate": {
@@ -375,7 +362,12 @@ func TestCallbackRunner_ScriptFilesystemUsesReplacedPlaceholders(t *testing.T) {
 		},
 	}
 
-	runner := NewCallbackRunner(db, callbacks, parser.NewBigQueryParser(), replacer, parser.BuiltinPlaceholders{})
+	runner := NewCallbackRunner(db, callbacks, parser.NewBigQueryParser(), parser.NewPlaceholderReplacer(parser.PlaceholderConfig{}), parser.BuiltinPlaceholders{})
+	runner.SetConfig(&config.Configuration{
+		Placeholders: map[string]string{
+			"custom_val": "hello_from_placeholder",
+		},
+	})
 	if err := runner.Fire(ctx, "beforeMigrate"); err != nil {
 		t.Fatalf("Fire failed: %v", err)
 	}
@@ -394,45 +386,43 @@ func TestCallbackRunner_ScriptFilesystemUsesReplacedPlaceholders(t *testing.T) {
 		t.Errorf("expected exec bit preserved on user file, got mode: %v", fi.Mode().Perm())
 	}
 	diskContent, _ := os.ReadFile(scriptFile)
-	if !strings.Contains(string(diskContent), "${custom_val}") {
+	if !strings.Contains(string(diskContent), "$FP__custom_val__") {
 		t.Errorf("expected original file on disk to remain unchanged, got: %s", string(diskContent))
 	}
 }
 
-func TestCallbackRunner_ScriptPlaceholderError(t *testing.T) {
+func TestCallbackRunner_ScriptShellSyntaxExecutesWithoutPlaceholderError(t *testing.T) {
 	ctx := context.Background()
 	db := mock.NewMockDatabase()
 	tmpDir := t.TempDir()
 
-	scriptFile := filepath.Join(tmpDir, "beforeMigrate__missing.sh")
-	scriptContent := "#!/bin/bash\necho \"${missing_ph}\"\n"
+	outFile := filepath.Join(tmpDir, "shell_out.txt")
+	scriptFile := filepath.Join(tmpDir, "beforeMigrate__shell.sh")
+	scriptContent := fmt.Sprintf("#!/bin/bash\necho \"SHELL_VAR=${UNKNOWN_SHELL_VAR:-my_default}\" > %s\nexit 0\n", outFile)
 	_ = os.WriteFile(scriptFile, []byte(scriptContent), 0755)
-
-	replacer := parser.NewPlaceholderReplacer(parser.PlaceholderConfig{
-		Enabled: true,
-		Prefix:  "${",
-		Suffix:  "}",
-		Values:  map[string]string{},
-	})
 
 	callbacks := map[string][]resolver.ResolvedCallback{
 		"beforeMigrate": {
 			{
 				Event:            "beforeMigrate",
-				Filename:         "beforeMigrate__missing.sh",
+				Filename:         "beforeMigrate__shell.sh",
 				PhysicalLocation: scriptFile,
 				Content:          scriptContent,
 			},
 		},
 	}
 
-	runner := NewCallbackRunner(db, callbacks, parser.NewBigQueryParser(), replacer, parser.BuiltinPlaceholders{})
-	err := runner.Fire(ctx, "beforeMigrate")
-	if err == nil {
-		t.Fatalf("expected placeholder error for missing placeholder, got nil")
+	runner := NewCallbackRunner(db, callbacks, parser.NewBigQueryParser(), parser.NewPlaceholderReplacer(parser.PlaceholderConfig{}), parser.BuiltinPlaceholders{})
+	if err := runner.Fire(ctx, "beforeMigrate"); err != nil {
+		t.Fatalf("expected script with shell syntax to execute without error, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "error replacing placeholders") {
-		t.Errorf("expected placeholder error message, got: %v", err)
+
+	outData, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if !strings.Contains(string(outData), "SHELL_VAR=my_default") {
+		t.Errorf("expected shell variable default expanded by bash, got: %s", string(outData))
 	}
 }
 

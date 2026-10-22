@@ -119,7 +119,7 @@ func TestAdversarial_RepeatableMissingPlaceholderErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("repeatable with default value syntax succeeds and uses default for checksum", func(t *testing.T) {
+	t.Run("repeatable with unconfigured placeholder fails checksum calculation with error", func(t *testing.T) {
 		mockFS := fstest.MapFS{
 			"migrations/R__fallback.sql": &fstest.MapFile{
 				Data: []byte("SELECT '${missing_with_default:fallback_dataset}';"),
@@ -132,14 +132,12 @@ func TestAdversarial_RepeatableMissingPlaceholderErrors(t *testing.T) {
 			Replacer:  replacer,
 		})
 
-		resolved, err := res.Resolve()
-		if err != nil {
-			t.Fatalf("expected repeatable with default value to succeed, got: %v", err)
+		_, err := res.Resolve()
+		if err == nil {
+			t.Fatalf("expected repeatable with unconfigured placeholder to fail, got nil")
 		}
-
-		expectedChecksum, _ := checksum.CalculateString("SELECT 'fallback_dataset';")
-		if resolved.RepeatableMigrations[0].Checksum != expectedChecksum {
-			t.Errorf("got checksum %d, want checksum for fallback_dataset %d", resolved.RepeatableMigrations[0].Checksum, expectedChecksum)
+		if !strings.Contains(err.Error(), "no value provided for placeholder") {
+			t.Errorf("expected error mentioning no value provided for placeholder, got: %v", err)
 		}
 	})
 

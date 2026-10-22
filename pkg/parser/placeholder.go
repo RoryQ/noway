@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -48,13 +49,31 @@ func NewPlaceholderReplacer(cfg PlaceholderConfig) *PlaceholderReplacer {
 	return &PlaceholderReplacer{config: cfg}
 }
 
+// ScriptReplacer returns a replacer configured to replace script placeholders of the form FP__<key>__.
+func (p *PlaceholderReplacer) ScriptReplacer() *PlaceholderReplacer {
+	scriptValues := make(map[string]string)
+	for k, v := range p.config.Values {
+		scriptValues[strings.ReplaceAll(k, ":", "_")] = v
+	}
+	cfg := PlaceholderConfig{
+		Enabled:   p.config.Enabled,
+		Prefix:    "FP__",
+		Suffix:    "__",
+		Separator: "",
+		Values:    scriptValues,
+	}
+	return NewPlaceholderReplacer(cfg)
+}
+
 // BuiltinPlaceholders contains contextual values for built-in placeholders.
 type BuiltinPlaceholders struct {
-	DefaultSchema string
-	Table         string
-	User          string
-	Database      string
-	Timestamp     time.Time
+	DefaultSchema    string
+	Table            string
+	User             string
+	Database         string
+	Timestamp        time.Time
+	Filename         string
+	WorkingDirectory string
 }
 
 // IsEnabled returns whether placeholder replacement is enabled.
@@ -74,7 +93,6 @@ func (p *PlaceholderReplacer) Replace(input string, builtins BuiltinPlaceholders
 func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlaceholders) (string, error) {
 	prefix := p.config.Prefix
 	suffix := p.config.Suffix
-	sep := p.config.Separator
 	escapedPrefix1 := "$" + prefix // e.g. $${ or $@[
 	var escapedPrefix2 string
 	if len(prefix) > 0 {
@@ -103,6 +121,8 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	}
 	addBuiltin("flyway:defaultSchema", defaultSchema)
 	addBuiltin("noway:defaultSchema", defaultSchema)
+	addBuiltin("flyway_defaultSchema", defaultSchema)
+	addBuiltin("noway_defaultSchema", defaultSchema)
 
 	table := builtins.Table
 	if table == "" {
@@ -110,6 +130,8 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	}
 	addBuiltin("flyway:table", table)
 	addBuiltin("noway:table", table)
+	addBuiltin("flyway_table", table)
+	addBuiltin("noway_table", table)
 
 	user := builtins.User
 	if user == "" {
@@ -117,6 +139,8 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	}
 	addBuiltin("flyway:user", user)
 	addBuiltin("noway:user", user)
+	addBuiltin("flyway_user", user)
+	addBuiltin("noway_user", user)
 
 	database := builtins.Database
 	if database == "" {
@@ -124,6 +148,8 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	}
 	addBuiltin("flyway:database", database)
 	addBuiltin("noway:database", database)
+	addBuiltin("flyway_database", database)
+	addBuiltin("noway_database", database)
 
 	ts := builtins.Timestamp
 	if ts.IsZero() {
@@ -132,6 +158,29 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 	formattedTs := ts.Format("2006-01-02 15:04:05")
 	addBuiltin("flyway:timestamp", formattedTs)
 	addBuiltin("noway:timestamp", formattedTs)
+	addBuiltin("flyway_timestamp", formattedTs)
+	addBuiltin("noway_timestamp", formattedTs)
+
+	filename := builtins.Filename
+	if filename != "" {
+		addBuiltin("flyway:filename", filename)
+		addBuiltin("noway:filename", filename)
+		addBuiltin("flyway_filename", filename)
+		addBuiltin("noway_filename", filename)
+	}
+
+	workingDir := builtins.WorkingDirectory
+	if workingDir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			workingDir = wd
+		}
+	}
+	if workingDir != "" {
+		addBuiltin("flyway:workingDirectory", workingDir)
+		addBuiltin("noway:workingDirectory", workingDir)
+		addBuiltin("flyway_workingDirectory", workingDir)
+		addBuiltin("noway_workingDirectory", workingDir)
+	}
 
 	lookupValue := func(key string) (string, bool) {
 		if val, ok := values[key]; ok {
@@ -170,29 +219,7 @@ func (p *PlaceholderReplacer) ReplaceContent(input string, builtins BuiltinPlace
 					continue
 				}
 
-				var key, defaultVal string
-				hasDefault := false
-
-				if sep != "" && strings.Contains(placeholderExpr, sep) {
-					parts := strings.SplitN(placeholderExpr, sep, 2)
-					key = parts[0]
-					defaultVal = parts[1]
-					hasDefault = true
-				} else {
-					key = placeholderExpr
-				}
-
-				if val, ok := lookupValue(key); ok {
-					sb.WriteString(val)
-					i += len(prefix) + suffixIdx + len(suffix)
-					continue
-				} else if hasDefault {
-					sb.WriteString(defaultVal)
-					i += len(prefix) + suffixIdx + len(suffix)
-					continue
-				} else {
-					return "", fmt.Errorf("no value provided for placeholder: %s%s%s. Check your configuration or migration script", prefix, key, suffix)
-				}
+				return "", fmt.Errorf("no value provided for placeholder: %s%s%s. Check your configuration or migration script", prefix, placeholderExpr, suffix)
 			}
 		}
 

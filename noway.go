@@ -275,8 +275,12 @@ func New(opts ...Option) (*Noway, error) {
 		}
 	}
 
-	// Apply environment variables first
-	config.LoadFromEnv(cfg)
+	// Apply environment variables if baseCfg was not provided (callers with baseCfg, e.g. CLI or WithConfig, handle env before CLI flags)
+	if options.baseCfg == nil {
+		if err := config.LoadFromEnv(cfg); err != nil {
+			return nil, err
+		}
+	}
 
 	// Apply functional modifiers on top of base config (so programmatic options take highest precedence)
 	for _, mod := range options.modifiers {

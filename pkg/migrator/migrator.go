@@ -730,7 +730,11 @@ func (m *Migrator) executeSQLMigration(
 		shouldReplace = *mig.Config.PlaceholderReplacement
 	}
 	if shouldReplace {
-		replaced, err := m.replacer.ReplaceContent(sql, m.builtins)
+		builtins := m.builtins
+		if builtins.Filename == "" {
+			builtins.Filename = filepath.Base(mig.Script)
+		}
+		replaced, err := m.replacer.ReplaceContent(sql, builtins)
 		if err != nil {
 			return nil, fmt.Errorf("error replacing placeholders in %s: %w", mig.Script, err)
 		}
@@ -839,24 +843,11 @@ func (m *Migrator) executeScriptMigration(
 	}
 
 	startTime := time.Now()
-	scriptContent := mig.Content
-
-	shouldReplace := m.config.PlaceholderReplacement
-	if mig.Config.PlaceholderReplacement != nil {
-		shouldReplace = *mig.Config.PlaceholderReplacement
-	}
-	if shouldReplace && m.replacer != nil {
-		replaced, err := m.replacer.ReplaceContent(scriptContent, m.builtins)
-		if err != nil {
-			return nil, fmt.Errorf("error replacing placeholders in %s: %w", mig.Script, err)
-		}
-		scriptContent = replaced
-	}
 
 	var scriptPath string
 	var cleanup func()
 
-	if mig.PhysicalLocation != "" && scriptContent == mig.Content {
+	if mig.PhysicalLocation != "" {
 		if fi, err := os.Stat(mig.PhysicalLocation); err == nil && !fi.IsDir() {
 			scriptPath = mig.PhysicalLocation
 		}
@@ -871,7 +862,7 @@ func (m *Migrator) executeScriptMigration(
 		if err != nil {
 			return nil, fmt.Errorf("failed creating temp script for %s: %w", mig.Script, err)
 		}
-		if _, err := tmpFile.WriteString(scriptContent); err != nil {
+		if _, err := tmpFile.WriteString(mig.Content); err != nil {
 			tmpFile.Close()
 			os.Remove(tmpFile.Name())
 			return nil, fmt.Errorf("failed writing temp script for %s: %w", mig.Script, err)
@@ -930,7 +921,20 @@ func (m *Migrator) executeScriptMigration(
 		"NOWAY_GCP_LOCATION="+m.config.GCPLocation,
 		"FLYWAY_BIGQUERY_ENDPOINT="+m.config.GCPBigQueryEndpoint,
 		"NOWAY_BIGQUERY_ENDPOINT="+m.config.GCPBigQueryEndpoint,
+		"FP__flyway_defaultSchema__="+schema,
+		"FP__flyway_table__="+table,
+		"FP__flyway_user__="+user,
+		"FP__flyway_database__="+schema,
+		"FP__flyway_filename__="+filepath.Base(mig.Script),
 	)
+	if m.builtins.WorkingDirectory != "" {
+		env = append(env, "FP__flyway_workingDirectory__="+m.builtins.WorkingDirectory)
+	} else if wd, err := os.Getwd(); err == nil {
+		env = append(env, "FP__flyway_workingDirectory__="+wd)
+	}
+	if !m.builtins.Timestamp.IsZero() {
+		env = append(env, "FP__flyway_timestamp__="+m.builtins.Timestamp.Format("2006-01-02 15:04:05"))
+	}
 	if mig.Version != nil {
 		env = append(env,
 			"FLYWAY_VERSION="+mig.Version.String(),
@@ -938,11 +942,8 @@ func (m *Migrator) executeScriptMigration(
 		)
 	}
 	for k, v := range m.config.Placeholders {
-		env = append(env,
-			"FP__"+k+"="+v,
-			"FLYWAY_PLACEHOLDER_"+k+"="+v,
-			"NOWAY_PLACEHOLDER_"+k+"="+v,
-		)
+		cleanK := strings.ReplaceAll(k, ":", "_")
+		env = append(env, "FP__"+cleanK+"__="+v)
 	}
 	cmd.Env = env
 

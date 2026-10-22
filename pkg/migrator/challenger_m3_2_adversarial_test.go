@@ -293,10 +293,10 @@ sys.exit(0)
 
 		// 2. Builtin FP__ placeholders
 		expectedBuiltinFP := map[string]string{
-			"FP__flyway_defaultSchema": "analytics_prod",
-			"FP__flyway_table":         "custom_schema_history",
-			"FP__flyway_user":          "cicd_deployer@service.iam.gserviceaccount.com",
-			"FP__flyway_database":      "bigquery_proj_123",
+			"FP__flyway_defaultSchema__": "analytics_prod",
+			"FP__flyway_table__":         "custom_schema_history",
+			"FP__flyway_user__":          "cicd_deployer@service.iam.gserviceaccount.com",
+			"FP__flyway_database__":      "bigquery_proj_123",
 		}
 
 		for k, expectedVal := range expectedBuiltinFP {
@@ -308,7 +308,7 @@ sys.exit(0)
 			}
 		}
 
-		// 3. Custom placeholders (FP__*, FLYWAY_PLACEHOLDER_*, NOWAY_PLACEHOLDER_*)
+		// 3. Custom placeholders (FP__<key>__)
 		customPlaceholders := map[string]string{
 			"cluster":     "us-central1-b",
 			"app_version": "v2.5.0",
@@ -317,18 +317,10 @@ sys.exit(0)
 		}
 
 		for k, v := range customPlaceholders {
-			fpKey := "FP__" + k
-			flywayKey := "FLYWAY_PLACEHOLDER_" + k
-			nowayKey := "NOWAY_PLACEHOLDER_" + k
+			fpKey := "FP__" + k + "__"
 
 			if envVars[fpKey] != v {
 				t.Errorf("expected %s = %q, got %q", fpKey, v, envVars[fpKey])
-			}
-			if envVars[flywayKey] != v {
-				t.Errorf("expected %s = %q, got %q", flywayKey, v, envVars[flywayKey])
-			}
-			if envVars[nowayKey] != v {
-				t.Errorf("expected %s = %q, got %q", nowayKey, v, envVars[nowayKey])
 			}
 		}
 	})
@@ -1155,9 +1147,9 @@ func TestChallenger_ScriptEnv_ComplexPlaceholderValues(t *testing.T) {
 
 	pyScript := fmt.Sprintf(`import os, json, sys
 data = {
-    "spaced": os.environ.get("FP__spaced_var"),
-    "dollar": os.environ.get("FP__dollar_var"),
-    "quoted": os.environ.get("FP__quoted_var"),
+    "spaced": os.environ.get("FP__spaced_var__"),
+    "dollar": os.environ.get("FP__dollar_var__"),
+    "quoted": os.environ.get("FP__quoted_var__"),
 }
 with open(%q, "w") as f:
     json.dump(data, f)

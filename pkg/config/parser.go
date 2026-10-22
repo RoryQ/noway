@@ -395,7 +395,9 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 		if kLower == "flyway" || kLower == "environments" || kLower == "environment" || kLower == "env" || kLower == "flyway.environment" || kLower == "flyway.env" {
 			continue
 		}
-		applyAnyValue(cfg, k, v)
+		if err := applyAnyValue(cfg, k, v); err != nil {
+			return err
+		}
 	}
 
 	// 2. Apply [flyway] table
@@ -405,7 +407,9 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 			if kLower == "environment" || kLower == "env" {
 				continue
 			}
-			applyAnyValue(cfg, k, v)
+			if err := applyAnyValue(cfg, k, v); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -432,14 +436,18 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 			if strings.EqualFold(k, "flyway") {
 				continue
 			}
-			applyAnyValue(cfg, k, v)
+			if err := applyAnyValue(cfg, k, v); err != nil {
+				return err
+			}
 		}
 		// Apply nested [environments.<env>.flyway]
 		for k, v := range envObj {
 			if strings.EqualFold(k, "flyway") {
 				if envFlywayMap, ok := v.(map[string]any); ok {
 					for fk, fv := range envFlywayMap {
-						applyAnyValue(cfg, fk, fv)
+						if err := applyAnyValue(cfg, fk, fv); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -449,25 +457,24 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 	return nil
 }
 
-func applyAnyValue(cfg *Configuration, key string, val any) {
+func applyAnyValue(cfg *Configuration, key string, val any) error {
 	if val == nil {
-		return
+		return nil
 	}
 	switch v := val.(type) {
 	case string:
-		applyProperty(cfg, key, v)
+		return applyProperty(cfg, key, v)
 	case bool:
-		applyProperty(cfg, key, strconv.FormatBool(v))
+		return applyProperty(cfg, key, strconv.FormatBool(v))
 	case int:
-		applyProperty(cfg, key, strconv.Itoa(v))
+		return applyProperty(cfg, key, strconv.Itoa(v))
 	case int64:
-		applyProperty(cfg, key, strconv.FormatInt(v, 10))
+		return applyProperty(cfg, key, strconv.FormatInt(v, 10))
 	case float64:
 		if v == float64(int64(v)) {
-			applyProperty(cfg, key, strconv.FormatInt(int64(v), 10))
-		} else {
-			applyProperty(cfg, key, fmt.Sprintf("%v", v))
+			return applyProperty(cfg, key, strconv.FormatInt(int64(v), 10))
 		}
+		return applyProperty(cfg, key, fmt.Sprintf("%v", v))
 	case []any:
 		var items []string
 		for _, item := range v {
@@ -476,23 +483,29 @@ func applyAnyValue(cfg *Configuration, key string, val any) {
 		switch strings.ToLower(key) {
 		case "locations":
 			cfg.Locations = items
+			return nil
 		case "schemas":
 			cfg.Schemas = items
+			return nil
 		case "sqlmigrationsuffixes", "sql_migration_suffixes":
 			cfg.SQLMigrationSuffixes = items
+			return nil
 		default:
-			applyProperty(cfg, key, strings.Join(items, ","))
+			return applyProperty(cfg, key, strings.Join(items, ","))
 		}
 	case []string:
 		switch strings.ToLower(key) {
 		case "locations":
 			cfg.Locations = v
+			return nil
 		case "schemas":
 			cfg.Schemas = v
+			return nil
 		case "sqlmigrationsuffixes", "sql_migration_suffixes":
 			cfg.SQLMigrationSuffixes = v
+			return nil
 		default:
-			applyProperty(cfg, key, strings.Join(v, ","))
+			return applyProperty(cfg, key, strings.Join(v, ","))
 		}
 	case map[string]any:
 		keyLower := strings.ToLower(key)
@@ -503,11 +516,14 @@ func applyAnyValue(cfg *Configuration, key string, val any) {
 			for pk, pv := range v {
 				cfg.Placeholders[pk] = fmt.Sprintf("%v", pv)
 			}
-		} else {
-			for subK, subV := range v {
-				applyAnyValue(cfg, key+"."+subK, subV)
+			return nil
+		}
+		for subK, subV := range v {
+			if err := applyAnyValue(cfg, key+"."+subK, subV); err != nil {
+				return err
 			}
 		}
+		return nil
 	case map[string]string:
 		keyLower := strings.ToLower(key)
 		if keyLower == "placeholders" {
@@ -517,18 +533,21 @@ func applyAnyValue(cfg *Configuration, key string, val any) {
 			for pk, pv := range v {
 				cfg.Placeholders[pk] = pv
 			}
-		} else {
-			for subK, subV := range v {
-				applyProperty(cfg, key+"."+subK, subV)
+			return nil
+		}
+		for subK, subV := range v {
+			if err := applyProperty(cfg, key+"."+subK, subV); err != nil {
+				return err
 			}
 		}
+		return nil
 	default:
-		applyProperty(cfg, key, fmt.Sprintf("%v", v))
+		return applyProperty(cfg, key, fmt.Sprintf("%v", v))
 	}
 }
 
 // LoadFromEnv overrides configuration values from FLYWAY_* and NOWAY_* environment variables.
-func LoadFromEnv(cfg *Configuration) {
+func LoadFromEnv(cfg *Configuration) error {
 	for _, env := range os.Environ() {
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) != 2 {
@@ -540,15 +559,20 @@ func LoadFromEnv(cfg *Configuration) {
 		kUpper := strings.ToUpper(k)
 		if strings.HasPrefix(kUpper, "FLYWAY_") {
 			key := k[len("FLYWAY_"):]
-			applyEnvKey(cfg, key, v)
+			if err := applyEnvKey(cfg, key, v); err != nil {
+				return err
+			}
 		} else if strings.HasPrefix(kUpper, "NOWAY_") {
 			key := k[len("NOWAY_"):]
-			applyEnvKey(cfg, key, v)
+			if err := applyEnvKey(cfg, key, v); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
-func applyEnvKey(cfg *Configuration, key, val string) {
+func applyEnvKey(cfg *Configuration, key, val string) error {
 	keyUpper := strings.ToUpper(key)
 	switch keyUpper {
 	case "ENVIRONMENT", "ENV":
@@ -568,7 +592,11 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 	case "SCHEMAS":
 		cfg.Schemas = splitAndTrim(val, ",")
 	case "CREATE_SCHEMAS", "CREATESCHEMAS":
-		cfg.CreateSchemas = parseBool(val, true)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.CreateSchemas = b
 	case "DEFAULT_SCHEMA", "DEFAULTSCHEMA":
 		cfg.DefaultSchema = val
 	case "TABLE":
@@ -586,7 +614,11 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 	case "ENCODING":
 		cfg.Encoding = val
 	case "PLACEHOLDER_REPLACEMENT", "PLACEHOLDERREPLACEMENT":
-		cfg.PlaceholderReplacement = parseBool(val, true)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.PlaceholderReplacement = b
 	case "PLACEHOLDER_PREFIX", "PLACEHOLDERPREFIX":
 		cfg.PlaceholderPrefix = val
 	case "PLACEHOLDER_SUFFIX", "PLACEHOLDERSUFFIX":
@@ -596,25 +628,65 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 	case "TARGET":
 		cfg.Target = val
 	case "OUT_OF_ORDER", "OUTOFORDER":
-		cfg.OutOfOrder = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.OutOfOrder = b
 	case "VALIDATE_ON_MIGRATE", "VALIDATEONMIGRATE":
-		cfg.ValidateOnMigrate = parseBool(val, true)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.ValidateOnMigrate = b
 	case "IGNORE_FUTURE_MIGRATIONS", "IGNOREFUTUREMIGRATIONS":
-		cfg.IgnoreFutureMigrations = parseBool(val, true)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.IgnoreFutureMigrations = b
 	case "IGNORE_MISSING_MIGRATIONS", "IGNOREMISSINGMIGRATIONS":
-		cfg.IgnoreMissingMigrations = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.IgnoreMissingMigrations = b
 	case "IGNORE_PENDING_MIGRATIONS", "IGNOREPENDINGMIGRATIONS":
-		cfg.IgnorePendingMigrations = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.IgnorePendingMigrations = b
 	case "CLEAN_DISABLED", "CLEANDISABLED":
-		cfg.CleanDisabled = parseBool(val, true)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.CleanDisabled = b
 	case "CLEAN_ON_VALIDATION_ERROR", "CLEANONVALIDATIONERROR":
-		cfg.CleanOnValidationError = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.CleanOnValidationError = b
 	case "MIXED":
-		cfg.Mixed = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.Mixed = b
 	case "GROUP":
-		cfg.Group = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.Group = b
 	case "BATCH":
-		cfg.Batch = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.Batch = b
 	case "INSTALLED_BY", "INSTALLEDBY":
 		cfg.InstalledBy = val
 	case "CONNECT_RETRIES", "CONNECTRETRIES":
@@ -626,7 +698,11 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 	case "BASELINE_DESCRIPTION", "BASELINEDESCRIPTION":
 		cfg.BaselineDescription = val
 	case "BASELINE_ON_MIGRATE", "BASELINEONMIGRATE":
-		cfg.BaselineOnMigrate = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.BaselineOnMigrate = b
 	case "OUTPUT_TYPE", "OUTPUTTYPE":
 		cfg.OutputType = val
 	case "DRY_RUN_OUTPUT", "DRYRUNOUTPUT":
@@ -664,6 +740,7 @@ func applyEnvKey(cfg *Configuration, key, val string) {
 			cfg.Placeholders[phKey] = val
 		}
 	}
+	return nil
 }
 
 // parseProperties parses Java-style .properties / flyway.conf files.
@@ -698,14 +775,25 @@ func parseProperties(content string, cfg *Configuration) error {
 			cleanKey = cleanKey[len("noway."):]
 		}
 
-		applyProperty(cfg, cleanKey, val)
+		if err := applyProperty(cfg, cleanKey, val); err != nil {
+			return err
+		}
 	}
 
 	return scanner.Err()
 }
 
-func applyProperty(cfg *Configuration, key, val string) {
-	switch strings.ToLower(key) {
+func applyProperty(cfg *Configuration, key, val string) error {
+	cleanKey := key
+	lowerKey := strings.ToLower(cleanKey)
+	if strings.HasPrefix(lowerKey, "flyway.") {
+		cleanKey = cleanKey[len("flyway."):]
+	} else if strings.HasPrefix(lowerKey, "noway.") {
+		cleanKey = cleanKey[len("noway."):]
+	}
+	cleanKeyLower := strings.ToLower(cleanKey)
+
+	switch cleanKeyLower {
 	case "environment", "env":
 		cfg.Environment = val
 	case "url":
@@ -716,114 +804,171 @@ func applyProperty(cfg *Configuration, key, val string) {
 		cfg.Password = val
 	case "driver":
 		cfg.Driver = val
-	case "lockretrycount", "lock_retry_count":
+	case "lockretrycount", "lock_retry_count", "lock-retry-count":
 		if n, err := strconv.Atoi(val); err == nil {
 			cfg.LockRetryCount = n
 		}
 	case "schemas":
 		cfg.Schemas = splitAndTrim(val, ",")
-	case "createschemas", "create_schemas":
-		cfg.CreateSchemas = parseBool(val, true)
-	case "defaultschema":
+	case "createschemas", "create_schemas", "create-schemas":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.CreateSchemas = b
+	case "defaultschema", "default_schema", "default-schema":
 		cfg.DefaultSchema = val
 	case "table":
 		cfg.Table = val
 	case "locations":
 		cfg.Locations = splitAndTrim(val, ",")
-	case "sqlmigrationprefix":
+	case "sqlmigrationprefix", "sql_migration_prefix", "sql-migration-prefix":
 		cfg.SQLMigrationPrefix = val
-	case "repeatablesqlmigrationprefix":
+	case "repeatablesqlmigrationprefix", "repeatable_sql_migration_prefix", "repeatable-sql-migration-prefix":
 		cfg.RepeatableSQLMigrationPrefix = val
-	case "undosqlmigrationprefix":
+	case "undosqlmigrationprefix", "undo_sql_migration_prefix", "undo-sql-migration-prefix":
 		cfg.UndoSQLMigrationPrefix = val
-	case "baselinesqlmigrationprefix":
+	case "baselinesqlmigrationprefix", "baseline_sql_migration_prefix", "baseline-sql-migration-prefix":
 		cfg.BaselineSQLMigrationPrefix = val
-	case "sqlmigrationseparator":
+	case "sqlmigrationseparator", "sql_migration_separator", "sql-migration-separator":
 		cfg.SQLMigrationSeparator = val
-	case "sqlmigrationsuffixes":
+	case "sqlmigrationsuffixes", "sql_migration_suffixes", "sql-migration-suffixes":
 		cfg.SQLMigrationSuffixes = splitAndTrim(val, ",")
 	case "encoding":
 		cfg.Encoding = val
-	case "placeholderreplacement", "placeholder.replacement", "placeholder_replacement":
-		cfg.PlaceholderReplacement = parseBool(val, true)
-	case "placeholderprefix", "placeholder.prefix", "placeholder_prefix":
+	case "placeholderreplacement", "placeholder.replacement", "placeholder_replacement", "placeholder-replacement":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.PlaceholderReplacement = b
+	case "placeholderprefix", "placeholder.prefix", "placeholder_prefix", "placeholder-prefix":
 		cfg.PlaceholderPrefix = val
-	case "placeholdersuffix", "placeholder.suffix", "placeholder_suffix":
+	case "placeholdersuffix", "placeholder.suffix", "placeholder_suffix", "placeholder-suffix":
 		cfg.PlaceholderSuffix = val
-	case "placeholderseparator", "placeholder.separator", "placeholder_separator":
+	case "placeholderseparator", "placeholder.separator", "placeholder_separator", "placeholder-separator":
 		cfg.PlaceholderSeparator = val
 	case "target":
 		cfg.Target = val
-	case "outoforder":
-		cfg.OutOfOrder = parseBool(val, false)
-	case "validateonmigrate":
-		cfg.ValidateOnMigrate = parseBool(val, true)
-	case "ignorefuturemigrations", "ignore_future_migrations":
-		cfg.IgnoreFutureMigrations = parseBool(val, true)
-	case "ignoremissingmigrations", "ignore_missing_migrations":
-		cfg.IgnoreMissingMigrations = parseBool(val, false)
-	case "ignorependingmigrations", "ignore_pending_migrations":
-		cfg.IgnorePendingMigrations = parseBool(val, false)
-	case "cleandisabled":
-		cfg.CleanDisabled = parseBool(val, true)
-	case "cleanonvalidationerror":
-		cfg.CleanOnValidationError = parseBool(val, false)
+	case "outoforder", "out_of_order", "out-of-order":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.OutOfOrder = b
+	case "validateonmigrate", "validate_on_migrate", "validate-on-migrate":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.ValidateOnMigrate = b
+	case "ignorefuturemigrations", "ignore_future_migrations", "ignore-future-migrations":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.IgnoreFutureMigrations = b
+	case "ignoremissingmigrations", "ignore_missing_migrations", "ignore-missing-migrations":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.IgnoreMissingMigrations = b
+	case "ignorependingmigrations", "ignore_pending_migrations", "ignore-pending-migrations":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.IgnorePendingMigrations = b
+	case "cleandisabled", "clean_disabled", "clean-disabled":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.CleanDisabled = b
+	case "cleanonvalidationerror", "clean_on_validation_error", "clean-on-validation-error":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.CleanOnValidationError = b
 	case "mixed":
-		cfg.Mixed = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.Mixed = b
 	case "group":
-		cfg.Group = parseBool(val, false)
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.Group = b
 	case "batch":
-		cfg.Batch = parseBool(val, false)
-	case "installedby":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.Batch = b
+	case "installedby", "installed_by", "installed-by":
 		cfg.InstalledBy = val
-	case "connectretries":
+	case "connectretries", "connect_retries", "connect-retries":
 		if n, err := strconv.Atoi(val); err == nil {
 			cfg.ConnectRetries = n
 		}
-	case "baselineversion":
+	case "baselineversion", "baseline_version", "baseline-version":
 		cfg.BaselineVersion = val
-	case "baselinedescription":
+	case "baselinedescription", "baseline_description", "baseline-description":
 		cfg.BaselineDescription = val
-	case "baselineonmigrate":
-		cfg.BaselineOnMigrate = parseBool(val, false)
-	case "outputtype":
-		cfg.OutputType = val
-	case "dryrunoutput", "dry_run_output":
-		cfg.DryRunOutput = val
-	case "gcpprojectid":
-		cfg.GCPProjectID = val
-	case "gcpdataset":
-		cfg.GCPDataset = val
-	case "gcplocation":
-		cfg.GCPLocation = val
-	case "gcpcredentialsfile":
-		cfg.GCPCredentialsFile = val
-	case "gcpcredentialsjson":
-		cfg.GCPCredentialsJSON = val
-	case "gcpbigqueryendpoint", "bigqueryendpoint":
-		cfg.GCPBigQueryEndpoint = val
-	case "spannerinstanceid", "spanner_instance_id", "gcpspannerinstanceid", "instanceid", "instance_id":
-		cfg.GCPSpannerInstanceID = val
-	case "spannerdatabaseid", "spanner_database_id", "gcpspannerdatabaseid", "databaseid", "database_id":
-		cfg.GCPSpannerDatabaseID = val
-	case "spannerendpoint", "spanner_endpoint", "gcpspannerendpoint":
-		cfg.GCPSpannerEndpoint = val
-	default:
-		keyLower := strings.ToLower(key)
-		if strings.HasPrefix(keyLower, "placeholders.") {
-			phKey := key[len("placeholders."):]
-			if cfg.Placeholders == nil {
-				cfg.Placeholders = make(map[string]string)
-			}
-			cfg.Placeholders[phKey] = val
-		} else if strings.HasPrefix(keyLower, "placeholder.") {
-			phKey := key[len("placeholder."):]
-			if cfg.Placeholders == nil {
-				cfg.Placeholders = make(map[string]string)
-			}
-			cfg.Placeholders[phKey] = val
+	case "baselineonmigrate", "baseline_on_migrate", "baseline-on-migrate":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
 		}
+		cfg.BaselineOnMigrate = b
+	case "outputtype", "output_type", "output-type", "output":
+		cfg.OutputType = val
+	case "dryrunoutput", "dry_run_output", "dry-run-output":
+		cfg.DryRunOutput = val
+	case "gcpprojectid", "project", "projectid", "project_id", "project-id":
+		cfg.GCPProjectID = val
+	case "gcpdataset", "dataset":
+		cfg.GCPDataset = val
+	case "gcplocation", "location":
+		cfg.GCPLocation = val
+	case "gcpcredentialsfile", "keyfile", "credentials_file", "credentials-file":
+		cfg.GCPCredentialsFile = val
+	case "gcpcredentialsjson", "credentials_json", "credentials-json":
+		cfg.GCPCredentialsJSON = val
+	case "gcpbigqueryendpoint", "bigqueryendpoint", "bigquery_endpoint", "bigquery-endpoint":
+		cfg.GCPBigQueryEndpoint = val
+	case "spannerinstanceid", "spanner_instance_id", "spanner-instance-id", "gcpspannerinstanceid", "instanceid", "instance_id":
+		cfg.GCPSpannerInstanceID = val
+	case "spannerdatabaseid", "spanner_database_id", "spanner-database-id", "gcpspannerdatabaseid", "databaseid", "database_id":
+		cfg.GCPSpannerDatabaseID = val
+	case "spannerendpoint", "spanner_endpoint", "spanner-endpoint", "gcpspannerendpoint":
+		cfg.GCPSpannerEndpoint = val
+	case "configfile", "configfiles", "config-file", "config-files":
+		// skip
+	default:
+		if strings.HasPrefix(cleanKeyLower, "placeholders.") {
+			phKey := cleanKey[len("placeholders."):]
+			if cfg.Placeholders == nil {
+				cfg.Placeholders = make(map[string]string)
+			}
+			cfg.Placeholders[phKey] = val
+			return nil
+		} else if strings.HasPrefix(cleanKeyLower, "placeholder.") {
+			phKey := cleanKey[len("placeholder."):]
+			if cfg.Placeholders == nil {
+				cfg.Placeholders = make(map[string]string)
+			}
+			cfg.Placeholders[phKey] = val
+			return nil
+		}
+		return UnknownPropertyError(cleanKey)
 	}
+	return nil
 }
 
 func splitAndTrim(s, sep string) []string {
@@ -838,13 +983,146 @@ func splitAndTrim(s, sep string) []string {
 	return res
 }
 
-func parseBool(s string, defaultVal bool) bool {
+// ParseBool parses a string into a boolean. It strictly accepts "true" and "false" (case-insensitive).
+// Any other value returns an error.
+func ParseBool(s string) (bool, error) {
 	lower := strings.ToLower(strings.TrimSpace(s))
-	if lower == "true" || lower == "yes" || lower == "1" || lower == "on" {
-		return true
+	if lower == "true" {
+		return true, nil
 	}
-	if lower == "false" || lower == "no" || lower == "0" || lower == "off" {
-		return false
+	if lower == "false" {
+		return false, nil
 	}
-	return defaultVal
+	return false, fmt.Errorf("invalid boolean value %q: must be 'true' or 'false'", s)
+}
+
+// KnownProperties lists canonical Flyway and Noway configuration property names.
+var KnownProperties = []string{
+	"url",
+	"user",
+	"password",
+	"driver",
+	"schemas",
+	"defaultSchema",
+	"table",
+	"locations",
+	"target",
+	"outOfOrder",
+	"validateOnMigrate",
+	"cleanDisabled",
+	"cleanOnValidationError",
+	"ignoreFutureMigrations",
+	"ignoreMissingMigrations",
+	"ignorePendingMigrations",
+	"baselineVersion",
+	"baselineDescription",
+	"baselineOnMigrate",
+	"installedBy",
+	"encoding",
+	"placeholderReplacement",
+	"placeholderPrefix",
+	"placeholderSuffix",
+	"placeholderSeparator",
+	"sqlMigrationPrefix",
+	"repeatableSqlMigrationPrefix",
+	"undoSqlMigrationPrefix",
+	"baselineSqlMigrationPrefix",
+	"sqlMigrationSeparator",
+	"sqlMigrationSuffixes",
+	"mixed",
+	"group",
+	"batch",
+	"connectRetries",
+	"lockRetryCount",
+	"createSchemas",
+	"environment",
+	"configFile",
+	"configFiles",
+	"outputType",
+	"dryRunOutput",
+	"gcpProjectId",
+	"gcpDataset",
+	"gcpLocation",
+	"gcpCredentialsFile",
+	"gcpCredentialsJson",
+	"gcpBigQueryEndpoint",
+	"spannerInstanceId",
+	"spannerDatabaseId",
+	"spannerEndpoint",
+}
+
+// LevenshteinDistance computes the Levenshtein edit distance between two strings (case-insensitive).
+func LevenshteinDistance(s1, s2 string) int {
+	s1 = strings.ToLower(s1)
+	s2 = strings.ToLower(s2)
+	r1 := []rune(s1)
+	r2 := []rune(s2)
+	n := len(r1)
+	m := len(r2)
+
+	d := make([][]int, n+1)
+	for i := range d {
+		d[i] = make([]int, m+1)
+		d[i][0] = i
+	}
+	for j := 0; j <= m; j++ {
+		d[0][j] = j
+	}
+
+	for i := 1; i <= n; i++ {
+		for j := 1; j <= m; j++ {
+			cost := 1
+			if r1[i-1] == r2[j-1] {
+				cost = 0
+			}
+			d[i][j] = min(
+				d[i-1][j]+1,      // deletion
+				d[i][j-1]+1,      // insertion
+				d[i-1][j-1]+cost, // substitution
+			)
+		}
+	}
+	return d[n][m]
+}
+
+// SuggestNearest finds the closest known property name to key if within edit distance threshold.
+func SuggestNearest(key string) string {
+	clean := strings.TrimPrefix(key, "flyway.")
+	clean = strings.TrimPrefix(clean, "noway.")
+	cleanNorm := strings.ReplaceAll(clean, "-", "")
+	cleanNorm = strings.ReplaceAll(cleanNorm, "_", "")
+
+	bestMatch := ""
+	bestDist := 999
+	for _, prop := range KnownProperties {
+		propNorm := strings.ReplaceAll(prop, "-", "")
+		propNorm = strings.ReplaceAll(propNorm, "_", "")
+		dist := LevenshteinDistance(cleanNorm, propNorm)
+		if dist < bestDist {
+			bestDist = dist
+			bestMatch = prop
+		}
+	}
+
+	maxDist := 3
+	if len(clean) < 4 {
+		maxDist = 1
+	} else if len(clean) < 7 {
+		maxDist = 2
+	}
+	if bestDist <= maxDist {
+		return bestMatch
+	}
+	return ""
+}
+
+// UnknownPropertyError formats an unknown configuration property error, including a nearest suggestion if available.
+func UnknownPropertyError(key string) error {
+	clean := strings.TrimPrefix(key, "flyway.")
+	clean = strings.TrimPrefix(clean, "noway.")
+	suggestion := SuggestNearest(clean)
+	if suggestion != "" {
+		return fmt.Errorf("Unknown configuration property: %s. Did you mean '%s'?", clean, suggestion)
+	}
+	return fmt.Errorf("Unknown configuration property: %s", clean)
 }

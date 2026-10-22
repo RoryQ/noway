@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -154,5 +155,64 @@ func TestPlaceholderReplacerDisabled_Regression(t *testing.T) {
 	expected := "SELECT 'production';"
 	if resContent != expected {
 		t.Errorf("expected %q, got %q", expected, resContent)
+	}
+}
+
+func TestPlaceholderBuiltinFilenameAndWorkingDirectory(t *testing.T) {
+	cfg := PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+	}
+	replacer := NewPlaceholderReplacer(cfg)
+
+	builtins := BuiltinPlaceholders{
+		Filename:         "V1.0__init.sql",
+		WorkingDirectory: "/app/migrations",
+	}
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"SELECT '${flyway:filename}'", "SELECT 'V1.0__init.sql'"},
+		{"SELECT '${noway:filename}'", "SELECT 'V1.0__init.sql'"},
+		{"SELECT '${flyway:workingDirectory}'", "SELECT '/app/migrations'"},
+		{"SELECT '${noway:workingDirectory}'", "SELECT '/app/migrations'"},
+	}
+
+	for _, tt := range tests {
+		res, err := replacer.Replace(tt.input, builtins)
+		if err != nil {
+			t.Fatalf("unexpected error for %s: %v", tt.input, err)
+		}
+		if res != tt.expected {
+			t.Errorf("got %q, want %q", res, tt.expected)
+		}
+	}
+}
+
+func TestPlaceholderUndefinedFailsWithoutDefault(t *testing.T) {
+	cfg := PlaceholderConfig{
+		Enabled: true,
+		Prefix:  "${",
+		Suffix:  "}",
+	}
+	replacer := NewPlaceholderReplacer(cfg)
+
+	tests := []string{
+		"SELECT '${missing:x}'",
+		"SELECT '${foo:bar}'",
+		"SELECT '${undefined}'",
+	}
+
+	for _, input := range tests {
+		_, err := replacer.Replace(input, BuiltinPlaceholders{})
+		if err == nil {
+			t.Fatalf("expected error for undefined placeholder %q, got nil", input)
+		}
+		if !strings.Contains(err.Error(), "no value provided for placeholder") {
+			t.Errorf("expected error mentioning no value provided for placeholder, got: %v", err)
+		}
 	}
 }

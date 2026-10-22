@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/earthboundkid/versioninfo/v2"
@@ -168,7 +169,9 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 	}
 
 	// 2. Load from Environment
-	config.LoadFromEnv(cfg)
+	if err := config.LoadFromEnv(cfg); err != nil {
+		return nil, err
+	}
 
 	// 3. Parse individual CLI arguments (supports -flag=val, --flag=val, -flag val, and -placeholders.key=val)
 	for i := 0; i < len(args); i++ {
@@ -206,8 +209,12 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 		case "schemas":
 			cfg.Schemas = splitAndTrimCLI(val, ",")
 		case "createschemas", "create-schemas", "create_schemas":
-			cfg.CreateSchemas = parseBoolVal(val)
-		case "defaultschema":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.CreateSchemas = b
+		case "defaultschema", "default-schema", "default_schema":
 			cfg.DefaultSchema = val
 		case "table":
 			cfg.Table = val
@@ -215,56 +222,150 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.Locations = splitAndTrimCLI(val, ",")
 		case "target":
 			cfg.Target = val
-		case "outoforder":
-			cfg.OutOfOrder = parseBoolVal(val)
-		case "validateonmigrate":
-			cfg.ValidateOnMigrate = parseBoolVal(val)
+		case "outoforder", "out-of-order", "out_of_order":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.OutOfOrder = b
+		case "validateonmigrate", "validate-on-migrate", "validate_on_migrate":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.ValidateOnMigrate = b
 		case "ignorefuturemigrations", "ignore-future-migrations", "ignore_future_migrations":
-			cfg.IgnoreFutureMigrations = parseBoolVal(val)
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.IgnoreFutureMigrations = b
 		case "ignoremissingmigrations", "ignore-missing-migrations", "ignore_missing_migrations":
-			cfg.IgnoreMissingMigrations = parseBoolVal(val)
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.IgnoreMissingMigrations = b
 		case "ignorependingmigrations", "ignore-pending-migrations", "ignore_pending_migrations":
-			cfg.IgnorePendingMigrations = parseBoolVal(val)
-		case "cleandisabled":
-			cfg.CleanDisabled = parseBoolVal(val)
-		case "baselineversion":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.IgnorePendingMigrations = b
+		case "cleandisabled", "clean-disabled", "clean_disabled":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.CleanDisabled = b
+		case "cleanonvalidationerror", "clean-on-validation-error", "clean_on_validation_error":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.CleanOnValidationError = b
+		case "mixed":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.Mixed = b
+		case "group":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.Group = b
+		case "batch":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.Batch = b
+		case "baselineversion", "baseline-version", "baseline_version":
 			cfg.BaselineVersion = val
-		case "baselinedescription":
+		case "baselinedescription", "baseline-description", "baseline_description":
 			cfg.BaselineDescription = val
-		case "baselineonmigrate":
-			cfg.BaselineOnMigrate = parseBoolVal(val)
-		case "outputtype", "output":
+		case "baselineonmigrate", "baseline-on-migrate", "baseline_on_migrate":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.BaselineOnMigrate = b
+		case "placeholderreplacement", "placeholder-replacement", "placeholder_replacement":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.PlaceholderReplacement = b
+		case "placeholderprefix", "placeholder-prefix", "placeholder_prefix":
+			cfg.PlaceholderPrefix = val
+		case "placeholdersuffix", "placeholder-suffix", "placeholder_suffix":
+			cfg.PlaceholderSuffix = val
+		case "placeholderseparator", "placeholder-separator", "placeholder_separator":
+			cfg.PlaceholderSeparator = val
+		case "sqlmigrationprefix", "sql-migration-prefix", "sql_migration_prefix":
+			cfg.SQLMigrationPrefix = val
+		case "repeatablesqlmigrationprefix", "repeatable-sql-migration-prefix", "repeatable_sql_migration_prefix":
+			cfg.RepeatableSQLMigrationPrefix = val
+		case "undosqlmigrationprefix", "undo-sql-migration-prefix", "undo_sql_migration_prefix":
+			cfg.UndoSQLMigrationPrefix = val
+		case "baselinesqlmigrationprefix", "baseline-sql-migration-prefix", "baseline_sql_migration_prefix":
+			cfg.BaselineSQLMigrationPrefix = val
+		case "sqlmigrationseparator", "sql-migration-separator", "sql_migration_separator":
+			cfg.SQLMigrationSeparator = val
+		case "sqlmigrationsuffixes", "sql-migration-suffixes", "sql_migration_suffixes":
+			cfg.SQLMigrationSuffixes = splitAndTrimCLI(val, ",")
+		case "encoding":
+			cfg.Encoding = val
+		case "connectretries", "connect-retries", "connect_retries":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.ConnectRetries = n
+			}
+		case "lockretrycount", "lock-retry-count", "lock_retry_count":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.LockRetryCount = n
+			}
+		case "outputtype", "output-type", "output_type", "output":
 			cfg.OutputType = val
 		case "dryrunoutput", "dry-run-output", "dry_run_output":
 			cfg.DryRunOutput = val
-		case "gcpprojectid", "project":
+		case "gcpprojectid", "project", "projectid", "project-id", "project_id":
 			cfg.GCPProjectID = val
 		case "gcpdataset", "dataset":
 			cfg.GCPDataset = val
 		case "gcplocation", "location":
 			cfg.GCPLocation = val
-		case "gcpcredentialsfile", "keyfile":
+		case "gcpcredentialsfile", "keyfile", "credentials-file", "credentials_file":
 			cfg.GCPCredentialsFile = val
+		case "gcpcredentialsjson", "credentials-json", "credentials_json":
+			cfg.GCPCredentialsJSON = val
+		case "gcpbigqueryendpoint", "bigqueryendpoint", "bigquery-endpoint":
+			cfg.GCPBigQueryEndpoint = val
 		case "driver":
 			cfg.Driver = val
-		case "gcpspannerinstanceid", "spannerinstanceid", "spannerinstance", "spanner-instance-id", "spanner-instance":
+		case "gcpspannerinstanceid", "spannerinstanceid", "spannerinstance", "spanner-instance-id", "spanner-instance", "spanner_instance_id":
 			cfg.GCPSpannerInstanceID = val
-		case "gcpspannerdatabaseid", "spannerdatabaseid", "spannerdatabase", "spanner-database-id", "spanner-database":
+		case "gcpspannerdatabaseid", "spannerdatabaseid", "spannerdatabase", "spanner-database-id", "spanner-database", "spanner_database_id":
 			cfg.GCPSpannerDatabaseID = val
-		case "gcpspannerendpoint", "spannerendpoint", "spanner-endpoint":
+		case "gcpspannerendpoint", "spannerendpoint", "spanner-endpoint", "spanner_endpoint":
 			cfg.GCPSpannerEndpoint = val
 		case "installedby", "installed-by", "installed_by":
 			cfg.InstalledBy = val
+		case "environment", "env":
+			cfg.Environment = val
 		case "configfile", "configfiles", "config-file", "config-files":
 			// Handled in step 1
 		default:
-			if strings.HasPrefix(key, "placeholders.") || strings.HasPrefix(key, "placeholder.") {
+			if strings.HasPrefix(strings.ToLower(key), "placeholders.") || strings.HasPrefix(strings.ToLower(key), "placeholder.") {
 				phKey := strings.TrimPrefix(key, "placeholders.")
 				phKey = strings.TrimPrefix(phKey, "placeholder.")
 				if cfg.Placeholders == nil {
 					cfg.Placeholders = make(map[string]string)
 				}
 				cfg.Placeholders[phKey] = val
+			} else {
+				return nil, config.UnknownPropertyError(key)
 			}
 		}
 	}
@@ -288,9 +389,8 @@ func splitAndTrimCLI(s, sep string) []string {
 	return res
 }
 
-func parseBoolVal(v string) bool {
-	l := strings.ToLower(v)
-	return l == "true" || l == "yes" || l == "1" || l == "on"
+func parseBoolVal(v string) (bool, error) {
+	return config.ParseBool(v)
 }
 
 func outputJSONError(err error) {

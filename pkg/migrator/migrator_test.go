@@ -1541,12 +1541,12 @@ func TestScriptMigration_PhysicalFilePreservesExecBit(t *testing.T) {
 	}
 }
 
-func TestScriptMigration_PlaceholderError(t *testing.T) {
+func TestScriptMigration_ShellVariablesExecuteWithoutPlaceholderError(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 
-	scriptPath := filepath.Join(tmpDir, "V1__ph_err.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho \"${missing_variable}\"\n"), 0755); err != nil {
+	scriptPath := filepath.Join(tmpDir, "V1__shell_var.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho \"HOME=${HOME}\"\nexit 0\n"), 0755); err != nil {
 		t.Fatalf("failed to write script: %v", err)
 	}
 
@@ -1561,12 +1561,12 @@ func TestScriptMigration_PlaceholderError(t *testing.T) {
 		t.Fatalf("New migrator failed: %v", err)
 	}
 
-	_, err = m.Migrate(ctx)
-	if err == nil {
-		t.Fatalf("expected placeholder error during script migration, got nil")
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("expected script migration with ${HOME} to succeed, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "error replacing placeholders") {
-		t.Errorf("expected error message to mention placeholder error, got: %v", err)
+	if res.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed, got %d", res.MigrationsExecuted)
 	}
 }
 

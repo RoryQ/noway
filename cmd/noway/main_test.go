@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/roryq/noway"
 )
 
 func TestParseCLIArgs(t *testing.T) {
@@ -211,6 +213,62 @@ url = "jdbc:bigquery:;ProjectId=p;DefaultDataset=d;"
 	}
 	if !strings.Contains(err.Error(), "environment 'Production' not found in config") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestParseCLIArgs_InvalidBooleanFails(t *testing.T) {
+	args := []string{
+		"-cleanDisabled=flase",
+	}
+
+	_, err := parseCLIArgs(args)
+	if err == nil {
+		t.Fatalf("expected error for -cleanDisabled=flase, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid boolean value") {
+		t.Errorf("expected invalid boolean error, got: %v", err)
+	}
+}
+
+func TestParseCLIArgs_UnknownPropertySuggestsNearest(t *testing.T) {
+	args := []string{
+		"-cleanDisable=false",
+	}
+
+	_, err := parseCLIArgs(args)
+	if err == nil {
+		t.Fatalf("expected error for -cleanDisable=false, got nil")
+	}
+	expected := "Unknown configuration property: cleanDisable. Did you mean 'cleanDisabled'?"
+	if err.Error() != expected {
+		t.Errorf("got error %q, want %q", err.Error(), expected)
+	}
+}
+
+func TestCLIOverridesEnvironmentVariables(t *testing.T) {
+	t.Setenv("FLYWAY_TARGET", "1")
+	t.Setenv("FLYWAY_URL", "jdbc:bigquery:;ProjectId=env-proj;DefaultDataset=env_ds;")
+
+	args := []string{
+		"-target=5",
+	}
+
+	cfg, err := parseCLIArgs(args)
+	if err != nil {
+		t.Fatalf("parseCLIArgs failed: %v", err)
+	}
+	if cfg.Target != "5" {
+		t.Fatalf("expected CLI flag -target=5 to override FLYWAY_TARGET=1, got: %s", cfg.Target)
+	}
+
+	nw, err := noway.New(noway.WithConfig(cfg))
+	if err != nil {
+		t.Fatalf("noway.New failed: %v", err)
+	}
+	defer nw.Close()
+
+	if cfg.Target != "5" {
+		t.Errorf("expected noway.New to preserve Target=5 and not overwrite with FLYWAY_TARGET=1, got: %s", cfg.Target)
 	}
 }
 
