@@ -3,8 +3,10 @@ package migrator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
+	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/resolver"
 )
 
@@ -36,7 +38,14 @@ type UndoOutput struct {
 	ExecutionTime int64  `json:"executionTime"`
 }
 
-// Undo reverts the most recently applied versioned migration.
+// UndoItem associates an applied migration with its resolved undo migration and replaced SQL.
+type UndoItem struct {
+	Applied  resolver.AppliedMigration
+	Resolved resolver.ResolvedMigration
+	SQL      string
+}
+
+// Undo reverts applied versioned migrations in descending order down to target.
 func (m *Migrator) Undo(ctx context.Context) (res *UndoResult, retErr error) {
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
@@ -74,19 +83,55 @@ func (m *Migrator) Undo(ctx context.Context) (res *UndoResult, retErr error) {
 
 	history := processAppliedHistory(applied)
 
-	// Find the latest applied versioned migration
-	var latestApplied *resolver.AppliedMigration
-	for i := len(history.Records) - 1; i >= 0; i-- {
-		app := history.Records[i]
-		if app.Version != nil && !app.Version.IsEmpty() && app.Success && app.Type == "SQL" && !app.Deleted && !app.Undone {
-			latestApplied = &history.Records[i]
-			break
+	// Collect applied versioned migrations that can be undone
+	var activeApplied []resolver.AppliedMigration
+	for _, app := range history.Records {
+		if app.Version != nil && !app.Version.IsEmpty() && app.Success && (app.Type == "SQL" || app.Type == "SCRIPT") && !app.Deleted && !app.Undone {
+			activeApplied = append(activeApplied, app)
 		}
 	}
 
-	if latestApplied == nil {
+	if len(activeApplied) == 0 {
 		return nil, fmt.Errorf("no versioned migrations found to undo")
 	}
+
+	// Sort activeApplied by version ascending to determine initial schema version
+	sort.Slice(activeApplied, func(i, j int) bool {
+		return activeApplied[i].Version.Compare(*activeApplied[j].Version) < 0
+	})
+	initialSchemaVersion := activeApplied[len(activeApplied)-1].Version.String()
+
+	// Find the most recently applied migration (highest installed rank) for default undo
+	var mostRecentlyApplied resolver.AppliedMigration
+	for _, app := range activeApplied {
+		if mostRecentlyApplied.InstalledRank == 0 || app.InstalledRank > mostRecentlyApplied.InstalledRank {
+			mostRecentlyApplied = app
+		}
+	}
+
+	// Determine candidates to undo based on target
+	var toUndo []resolver.AppliedMigration
+	if m.config.TargetVersion != nil {
+		for _, app := range activeApplied {
+			if app.Version.IsNewerThan(*m.config.TargetVersion) {
+				toUndo = append(toUndo, app)
+			}
+		}
+	} else if m.config.Target == "0" {
+		toUndo = append(toUndo, activeApplied...)
+	} else {
+		// Default: undo only the most recently applied versioned migration
+		toUndo = append(toUndo, mostRecentlyApplied)
+	}
+
+	if len(toUndo) == 0 {
+		return nil, fmt.Errorf("no versioned migrations found to undo")
+	}
+
+	// Sort toUndo descending by version
+	sort.Slice(toUndo, func(i, j int) bool {
+		return toUndo[i].Version.IsNewerThan(*toUndo[j].Version)
+	})
 
 	// 4. Resolve local undo migrations
 	resolved, err := m.resolver.Resolve()
@@ -94,102 +139,139 @@ func (m *Migrator) Undo(ctx context.Context) (res *UndoResult, retErr error) {
 		return nil, fmt.Errorf("failed resolving migrations: %w", err)
 	}
 
-	var targetUndo *resolver.ResolvedMigration
+	undoByVer := make(map[string]resolver.ResolvedMigration)
 	for _, u := range resolved.UndoMigrations {
-		if u.Version != nil && u.Version.Equals(*latestApplied.Version) {
-			targetUndo = &u
+		if u.Version != nil {
+			undoByVer[u.Version.Normalized()] = u
+		}
+	}
+
+	var items []UndoItem
+	for _, app := range toUndo {
+		u, found := undoByVer[app.Version.Normalized()]
+		if !found {
+			return nil, fmt.Errorf("no undo migration found for version %s (expected U%s__*.sql)", app.Version.String(), app.Version.String())
+		}
+		sql, err := m.replacer.Replace(u.Content, m.builtins)
+		if err != nil {
+			return nil, fmt.Errorf("error replacing placeholders in undo script '%s': %w", u.Script, err)
+		}
+		items = append(items, UndoItem{Applied: app, Resolved: u, SQL: sql})
+	}
+
+	// Determine target schema version (highest remaining version not undone)
+	targetSchemaVersion := ""
+	undoneSet := make(map[string]bool)
+	for _, item := range items {
+		undoneSet[item.Applied.Version.Normalized()] = true
+	}
+	for i := len(activeApplied) - 1; i >= 0; i-- {
+		vNorm := activeApplied[i].Version.Normalized()
+		if !undoneSet[vNorm] {
+			targetSchemaVersion = activeApplied[i].Version.String()
 			break
 		}
 	}
 
-	if targetUndo == nil {
-		return nil, fmt.Errorf("no undo migration found for version %s (expected U%s__*.sql)", latestApplied.Version.String(), latestApplied.Version.String())
-	}
-
-	// Placeholders
-	sql, err := m.replacer.Replace(targetUndo.Content, m.builtins)
-	if err != nil {
-		return nil, fmt.Errorf("error replacing placeholders in undo script '%s': %w", targetUndo.Script, err)
+	user := m.config.InstalledBy
+	if user == "" {
+		currentUser, _ := m.db.GetCurrentUser(ctx)
+		if currentUser != "" {
+			user = currentUser
+		} else {
+			user = "flyway"
+		}
 	}
 
 	if isDryRun {
-		user := m.config.InstalledBy
-		if user == "" {
-			currentUser, _ := m.db.GetCurrentUser(ctx)
-			if currentUser != "" {
-				user = currentUser
-			} else {
-				user = "flyway"
-			}
-		}
-		return m.undoDryRun(ctx, defaultSchema, table, user, latestApplied, targetUndo, sql)
+		return m.undoDryRun(ctx, defaultSchema, table, user, items, initialSchemaVersion, targetSchemaVersion, history.NextInstalledRank)
 	}
 
 	// 5. Fire beforeUndo callbacks
 	if err := m.callbackRunner.Fire(ctx, "beforeUndo"); err != nil {
 		return nil, err
 	}
-	if err := m.callbackRunner.Fire(ctx, "beforeEachUndo"); err != nil {
-		return nil, err
-	}
 
-	stmts := m.parser.SplitStatements(sql)
-	startTime := time.Now()
+	var outputs []UndoOutput
+	rank := history.NextInstalledRank
 
-	for _, stmt := range stmts {
-		if err := m.db.ExecuteStatement(ctx, stmt.SQL); err != nil {
-			_ = m.callbackRunner.Fire(ctx, "beforeEachUndoError")
-			_ = m.callbackRunner.Fire(ctx, "afterEachUndoError")
-			_ = m.callbackRunner.Fire(ctx, "afterUndoError")
-			return nil, fmt.Errorf("error executing undo statement (line %d) for '%s': %w", stmt.LineNumber, targetUndo.Script, err)
+	for _, item := range items {
+		if err := m.callbackRunner.Fire(ctx, "beforeEachUndo"); err != nil {
+			return nil, err
 		}
+
+		startTime := time.Now()
+		stmts := m.parser.SplitStatements(item.SQL)
+		for _, stmt := range stmts {
+			if err := m.db.ExecuteStatement(ctx, stmt.SQL); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "beforeEachUndoError")
+				_ = m.callbackRunner.Fire(ctx, "afterEachUndoError")
+				_ = m.callbackRunner.Fire(ctx, "afterUndoError")
+				return nil, fmt.Errorf("error executing undo statement (line %d) for '%s': %w", stmt.LineNumber, item.Resolved.Script, err)
+			}
+		}
+		execTime := time.Since(startTime).Milliseconds()
+
+		recType := "UNDO_SQL"
+		if item.Resolved.IsScript {
+			recType = "UNDO_SCRIPT"
+		}
+		verStr := item.Resolved.Version.String()
+		cs := item.Resolved.Checksum
+
+		historyRec := database.HistoryRecord{
+			InstalledRank: rank,
+			Version:       &verStr,
+			Description:   database.AbbreviateDescription(item.Resolved.Description),
+			Type:          recType,
+			Script:        database.AbbreviateScript(item.Resolved.Script),
+			Checksum:      &cs,
+			InstalledBy:   user,
+			InstalledOn:   time.Now(),
+			ExecutionTime: execTime,
+			Success:       true,
+		}
+		rank++
+
+		if err := m.db.InsertHistory(ctx, defaultSchema, table, historyRec); err != nil {
+			return nil, fmt.Errorf("failed inserting undo history record for %s: %w", item.Resolved.Script, err)
+		}
+
+		if err := m.callbackRunner.Fire(ctx, "afterEachUndo"); err != nil {
+			return nil, err
+		}
+
+		outputs = append(outputs, UndoOutput{
+			Category:      "Versioned",
+			Version:       item.Resolved.Version.String(),
+			Description:   item.Resolved.Description,
+			Filepath:      item.Resolved.Script,
+			ExecutionTime: execTime,
+		})
 	}
 
-	execTime := time.Since(startTime).Milliseconds()
-
-	// 7. Remove the undone record from history table
-	if err := m.db.DeleteHistory(ctx, defaultSchema, table, latestApplied.InstalledRank); err != nil {
-		return nil, fmt.Errorf("failed removing history record for undone migration %s: %w", latestApplied.Script, err)
-	}
-
-	// 8. Fire afterUndo callbacks
-	if err := m.callbackRunner.Fire(ctx, "afterEachUndo"); err != nil {
-		return nil, err
-	}
+	// 6. Fire afterUndo callbacks
 	if err := m.callbackRunner.Fire(ctx, "afterUndo"); err != nil {
 		return nil, err
 	}
 
-	prevVersion := ""
-	for i := len(applied) - 1; i >= 0; i-- {
-		app := applied[i]
-		if app.InstalledRank != latestApplied.InstalledRank && app.Version != nil && !app.Version.IsEmpty() && app.Success && app.Type == "SQL" {
-			prevVersion = app.Version.String()
-			break
-		}
+	result := &UndoResult{
+		InitialSchemaVersion: initialSchemaVersion,
+		TargetSchemaVersion:  targetSchemaVersion,
+		SchemaName:           defaultSchema,
+		Migrations:           outputs,
+		MigrationsUndone:     len(outputs),
+		Success:              true,
+		FlywayVersion:        m.FlywayVersion(),
+		Database:             m.DatabaseName(),
+		Warnings:             make([]string, 0),
+		Operation:            "undo",
+	}
+	if len(outputs) > 0 {
+		result.UndoneVersion = outputs[len(outputs)-1].Version
+		result.Script = outputs[len(outputs)-1].Filepath
+		result.ExecutionTime = outputs[len(outputs)-1].ExecutionTime
 	}
 
-	return &UndoResult{
-		InitialSchemaVersion: latestApplied.Version.String(),
-		TargetSchemaVersion:  prevVersion,
-		SchemaName:           defaultSchema,
-		Migrations: []UndoOutput{
-			{
-				Category:      "Versioned",
-				Version:       latestApplied.Version.String(),
-				Description:   targetUndo.Description,
-				Filepath:      targetUndo.Script,
-				ExecutionTime: execTime,
-			},
-		},
-		MigrationsUndone: 1,
-		Success:          true,
-		FlywayVersion:    m.FlywayVersion(),
-		Database:         m.DatabaseName(),
-		Warnings:         make([]string, 0),
-		Operation:        "undo",
-		UndoneVersion:    latestApplied.Version.String(),
-		Script:           targetUndo.Script,
-		ExecutionTime:    execTime,
-	}, nil
+	return result, nil
 }

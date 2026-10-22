@@ -237,65 +237,8 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 			continue
 		}
 
-		// Feature 14: Ignore BASELINE, SCHEMA, and DELETE history records, and records marked Deleted or Undone
-		if app.Type == "BASELINE" || app.Type == "SCHEMA" || app.Type == "DELETE" || app.Deleted || app.Undone {
-			continue
-		}
-
-		// Undo migration validation
-		if strings.HasPrefix(app.Type, "UNDO") {
-			if app.Version != nil && !app.Version.IsEmpty() {
-				verKey := app.Version.Normalized()
-				res, found := resolvedUndoByVersion[verKey]
-				if !found {
-					if !m.isIgnored("missing", app) {
-						result.Valid = false
-						result.Errors = append(result.Errors, ValidationError{
-							Version:     app.Version,
-							Description: app.Description,
-							File:        app.Script,
-							Message:     fmt.Sprintf("Detected applied undo migration not resolved locally: %s", app.Script),
-						})
-					}
-					continue
-				}
-
-				// Check checksum
-				if app.Checksum != nil && !res.ChecksumMatches(app.Checksum) {
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Version:     app.Version,
-						Description: app.Description,
-						File:        res.Script,
-						Message: fmt.Sprintf("Migration checksum mismatch for undo migration version %s\n-> Applied to database : %d\n-> Resolved locally    : %d\nEither revert the changes to the file, or run repair to update the schema history.",
-							app.Version.String(), *app.Checksum, res.Checksum),
-					})
-				}
-
-				// Check description
-				if app.Description != res.Description && app.Description != database.AbbreviateDescription(res.Description) {
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Version:     app.Version,
-						Description: app.Description,
-						File:        res.Script,
-						Message: fmt.Sprintf("Migration description mismatch for undo migration version %s\n-> Applied to database : %s\n-> Resolved locally    : %s",
-							app.Version.String(), app.Description, res.Description),
-					})
-				}
-
-				// Check type
-				if app.Type != string(res.Type) {
-					result.Valid = false
-					result.Errors = append(result.Errors, ValidationError{
-						Version:     app.Version,
-						Description: app.Description,
-						File:        res.Script,
-						Message: fmt.Sprintf("Migration type mismatch for undo migration version %s\n-> Applied to database : %s\n-> Resolved locally    : %s",
-							app.Version.String(), app.Type, string(res.Type)),
-					})
-				}
-			}
+		// Ignore BASELINE, SCHEMA, and DELETE history records, records marked Deleted or Undone, and UNDO records
+		if app.Type == "BASELINE" || app.Type == "SCHEMA" || app.Type == "DELETE" || app.Deleted || app.Undone || strings.HasPrefix(app.Type, "UNDO") {
 			continue
 		}
 

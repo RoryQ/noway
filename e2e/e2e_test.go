@@ -1687,10 +1687,13 @@ func TestTier3_OutOfOrderAndUndoWorkflow(t *testing.T) {
 		t.Errorf("expected undone version 2, got %s", undoRes.UndoneVersion)
 	}
 
-	// History should now contain V1 and V3
+	// History should retain original rows and append an UNDO_SQL row at next rank
 	history, _ := db.FetchHistory(ctx, "e2e_dataset", "flyway_schema_history")
-	if len(history) != 2 {
-		t.Errorf("expected 2 records after undo, got %d", len(history))
+	if len(history) != 4 {
+		t.Errorf("expected 4 records after undo, got %d", len(history))
+	}
+	if len(history) >= 4 && history[3].Type != "UNDO_SQL" {
+		t.Errorf("expected 4th record to be UNDO_SQL, got %s", history[3].Type)
 	}
 }
 

@@ -1,8 +1,10 @@
 package resolver
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,6 +29,8 @@ type ResolverConfig struct {
 	Suffixes           []string // default [".sql"]
 	Encoding           string   // default "UTF-8"
 	IgnoreMissingFiles     bool
+	FailOnMissingLocations bool
+	ValidateMigrationNaming bool
 	PlaceholderReplacement *bool
 	Replacer               *parser.PlaceholderReplacer
 	Builtins               parser.BuiltinPlaceholders
@@ -174,9 +178,23 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 
 		// Check if scanning from provided fs.FS
 		if r.config.FS != nil {
+			cleanDir := strings.TrimPrefix(cleanLoc, "/")
+			if cleanDir == "" {
+				cleanDir = "."
+			}
+			if _, statErr := fs.Stat(r.config.FS, cleanDir); statErr != nil {
+				if os.IsNotExist(statErr) || errors.Is(statErr, fs.ErrNotExist) {
+					if !r.config.FailOnMissingLocations || r.config.IgnoreMissingFiles {
+						log.Printf("WARNING: migration location '%s' not found: %v", loc, statErr)
+						continue
+					}
+					return nil, fmt.Errorf("migration location does not exist: %s", loc)
+				}
+				return nil, fmt.Errorf("error accessing location '%s': %w", loc, statErr)
+			}
 			err := r.scanFS(r.config.FS, cleanLoc, result, seen)
-			if err != nil && !r.config.IgnoreMissingFiles {
-				return nil, fmt.Errorf("error reading location '%s': %w", loc, err)
+			if err != nil {
+				return nil, err
 			}
 			continue
 		}
@@ -184,7 +202,8 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 		// Filesystem scan
 		info, err := os.Stat(cleanLoc)
 		if err != nil {
-			if os.IsNotExist(err) && r.config.IgnoreMissingFiles {
+			if !r.config.FailOnMissingLocations || r.config.IgnoreMissingFiles {
+				log.Printf("WARNING: migration directory '%s' does not exist", cleanLoc)
 				continue
 			}
 			// If location does not exist, return error unless IgnoreMissingFiles
@@ -607,6 +626,12 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 			Config:             migConfig,
 		})
 		return nil
+	} else if strings.HasPrefix(filename, r.config.RepeatablePrefix) {
+		if r.config.ValidateMigrationNaming {
+			return fmt.Errorf("invalid repeatable migration name: %s", filename)
+		}
+		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+		return nil
 	}
 
 	// Check for undo migration: U1.2__description.sql / U1.2__description.sh
@@ -648,6 +673,11 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 				return nil
 			}
 		}
+		if r.config.ValidateMigrationNaming {
+			return fmt.Errorf("invalid undo migration name: %s", filename)
+		}
+		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+		return nil
 	}
 
 	// Check for baseline migration: B1.2__description.sql or B__1.2__description.sql
@@ -692,6 +722,11 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 				return nil
 			}
 		}
+		if r.config.ValidateMigrationNaming {
+			return fmt.Errorf("invalid baseline migration name: %s", filename)
+		}
+		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+		return nil
 	}
 
 	// Check for versioned migration: V1.2__description.sql / V1.2__description.sh or V1.2.sql
@@ -717,7 +752,11 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 		if verStr != "" && unicode.IsDigit(rune(verStr[0])) {
 			ver, err := version.Parse(verStr)
 			if err != nil {
-				return fmt.Errorf("invalid version '%s' in migration file '%s': %w", verStr, filename, err)
+				if r.config.ValidateMigrationNaming {
+					return fmt.Errorf("invalid version '%s' in migration file '%s': %w", verStr, filename, err)
+				}
+				log.Printf("INFO: Skipping file '%s' (invalid migration version: %v)", filename, err)
+				return nil
 			}
 
 			canonicalVer := ver.Normalized()
@@ -744,7 +783,17 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 			})
 			return nil
 		}
+
+		if r.config.ValidateMigrationNaming {
+			return fmt.Errorf("invalid versioned migration name: %s", filename)
+		}
+		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+		return nil
 	}
 
+	if r.config.ValidateMigrationNaming {
+		return fmt.Errorf("invalid migration name: %s", filename)
+	}
+	log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
 	return nil
 }

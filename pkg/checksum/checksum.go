@@ -9,9 +9,38 @@ import (
 	"strings"
 )
 
+// scanLinesAnyNL splits lines by \r\n, \r, or \n, matching Java BufferedReader.readLine().
+func scanLinesAnyNL(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\n' {
+			return i + 1, data[0:i], nil
+		}
+		if data[i] == '\r' {
+			if i+1 < len(data) {
+				if data[i+1] == '\n' {
+					return i + 2, data[0:i], nil
+				}
+				return i + 1, data[0:i], nil
+			}
+			if atEOF {
+				return i + 1, data[0:i], nil
+			}
+			// Request more data to see if \n follows \r
+			return 0, nil, nil
+		}
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
 // Calculate calculates the Flyway-compatible CRC32 checksum for the provided reader.
 // It is line-ending and encoding independent:
-// 1. Reads line by line (stripping \r\n, \n, and \r)
+// 1. Reads line by line (ending a line on \n, \r, or \r\n)
 // 2. Removes UTF-8 BOM from the first line if present
 // 3. Updates CRC32 (IEEE) with the UTF-8 bytes of each line
 // 4. Returns the signed 32-bit integer cast as int64 (matching Flyway's (int) crc32.getValue())
@@ -19,6 +48,7 @@ func Calculate(r io.Reader) (int64, error) {
 	scanner := bufio.NewScanner(r)
 	buf := make([]byte, 64*1024)
 	scanner.Buffer(buf, 10*1024*1024)
+	scanner.Split(scanLinesAnyNL)
 
 	crc := crc32.NewIEEE()
 	firstLine := true
@@ -31,8 +61,6 @@ func Calculate(r io.Reader) (int64, error) {
 			line = strings.TrimPrefix(line, "\ufeff")
 			firstLine = false
 		}
-		// Strip any trailing carriage returns (\r)
-		line = strings.TrimRight(line, "\r")
 		crc.Write([]byte(line))
 	}
 

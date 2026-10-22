@@ -3,6 +3,7 @@ package migrator
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/roryq/noway/pkg/database"
@@ -67,6 +68,21 @@ func (m *Migrator) Baseline(ctx context.Context) (res *BaselineResult, retErr er
 }
 
 func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table string) (*BaselineResult, error) {
+	bVer := m.config.BaselineVersion
+	if bVer == "" {
+		bVer = "1"
+	}
+	bDesc := m.config.BaselineDescription
+	if bDesc == "" {
+		bDesc = "<< Flyway Baseline >>"
+	}
+
+	// Validate baseline version
+	targetVer, err := version.Parse(bVer)
+	if err != nil {
+		return nil, fmt.Errorf("invalid baseline version '%s': %w", bVer, err)
+	}
+
 	// 1. Check existing history
 	applied, err := m.db.FetchHistory(ctx, defaultSchema, table)
 	if err != nil {
@@ -76,6 +92,21 @@ func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table st
 	nonSchemaApplied := 0
 	for _, app := range applied {
 		if app.Type == "BASELINE" {
+			if app.Version != nil && app.Version.Compare(targetVer) == 0 && (app.Description == bDesc || app.Description == database.AbbreviateDescription(bDesc)) {
+				log.Printf("INFO: Schema %s already baselined with version %s (%s). Skipping.", defaultSchema, bVer, bDesc)
+				return &BaselineResult{
+					BaselineVersion:       bVer,
+					SuccessfullyBaselined: true,
+					FlywayVersion:         m.FlywayVersion(),
+					Database:              m.DatabaseName(),
+					Warnings:              make([]string, 0),
+					Operation:             "baseline",
+					Schema:                defaultSchema,
+					Table:                 table,
+					BaselineDescription:   bDesc,
+					Success:               true,
+				}, nil
+			}
 			return nil, fmt.Errorf("unable to baseline database: schema history table already baselined at version %s", app.Version.String())
 		}
 		if app.Type != "SCHEMA" {
@@ -101,21 +132,6 @@ func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table st
 		} else {
 			user = "flyway"
 		}
-	}
-
-	bVer := m.config.BaselineVersion
-	if bVer == "" {
-		bVer = "1"
-	}
-	bDesc := m.config.BaselineDescription
-	if bDesc == "" {
-		bDesc = "<< Flyway Baseline >>"
-	}
-
-	// Validate baseline version
-	_, err = version.Parse(bVer)
-	if err != nil {
-		return nil, fmt.Errorf("invalid baseline version '%s': %w", bVer, err)
 	}
 
 	nextRank := 1

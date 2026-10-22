@@ -189,6 +189,22 @@ func (m *MockDatabase) EnsureHistoryTable(ctx context.Context, schema, table str
 	return nil
 }
 
+func (m *MockDatabase) HistoryTableDDL(schema, table string) string {
+	quoted := m.Quote(schema, table)
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+    `+"`installed_rank`"+` INT64 NOT NULL,
+    `+"`version`"+` STRING,
+    `+"`description`"+` STRING NOT NULL,
+    `+"`type`"+` STRING NOT NULL,
+    `+"`script`"+` STRING NOT NULL,
+    `+"`checksum`"+` INT64,
+    `+"`installed_by`"+` STRING NOT NULL,
+    `+"`installed_on`"+` TIMESTAMP,
+    `+"`execution_time`"+` INT64 NOT NULL,
+    `+"`success`"+` BOOL NOT NULL
+);`, quoted)
+}
+
 func (m *MockDatabase) HistoryTableExists(ctx context.Context, schema, table string) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

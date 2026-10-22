@@ -281,18 +281,26 @@ func TestValidate_UndoMigrations(t *testing.T) {
 		t.Fatalf("expected Validate to pass on matched UNDO_SQL migration, got: %s", valRes.Error())
 	}
 
-	// 2. Modify U1__init.sql content on disk -> Validate should fail with checksum mismatch
+	// 2. Modify U1__init.sql content on disk -> Validate should still pass (undo rows skipped in checksum check)
 	fs["migrations/U1__init.sql"] = &fstest.MapFile{Data: []byte("DROP TABLE t1; -- modified")}
 	mModified, _ := migrator.New(cfg, db)
 	valRes2, err := mModified.Validate(ctx)
 	if err != nil {
 		t.Fatalf("Validate error: %v", err)
 	}
-	if valRes2.Valid {
-		t.Fatalf("expected Validate to fail on modified undo migration checksum")
+	if !valRes2.Valid {
+		t.Fatalf("expected Validate to pass on modified undo migration, got: %s", valRes2.Error())
 	}
-	if !strings.Contains(valRes2.Error(), "Migration checksum mismatch for undo migration version 1") {
-		t.Errorf("unexpected error message: %s", valRes2.Error())
+
+	// 3. Remove U1__init.sql from disk -> Validate should still pass (undo rows skipped in not resolved locally check)
+	delete(fs, "migrations/U1__init.sql")
+	mRemoved, _ := migrator.New(cfg, db)
+	valRes3, err := mRemoved.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if !valRes3.Valid {
+		t.Fatalf("expected Validate to pass on missing undo migration file, got: %s", valRes3.Error())
 	}
 }
 

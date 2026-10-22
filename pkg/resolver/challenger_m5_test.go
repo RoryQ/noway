@@ -274,10 +274,11 @@ func TestChallengerM5_CustomPrefixAndSeparator(t *testing.T) {
 }
 
 func TestChallengerM5_MissingFilesHandling(t *testing.T) {
-	t.Run("error on non-existent directory when IgnoreMissingFiles is false", func(t *testing.T) {
+	t.Run("error on non-existent directory when FailOnMissingLocations is true", func(t *testing.T) {
 		res := NewResolver(ResolverConfig{
-			Locations:          []string{"/nonexistent/directory/path/here"},
-			IgnoreMissingFiles: false,
+			Locations:              []string{"/nonexistent/directory/path/here"},
+			FailOnMissingLocations: true,
+			IgnoreMissingFiles:     false,
 		})
 		_, err := res.Resolve()
 		if err == nil {
@@ -285,14 +286,15 @@ func TestChallengerM5_MissingFilesHandling(t *testing.T) {
 		}
 	})
 
-	t.Run("succeeds on non-existent directory when IgnoreMissingFiles is true", func(t *testing.T) {
+	t.Run("succeeds on non-existent directory when FailOnMissingLocations is false or IgnoreMissingFiles is true", func(t *testing.T) {
 		res := NewResolver(ResolverConfig{
-			Locations:          []string{"/nonexistent/directory/path/here"},
-			IgnoreMissingFiles: true,
+			Locations:              []string{"/nonexistent/directory/path/here"},
+			FailOnMissingLocations: false,
+			IgnoreMissingFiles:     true,
 		})
 		resolved, err := res.Resolve()
 		if err != nil {
-			t.Fatalf("expected success with IgnoreMissingFiles=true, got: %v", err)
+			t.Fatalf("expected success, got: %v", err)
 		}
 		if len(resolved.VersionedMigrations) != 0 {
 			t.Errorf("expected 0 migrations, got %d", len(resolved.VersionedMigrations))

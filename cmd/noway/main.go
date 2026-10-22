@@ -45,9 +45,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	cmd := os.Args[1]
+	var cmd string
+	var options []string
+
+	for _, arg := range os.Args[1:] {
+		if cmd == "" && !strings.HasPrefix(arg, "-") {
+			cmd = arg
+		} else {
+			options = append(options, arg)
+		}
+	}
+
+	if cmd == "" {
+		for _, arg := range options {
+			clean := strings.ToLower(strings.TrimLeft(arg, "-"))
+			if clean == "version" || clean == "v" {
+				cmd = "version"
+				break
+			}
+			if clean == "help" || clean == "h" {
+				cmd = "help"
+				break
+			}
+		}
+	}
+
+	if cmd == "" {
+		printHelp()
+		os.Exit(1)
+	}
+
 	if cmd == "version" || cmd == "-version" || cmd == "--version" || cmd == "-v" {
-		if isJSONRequested(os.Args[2:]) {
+		if isJSONRequested(options) {
 			out := struct {
 				Command        string   `json:"command"`
 				Edition        string   `json:"edition"`
@@ -73,8 +102,13 @@ func main() {
 	}
 
 	// Parse command-line flags and properties
-	cfg, err := parseCLIArgs(os.Args[2:])
+	cfg, err := parseCLIArgs(options)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := cfg.Finalize(); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}

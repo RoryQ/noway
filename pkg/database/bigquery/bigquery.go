@@ -43,6 +43,24 @@ func isNotFoundError(err error) bool {
 	return false
 }
 
+// isConflictError checks if an error represents an Already Exists / Conflict (HTTP 409 or gRPC AlreadyExists) condition.
+// It uses structured error inspection (errors.As for *googleapi.Error and status.Code for gRPC)
+// rather than substring matching "409", avoiding false positives when query job UUIDs or project numbers contain "409".
+func isConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var gErr *googleapi.Error
+	if errors.As(err, &gErr) && gErr.Code == http.StatusConflict {
+		return true
+	}
+	if status.Code(err) == codes.AlreadyExists {
+		return true
+	}
+	errLower := strings.ToLower(err.Error())
+	return strings.Contains(errLower, "already exists") || strings.Contains(errLower, "duplicate")
+}
+
 var (
 	// ErrLockRowMissing indicates that the lock row was deleted from the schema history table during heartbeat.
 	ErrLockRowMissing = errors.New("lock row missing during heartbeat")
@@ -216,8 +234,7 @@ func (db *BigQueryDatabase) EnsureSchema(ctx context.Context, schema string) err
 	return db.retry(ctx, func() error {
 		err := ds.Create(ctx, meta)
 		if err != nil {
-			errLower := strings.ToLower(err.Error())
-			if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
+			if isConflictError(err) {
 				return nil
 			}
 			// Fallback to SQL DDL
@@ -436,12 +453,21 @@ func (db *BigQueryDatabase) EnsureHistoryTable(ctx context.Context, schema, tabl
 			Schema: historySchema,
 		})
 		if err != nil {
-			errLower := strings.ToLower(err.Error())
-			if strings.Contains(errLower, "already exists") || strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "duplicate") {
+			if isConflictError(err) {
 				return nil
 			}
 			// Fallback to SQL DDL
-			sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			sql := db.HistoryTableDDL(schema, table)
+			return db.ExecuteStatement(ctx, sql)
+		}
+		return nil
+	})
+}
+
+// HistoryTableDDL returns the DDL statement used to create the schema history table in BigQuery.
+func (db *BigQueryDatabase) HistoryTableDDL(schema, table string) string {
+	quoted := db.Quote(schema, table)
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
     `+"`installed_rank`"+` INT64 NOT NULL,
     `+"`version`"+` STRING,
     `+"`description`"+` STRING NOT NULL,
@@ -452,11 +478,7 @@ func (db *BigQueryDatabase) EnsureHistoryTable(ctx context.Context, schema, tabl
     `+"`installed_on`"+` TIMESTAMP,
     `+"`execution_time`"+` INT64 NOT NULL,
     `+"`success`"+` BOOL NOT NULL
-)`, db.Quote(schema, table))
-			return db.ExecuteStatement(ctx, sql)
-		}
-		return nil
-	})
+);`, quoted)
 }
 
 // HistoryTableExists checks if the history table exists.
@@ -1090,8 +1112,7 @@ func (db *BigQueryDatabase) executeQueryWithStatus(ctx context.Context, q *bigqu
 			q.JobIDConfig.JobID = jobID
 			job, err := q.Run(submitCtx)
 			if err != nil {
-				errLower := strings.ToLower(err.Error())
-				if strings.Contains(errLower, "already exists") || strings.Contains(errLower, "duplicate") || strings.Contains(err.Error(), "409") {
+				if isConflictError(err) {
 					if existingJob, getErr := db.recoverExistingJob(submitCtx, q, jobID, err); getErr == nil {
 						return existingJob, nil
 					}

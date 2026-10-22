@@ -58,20 +58,10 @@ func (b *DryRunBuilder) WriteSchemaCreation(schema string) {
 
 // WriteHistoryTableCreation outputs DDL to create the schema history table.
 func (b *DryRunBuilder) WriteHistoryTableCreation() {
-	quoted := b.db.Quote(b.schema, b.table)
 	b.sb.WriteString("-- Ensure schema history table exists\n")
-	b.sb.WriteString(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-    `+"`installed_rank`"+` INT64 NOT NULL,
-    `+"`version`"+` STRING,
-    `+"`description`"+` STRING NOT NULL,
-    `+"`type`"+` STRING NOT NULL,
-    `+"`script`"+` STRING NOT NULL,
-    `+"`checksum`"+` INT64,
-    `+"`installed_by`"+` STRING NOT NULL,
-    `+"`installed_on`"+` TIMESTAMP,
-    `+"`execution_time`"+` INT64 NOT NULL,
-    `+"`success`"+` BOOL NOT NULL
-);`+"\n\n", quoted))
+	ddl := b.db.HistoryTableDDL(b.schema, b.table)
+	b.sb.WriteString(ddl)
+	b.sb.WriteString("\n\n")
 }
 
 // WriteBaseline outputs the baseline history record insertion.
@@ -143,9 +133,15 @@ func (b *DryRunBuilder) WriteUndo(mig resolver.ResolvedMigration, replacedSQL st
 		b.sb.WriteString("\n\n")
 	}
 
-	quotedTable := b.db.Quote(b.schema, b.table)
-	b.sb.WriteString("-- Remove undone migration from schema history table\n")
-	b.sb.WriteString(fmt.Sprintf("DELETE FROM %s WHERE `installed_rank` = %d;\n\n", quotedTable, rank))
+	recType := "UNDO_SQL"
+	if mig.IsScript {
+		recType = "UNDO_SCRIPT"
+	}
+	vStr := ""
+	if mig.Version != nil {
+		vStr = mig.Version.String()
+	}
+	b.WriteHistoryInsert(rank, vStr, mig.Description, recType, mig.Script, mig.Checksum, user)
 }
 
 // WriteHistoryInsert writes an INSERT statement for flyway_schema_history.
@@ -306,12 +302,10 @@ func (m *Migrator) migrateDryRun(
 	}
 
 	// 5. afterVersioned callbacks
-	if len(pendingVersioned) > 0 {
-		for _, cb := range m.callbackRunner.callbacks["afterVersioned"] {
-			if !isScriptFile(cb.Filename) {
-				sql, _ := m.replacer.Replace(cb.Content, m.builtins)
-				builder.WriteCallback("afterVersioned", cb, sql)
-			}
+	for _, cb := range m.callbackRunner.callbacks["afterVersioned"] {
+		if !isScriptFile(cb.Filename) {
+			sql, _ := m.replacer.Replace(cb.Content, m.builtins)
+			builder.WriteCallback("afterVersioned", cb, sql)
 		}
 	}
 
@@ -392,36 +386,50 @@ func (m *Migrator) migrateDryRun(
 func (m *Migrator) undoDryRun(
 	ctx context.Context,
 	defaultSchema, table, user string,
-	latestApplied *resolver.AppliedMigration,
-	targetUndo *resolver.ResolvedMigration,
-	replacedSQL string,
+	items []UndoItem,
+	initialVer, targetVer string,
+	nextRank int,
 ) (*UndoResult, error) {
 	builder := NewDryRunBuilder(m.db, defaultSchema, table, m.builtins.Database, user)
-	builder.WriteHeader("undo", latestApplied.Version.String())
+	builder.WriteHeader("undo", initialVer)
 
-	// Callbacks: beforeUndo, beforeEachUndo
+	// Callbacks: beforeUndo
 	for _, cb := range m.callbackRunner.callbacks["beforeUndo"] {
 		if !isScriptFile(cb.Filename) {
 			sql, _ := m.replacer.Replace(cb.Content, m.builtins)
 			builder.WriteCallback("beforeUndo", cb, sql)
 		}
 	}
-	for _, cb := range m.callbackRunner.callbacks["beforeEachUndo"] {
-		if !isScriptFile(cb.Filename) {
-			sql, _ := m.replacer.Replace(cb.Content, m.builtins)
-			builder.WriteCallback("beforeEachUndo", cb, sql)
+
+	var outputs []UndoOutput
+	rank := nextRank
+	for _, item := range items {
+		for _, cb := range m.callbackRunner.callbacks["beforeEachUndo"] {
+			if !isScriptFile(cb.Filename) {
+				sql, _ := m.replacer.Replace(cb.Content, m.builtins)
+				builder.WriteCallback("beforeEachUndo", cb, sql)
+			}
 		}
+
+		builder.WriteUndo(item.Resolved, item.SQL, rank, user)
+		rank++
+
+		for _, cb := range m.callbackRunner.callbacks["afterEachUndo"] {
+			if !isScriptFile(cb.Filename) {
+				sql, _ := m.replacer.Replace(cb.Content, m.builtins)
+				builder.WriteCallback("afterEachUndo", cb, sql)
+			}
+		}
+
+		outputs = append(outputs, UndoOutput{
+			Category:      "Versioned",
+			Version:       item.Resolved.Version.String(),
+			Description:   item.Resolved.Description,
+			Filepath:      item.Resolved.Script,
+			ExecutionTime: 0,
+		})
 	}
 
-	builder.WriteUndo(*targetUndo, replacedSQL, latestApplied.InstalledRank, user)
-
-	// Callbacks: afterEachUndo, afterUndo
-	for _, cb := range m.callbackRunner.callbacks["afterEachUndo"] {
-		if !isScriptFile(cb.Filename) {
-			sql, _ := m.replacer.Replace(cb.Content, m.builtins)
-			builder.WriteCallback("afterEachUndo", cb, sql)
-		}
-	}
 	for _, cb := range m.callbackRunner.callbacks["afterUndo"] {
 		if !isScriptFile(cb.Filename) {
 			sql, _ := m.replacer.Replace(cb.Content, m.builtins)
@@ -433,27 +441,22 @@ func (m *Migrator) undoDryRun(
 		return nil, err
 	}
 
-	return &UndoResult{
-		InitialSchemaVersion: latestApplied.Version.String(),
-		TargetSchemaVersion:  "",
+	res := &UndoResult{
+		InitialSchemaVersion: initialVer,
+		TargetSchemaVersion:  targetVer,
 		SchemaName:           defaultSchema,
-		Migrations: []UndoOutput{
-			{
-				Category:      "Versioned",
-				Version:       latestApplied.Version.String(),
-				Description:   targetUndo.Description,
-				Filepath:      targetUndo.Script,
-				ExecutionTime: 0,
-			},
-		},
-		MigrationsUndone: 1,
-		Success:          true,
-		FlywayVersion:    m.FlywayVersion(),
-		Database:         m.DatabaseName(),
-		Warnings:         make([]string, 0),
-		Operation:        "undo",
-		UndoneVersion:    latestApplied.Version.String(),
-		Script:           targetUndo.Script,
-		ExecutionTime:    0,
-	}, nil
+		Migrations:           outputs,
+		MigrationsUndone:     len(outputs),
+		Success:              true,
+		FlywayVersion:        m.FlywayVersion(),
+		Database:             m.DatabaseName(),
+		Warnings:             make([]string, 0),
+		Operation:            "undo",
+	}
+	if len(outputs) > 0 {
+		res.UndoneVersion = outputs[len(outputs)-1].Version
+		res.Script = outputs[len(outputs)-1].Filepath
+		res.ExecutionTime = 0
+	}
+	return res, nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"text/tabwriter"
 
 	"github.com/roryq/noway/pkg/parser"
@@ -328,7 +329,7 @@ func computeMigrationInfos(
 			state = resolver.StateUndone
 		} else if !app.Success {
 			if !exists {
-				if maxResolvedVersion != nil && appVer.IsNewerThan(*maxResolvedVersion) {
+				if maxResolvedVersion == nil || appVer.IsNewerThan(*maxResolvedVersion) {
 					state = resolver.StateFutureFailed
 				} else {
 					state = resolver.StateMissingFailed
@@ -339,7 +340,7 @@ func computeMigrationInfos(
 		} else if app.Type == "BASELINE" {
 			state = resolver.StateBaseline
 		} else if !exists {
-			if maxResolvedVersion != nil && appVer.IsNewerThan(*maxResolvedVersion) {
+			if maxResolvedVersion == nil || appVer.IsNewerThan(*maxResolvedVersion) {
 				state = resolver.StateFutureSuccess
 			} else {
 				state = resolver.StateMissingSuccess
@@ -532,6 +533,34 @@ func computeMigrationInfos(
 			})
 		}
 	}
+
+	sort.SliceStable(infos, func(i, j int) bool {
+		a := infos[i]
+		b := infos[j]
+
+		// If both are applied, sort by installed_rank
+		if a.Applied != nil && b.Applied != nil {
+			return a.Applied.InstalledRank < b.Applied.InstalledRank
+		}
+		// Applied comes before pending
+		if a.Applied != nil {
+			return true
+		}
+		if b.Applied != nil {
+			return false
+		}
+		// Both are pending: versioned comes before repeatables
+		if a.Version != nil && b.Version != nil {
+			return a.Version.Compare(*b.Version) < 0
+		}
+		if a.Version != nil {
+			return true
+		}
+		if b.Version != nil {
+			return false
+		}
+		return a.Description < b.Description
+	})
 
 	return infos
 }

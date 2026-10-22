@@ -56,3 +56,15 @@ func TestChecksumEmpty(t *testing.T) {
 		t.Errorf("expected 0 for empty, got %d", sum)
 	}
 }
+
+func TestChecksumLoneCR(t *testing.T) {
+	// Flyway parity: a lone \r (CR) ends a line in Java BufferedReader.readLine()
+	// "a\rb\n" has lines "a" and "b", yielding -1635563411
+	sum, err := CalculateString("a\rb\n")
+	if err != nil {
+		t.Fatalf("CalculateString error: %v", err)
+	}
+	if sum != -1635563411 {
+		t.Errorf("expected -1635563411 for 'a\\rb\\n', got %d", sum)
+	}
+}

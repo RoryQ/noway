@@ -107,18 +107,20 @@ func New(cfg *config.Configuration, db database.Database) (*Migrator, error) {
 	}
 
 	res := resolver.NewResolver(resolver.ResolverConfig{
-		Locations:        cfg.Locations,
-		FS:               cfg.FS,
-		Prefix:           cfg.SQLMigrationPrefix,
-		RepeatablePrefix: cfg.RepeatableSQLMigrationPrefix,
-		UndoPrefix:       cfg.UndoSQLMigrationPrefix,
-		BaselinePrefix:   cfg.BaselineSQLMigrationPrefix,
-		Separator:        cfg.SQLMigrationSeparator,
-		Suffixes:               suffixes,
-		Encoding:               cfg.Encoding,
-		PlaceholderReplacement: &cfg.PlaceholderReplacement,
-		Replacer:               replacer,
-		Builtins:               builtins,
+		Locations:               cfg.Locations,
+		FS:                      cfg.FS,
+		Prefix:                  cfg.SQLMigrationPrefix,
+		RepeatablePrefix:        cfg.RepeatableSQLMigrationPrefix,
+		UndoPrefix:              cfg.UndoSQLMigrationPrefix,
+		BaselinePrefix:          cfg.BaselineSQLMigrationPrefix,
+		Separator:               cfg.SQLMigrationSeparator,
+		Suffixes:                suffixes,
+		Encoding:                cfg.Encoding,
+		FailOnMissingLocations:  cfg.FailOnMissingLocations,
+		ValidateMigrationNaming: cfg.ValidateMigrationNaming,
+		PlaceholderReplacement:  &cfg.PlaceholderReplacement,
+		Replacer:                replacer,
+		Builtins:                builtins,
 	})
 
 	// Discover callbacks
@@ -406,7 +408,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	m.callbackRunner.callbacks = resolved.Callbacks
 
 	// 7. Validate on migrate
-	if m.config.ValidateOnMigrate && !isDryRun {
+	if m.config.ValidateOnMigrate {
 		valRes, err := m.Validate(ctx, true)
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
@@ -646,84 +648,84 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 
 	currentVersion := maxAppliedVersion
 
-	// Only execute migration loops if totalToApply > 0
-	if totalToApply > 0 {
-		// 10. Execute Versioned Migrations
-		for _, mig := range pendingVersioned {
-			if mig.Config.ShouldExecute != "" {
-				shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
-				if err != nil {
-					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
-					result.Success = false
-					return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
-				}
-				if !shouldExec {
-					continue
-				}
-			}
-
-			execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, installedBy)
+	// 10. Execute Versioned Migrations
+	for _, mig := range pendingVersioned {
+		if mig.Config.ShouldExecute != "" {
+			shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
 			if err != nil {
 				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				result.Success = false
-				return result, err
+				return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
 			}
-			result.Migrations = append(result.Migrations, *execSummary)
-			result.ExecutedMigrations = result.Migrations
-			result.MigrationsExecuted++
-			nextInstalledRank++
-			if currentVersion == nil || mig.Version.IsNewerThan(*currentVersion) {
-				currentVersion = mig.Version
+			if !shouldExec {
+				continue
 			}
 		}
 
-		// Fire afterVersioned callback
-		if err := m.callbackRunner.Fire(ctx, "afterVersioned"); err != nil {
+		execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, installedBy)
+		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			result.Success = false
 			return result, err
 		}
+		result.Migrations = append(result.Migrations, *execSummary)
+		result.ExecutedMigrations = result.Migrations
+		result.MigrationsExecuted++
+		nextInstalledRank++
+		if currentVersion == nil || mig.Version.IsNewerThan(*currentVersion) {
+			currentVersion = mig.Version
+		}
+	}
 
-		// Fire beforeRepeatables callback
-		if err := m.callbackRunner.Fire(ctx, "beforeRepeatables"); err != nil {
+	// Always fire afterVersioned callback after the versioned loop
+	if err := m.callbackRunner.Fire(ctx, "afterVersioned"); err != nil {
+		_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+		result.Success = false
+		return result, err
+	}
+
+	// 11. Execute Repeatable Migrations
+	firedBeforeRepeatables := false
+	for _, mig := range pendingRepeatable {
+		if mig.Config.ShouldExecute != "" {
+			shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
+			if err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				result.Success = false
+				return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
+			}
+			if !shouldExec {
+				continue
+			}
+		}
+
+		if !firedBeforeRepeatables {
+			if err := m.callbackRunner.Fire(ctx, "beforeRepeatables"); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				result.Success = false
+				return result, err
+			}
+			firedBeforeRepeatables = true
+		}
+
+		execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, installedBy)
+		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			result.Success = false
 			return result, err
 		}
+		result.Migrations = append(result.Migrations, *execSummary)
+		result.ExecutedMigrations = result.Migrations
+		result.MigrationsExecuted++
+		nextInstalledRank++
+	}
 
-		// 11. Execute Repeatable Migrations
-		for _, mig := range pendingRepeatable {
-			if mig.Config.ShouldExecute != "" {
-				shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
-				if err != nil {
-					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
-					result.Success = false
-					return result, fmt.Errorf("error evaluating shouldExecute on %s: %w", mig.Script, err)
-				}
-				if !shouldExec {
-					continue
-				}
-			}
-
-			execSummary, err := m.executeMigration(ctx, mig, defaultSchema, table, nextInstalledRank, installedBy)
-			if err != nil {
-				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
-				result.Success = false
-				return result, err
-			}
-			result.Migrations = append(result.Migrations, *execSummary)
-			result.ExecutedMigrations = result.Migrations
-			result.MigrationsExecuted++
-			nextInstalledRank++
-		}
-
-		// Fire afterMigrateApplied callback if len(appliedMigrations) > 0
-		if len(result.Migrations) > 0 {
-			if err := m.callbackRunner.Fire(ctx, "afterMigrateApplied"); err != nil {
-				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
-				result.Success = false
-				return result, err
-			}
+	// Fire afterMigrateApplied callback if len(appliedMigrations) > 0
+	if len(result.Migrations) > 0 {
+		if err := m.callbackRunner.Fire(ctx, "afterMigrateApplied"); err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+			result.Success = false
+			return result, err
 		}
 	}
 
@@ -825,6 +827,12 @@ func (m *Migrator) executeSQLMigration(
 		recType = "SQL"
 	}
 
+	if execErr == nil {
+		if afterErr := m.callbackRunner.Fire(ctx, "afterEachMigrate"); afterErr != nil {
+			execErr = afterErr
+		}
+	}
+
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,
 		Version:       verStr,
@@ -850,11 +858,6 @@ func (m *Migrator) executeSQLMigration(
 		_ = m.callbackRunner.Fire(ctx, "beforeEachMigrateError")
 		_ = m.callbackRunner.Fire(ctx, "afterEachMigrateError")
 		return nil, execErr
-	}
-
-	// Fire afterEachMigrate callback
-	if err := m.callbackRunner.Fire(ctx, "afterEachMigrate"); err != nil {
-		return nil, err
 	}
 
 	verOutput := ""
@@ -1010,6 +1013,12 @@ func (m *Migrator) executeScriptMigration(
 	}
 	cs := mig.Checksum
 
+	if execErr == nil {
+		if afterErr := m.callbackRunner.Fire(ctx, "afterEachMigrate"); afterErr != nil {
+			execErr = afterErr
+		}
+	}
+
 	historyRec := database.HistoryRecord{
 		InstalledRank: rank,
 		Version:       verStr,
@@ -1034,10 +1043,6 @@ func (m *Migrator) executeScriptMigration(
 		_ = m.callbackRunner.Fire(ctx, "beforeEachMigrateError")
 		_ = m.callbackRunner.Fire(ctx, "afterEachMigrateError")
 		return nil, fmt.Errorf("script migration %s failed (exit %v): %w\nOutput:\n%s", mig.Script, execErr, execErr, string(output))
-	}
-
-	if err := m.callbackRunner.Fire(ctx, "afterEachMigrate"); err != nil {
-		return nil, err
 	}
 
 	verOutput := ""

@@ -246,10 +246,17 @@ func TestUndo(t *testing.T) {
 		t.Errorf("expected undone version '2', got %s", undoRes.UndoneVersion)
 	}
 
-	// Verify history table now only has V1
+	// Verify history table retains V1, V2 and appends UNDO_SQL record
 	history, _ := db.FetchHistory(ctx, "test_dataset", "flyway_schema_history")
-	if len(history) != 1 || history[0].Version.String() != "1" {
-		t.Errorf("expected only V1 in history, got %v", history)
+	if len(history) != 3 {
+		t.Fatalf("expected 3 records in history after undo, got %d", len(history))
+	}
+	if history[2].Type != "UNDO_SQL" || history[2].Version.String() != "2" {
+		t.Errorf("expected 3rd record to be UNDO_SQL for version 2, got type=%s ver=%v", history[2].Type, history[2].Version)
+	}
+	processed := processAppliedHistory(history)
+	if len(processed.AppliedVersioned) != 1 || processed.AppliedVersioned["1"].Version.String() != "1" {
+		t.Errorf("expected only V1 to be active in processed history, got %v", processed.AppliedVersioned)
 	}
 }
 

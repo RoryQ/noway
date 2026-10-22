@@ -51,6 +51,9 @@ type Database interface {
 	// EnsureHistoryTable creates the schema history table if it doesn't exist.
 	EnsureHistoryTable(ctx context.Context, schema, table string) error
 
+	// HistoryTableDDL returns the DDL statement used to create the schema history table.
+	HistoryTableDDL(schema, table string) string
+
 	// HistoryTableExists checks if the schema history table exists.
 	HistoryTableExists(ctx context.Context, schema, table string) (bool, error)
 

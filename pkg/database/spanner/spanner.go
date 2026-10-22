@@ -964,19 +964,14 @@ func (db *SpannerDatabase) CleanSchema(ctx context.Context, schema string, exclu
 	return nil
 }
 
-// EnsureHistoryTable creates the flyway_schema_history table if it doesn't exist.
-func (db *SpannerDatabase) EnsureHistoryTable(ctx context.Context, schema, table string) error {
-	exists, err := db.HistoryTableExists(ctx, schema, table)
-	if err == nil && exists {
-		return nil
-	}
-
+// HistoryTableDDL returns the DDL statement used to create the schema history table in Spanner.
+func (db *SpannerDatabase) HistoryTableDDL(schema, table string) string {
 	tableName := table
 	if tableName == "" {
 		tableName = "flyway_schema_history"
 	}
 
-	ddl := fmt.Sprintf(`CREATE TABLE %s (
+	return fmt.Sprintf(`CREATE TABLE %s (
 		`+"`installed_rank`"+` INT64 NOT NULL,
 		`+"`version`"+` STRING(50),
 		`+"`description`"+` STRING(200) NOT NULL,
@@ -987,7 +982,18 @@ func (db *SpannerDatabase) EnsureHistoryTable(ctx context.Context, schema, table
 		`+"`installed_on`"+` TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp=true),
 		`+"`execution_time`"+` INT64 NOT NULL,
 		`+"`success`"+` BOOL NOT NULL
-	) PRIMARY KEY (`+"`installed_rank`"+`)`, db.Quote(tableName))
+	) PRIMARY KEY (`+"`installed_rank`"+`);`, db.Quote(tableName))
+}
+
+// EnsureHistoryTable creates the flyway_schema_history table if it doesn't exist.
+func (db *SpannerDatabase) EnsureHistoryTable(ctx context.Context, schema, table string) error {
+	exists, err := db.HistoryTableExists(ctx, schema, table)
+	if err == nil && exists {
+		return nil
+	}
+
+	ddl := db.HistoryTableDDL(schema, table)
+	ddl = strings.TrimSuffix(ddl, ";")
 
 	return db.ExecuteStatement(ctx, ddl)
 }
@@ -1174,7 +1180,7 @@ func (db *SpannerDatabase) InsertHistory(ctx context.Context, schema, table stri
 	desc := AbbreviateDescription(rec.Description)
 	script := AbbreviateScript(rec.Script)
 
-	m := spanner.InsertOrUpdate(tableName,
+	m := spanner.Insert(tableName,
 		[]string{"installed_rank", "version", "description", "type", "script", "checksum", "installed_by", "installed_on", "execution_time", "success"},
 		[]interface{}{
 			int64(rec.InstalledRank),

@@ -688,6 +688,18 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 			return err
 		}
 		cfg.FailOnMissingTarget = b
+	case "FAIL_ON_MISSING_LOCATIONS", "FAILONMISSINGLOCATIONS":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.FailOnMissingLocations = b
+	case "VALIDATE_MIGRATION_NAMING", "VALIDATEMIGRATIONNAMING":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.ValidateMigrationNaming = b
 	case "CLEAN_DISABLED", "CLEANDISABLED":
 		b, err := ParseBool(val)
 		if err != nil {
@@ -936,6 +948,18 @@ func applyProperty(cfg *Configuration, key, val string) error {
 			return err
 		}
 		cfg.FailOnMissingTarget = b
+	case "failonmissinglocations", "fail_on_missing_locations", "fail-on-missing-locations":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.FailOnMissingLocations = b
+	case "validatemigrationnaming", "validate_migration_naming", "validate-migration-naming":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.ValidateMigrationNaming = b
 	case "cleandisabled", "clean_disabled", "clean-disabled":
 		b, err := ParseBool(val)
 		if err != nil {
@@ -1082,6 +1106,8 @@ var KnownProperties = []string{
 	"skipExecutingMigrations",
 	"cherryPick",
 	"failOnMissingTarget",
+	"failOnMissingLocations",
+	"validateMigrationNaming",
 	"baselineVersion",
 	"baselineDescription",
 	"baselineOnMigrate",

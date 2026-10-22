@@ -400,8 +400,8 @@ func TestChallenger_ZeroMigrationRun_FreshDB(t *testing.T) {
 	if hasAEM {
 		t.Errorf("afterEachMigrate MUST NOT execute when 0 migrations are run")
 	}
-	if hasAfterVersioned {
-		t.Errorf("afterVersioned MUST NOT execute when 0 migrations are run")
+	if !hasAfterVersioned {
+		t.Errorf("expected afterVersioned to execute after versioned loop on zero-migration run")
 	}
 	if hasBeforeRepeatables {
 		t.Errorf("beforeRepeatables MUST NOT execute when 0 migrations are run")

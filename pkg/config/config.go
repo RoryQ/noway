@@ -53,6 +53,8 @@ type Configuration struct {
 	SkipExecutingMigrations              bool             `json:"skipExecutingMigrations" yaml:"skipExecutingMigrations" toml:"skipExecutingMigrations"` // default: false
 	CherryPick                           []string         `json:"cherryPick" yaml:"cherryPick" toml:"cherryPick"`
 	FailOnMissingTarget                  bool             `json:"failOnMissingTarget" yaml:"failOnMissingTarget" toml:"failOnMissingTarget"`             // default: false
+	FailOnMissingLocations               bool             `json:"failOnMissingLocations" yaml:"failOnMissingLocations" toml:"failOnMissingLocations"`   // default: false
+	ValidateMigrationNaming              bool             `json:"validateMigrationNaming" yaml:"validateMigrationNaming" toml:"validateMigrationNaming"` // default: false
 	IgnoreMigrationPatternsExplicitlySet bool             `json:"-" yaml:"-" toml:"-"`
 	CleanDisabled           bool             `json:"cleanDisabled" yaml:"cleanDisabled" toml:"cleanDisabled"`                             // default: true
 	CleanOnValidationError  bool             `json:"cleanOnValidationError" yaml:"cleanOnValidationError" toml:"cleanOnValidationError"` // default: false
@@ -253,6 +255,13 @@ func (c *Configuration) Finalize() error {
 	}
 	if c.IgnorePendingMigrations && !c.IsIgnored("pending", "", nil) {
 		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:pending", "*:outdated")
+	}
+
+	c.OutputType = strings.ToLower(strings.TrimSpace(c.OutputType))
+	if c.OutputType == "" {
+		c.OutputType = "text"
+	} else if c.OutputType != "text" && c.OutputType != "json" {
+		return fmt.Errorf("invalid outputType '%s': must be 'text' or 'json'", c.OutputType)
 	}
 
 	return nil

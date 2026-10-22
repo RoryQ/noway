@@ -1262,6 +1262,7 @@ func TestChallenger_ZeroMigrations_LifecycleEventPrecision(t *testing.T) {
 
 	expectedHooks := []string{
 		"EXECUTE_SQL: SELECT 'EVENT_beforeMigrate'",
+		"EXECUTE_SQL: SELECT 'EVENT_afterVersioned'",
 		"EXECUTE_SQL: SELECT 'EVENT_afterMigrate'",
 	}
 

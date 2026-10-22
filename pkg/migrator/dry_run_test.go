@@ -264,8 +264,8 @@ func TestUndo_DryRunOutput_GeneratesUndoScriptAndDoesNotTouchDatabase(t *testing
 	if !strings.Contains(sql, "DROP TABLE undo_ds.users;") {
 		t.Errorf("missing replaced undo SQL in output:\n%s", sql)
 	}
-	if !strings.Contains(sql, "DELETE FROM `undo_ds`.`flyway_schema_history` WHERE `installed_rank` = 1;") {
-		t.Errorf("missing history table delete statement in output:\n%s", sql)
+	if !strings.Contains(sql, "'UNDO_SQL'") || !strings.Contains(sql, "INSERT INTO `undo_ds`.`flyway_schema_history`") {
+		t.Errorf("missing history table undo insert statement in output:\n%s", sql)
 	}
 }
 
