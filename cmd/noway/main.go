@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -39,6 +41,18 @@ func isJSONRequested(args []string) bool {
 	return false
 }
 
+var validCommands = map[string]bool{
+	"migrate":  true,
+	"info":     true,
+	"validate": true,
+	"baseline": true,
+	"repair":   true,
+	"clean":    true,
+	"undo":     true,
+	"version":  true,
+	"help":     true,
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printHelp()
@@ -48,9 +62,10 @@ func main() {
 	var cmd string
 	var options []string
 
+	// First pass: identify any known command name
 	for _, arg := range os.Args[1:] {
-		if cmd == "" && !strings.HasPrefix(arg, "-") {
-			cmd = arg
+		if cmd == "" && validCommands[strings.ToLower(arg)] {
+			cmd = strings.ToLower(arg)
 		} else {
 			options = append(options, arg)
 		}
@@ -63,11 +78,23 @@ func main() {
 				cmd = "version"
 				break
 			}
-			if clean == "help" || clean == "h" {
+			if clean == "help" || clean == "h" || clean == "?" {
 				cmd = "help"
 				break
 			}
 		}
+	}
+
+	if cmd == "" {
+		newOptions := make([]string, 0, len(options))
+		for _, arg := range options {
+			if cmd == "" && !strings.HasPrefix(arg, "-") {
+				cmd = arg
+			} else {
+				newOptions = append(newOptions, arg)
+			}
+		}
+		options = newOptions
 	}
 
 	if cmd == "" {
@@ -96,7 +123,7 @@ func main() {
 		return
 	}
 
-	if cmd == "help" || cmd == "-help" || cmd == "--help" || cmd == "-h" {
+	if cmd == "help" || cmd == "-help" || cmd == "--help" || cmd == "-h" || cmd == "-?" {
 		printHelp()
 		return
 	}
@@ -108,12 +135,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cfg.OutputFile != "" {
+		f, err := os.Create(cfg.OutputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: failed to open output file '%s': %v\n", cfg.OutputFile, err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		os.Stdout = f
+	}
+
+	if cfg.Quiet {
+		log.SetOutput(io.Discard)
+	}
+
 	if err := cfg.Finalize(); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
 	}
 
-	if cfg.OutputType != "json" {
+	if !cfg.Quiet && cfg.OutputType != "json" {
 		printBanner()
 	}
 
@@ -215,6 +256,19 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 		}
 
 		cleanArg := strings.TrimLeft(arg, "-")
+
+		// Handle flags with no value before checking for values
+		switch strings.ToLower(cleanArg) {
+		case "x":
+			cfg.Debug = true
+			continue
+		case "q":
+			cfg.Quiet = true
+			continue
+		case "skipcheckforupdate", "communityfallback":
+			continue
+		}
+
 		var key, val string
 
 		if idx := strings.Index(cleanArg, "="); idx != -1 {
@@ -415,6 +469,24 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.Environment = val
 		case "configfile", "configfiles", "config-file", "config-files":
 			// Handled in step 1
+		case "outputfile", "output-file", "output_file":
+			cfg.OutputFile = val
+		case "workingdirectory", "working-directory", "working_directory":
+			cfg.WorkingDirectory = val
+		case "color":
+			cVal := strings.ToLower(strings.TrimSpace(val))
+			if cVal != "always" && cVal != "never" && cVal != "auto" {
+				return nil, fmt.Errorf("invalid color '%s': must be 'always', 'never' or 'auto'", val)
+			}
+			cfg.Color = cVal
+		case "outputlogsinjson", "output-logs-in-json", "output_logs_in_json":
+			log.Printf("WARNING: -outputLogsInJson is not supported by noway and is ignored")
+		case "configfileencoding", "config-file-encoding", "config_file_encoding":
+			log.Printf("WARNING: -configFileEncoding is not supported by noway and is ignored")
+		case "infosincedate", "infountildate", "infosinceversion", "infountilversion", "infoofstate",
+			"info-since-date", "info-until-date", "info-since-version", "info-until-version", "info-of-state",
+			"info_since_date", "info_until_date", "info_since_version", "info_until_version", "info_of_state":
+			log.Printf("WARNING: -%s is not supported by noway and is ignored", key)
 		default:
 			if strings.HasPrefix(strings.ToLower(key), "placeholders.") || strings.HasPrefix(strings.ToLower(key), "placeholder.") {
 				phKey := strings.TrimPrefix(key, "placeholders.")
@@ -423,6 +495,10 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 					cfg.Placeholders = make(map[string]string)
 				}
 				cfg.Placeholders[phKey] = val
+			} else if strings.HasPrefix(strings.ToLower(key), "jdbcproperties.") || strings.HasPrefix(strings.ToLower(key), "plugins.") || strings.HasPrefix(strings.ToLower(key), "configurations.") {
+				log.Printf("WARNING: %s is not supported by noway and is ignored", key)
+			} else if config.IsUnsupportedFlywayKey(key) {
+				log.Printf("WARNING: -%s is not supported by noway and is ignored", key)
 			} else {
 				return nil, config.UnknownPropertyError(key)
 			}

@@ -1041,6 +1041,16 @@ func applyProperty(cfg *Configuration, key, val string) error {
 		cfg.GCPSpannerEndpoint = val
 	case "configfile", "configfiles", "config-file", "config-files":
 		// skip
+	case "workingdirectory", "working_directory", "working-directory":
+		cfg.WorkingDirectory = val
+	case "outputfile", "output_file", "output-file":
+		cfg.OutputFile = val
+	case "color":
+		cfg.Color = val
+	case "infosincedate", "infountildate", "infosinceversion", "infountilversion", "infoofstate",
+		"info-since-date", "info-until-date", "info-since-version", "info-until-version", "info-of-state",
+		"info_since_date", "info_until_date", "info_since_version", "info_until_version", "info_of_state":
+		log.Printf("WARNING: %s is not supported by noway and is ignored", key)
 	default:
 		if strings.HasPrefix(cleanKeyLower, "placeholders.") {
 			phKey := cleanKey[len("placeholders."):]
@@ -1098,8 +1108,16 @@ var unsupportedFlywayKeys = map[string]bool{
 	"powershellexecutable":      true,
 	"stream":                    true,
 	"tablespace":                true,
-	"workingdirectory":          true,
 	"ignoreignoredmigrations":   true,
+}
+
+// IsUnsupportedFlywayKey reports whether key is a known Flyway configuration key not supported by noway.
+func IsUnsupportedFlywayKey(key string) bool {
+	norm := strings.ToLower(strings.TrimSpace(key))
+	norm = strings.TrimPrefix(norm, "flyway.")
+	norm = strings.TrimPrefix(norm, "noway.")
+	norm = strings.ReplaceAll(strings.ReplaceAll(norm, "-", ""), "_", "")
+	return unsupportedFlywayKeys[norm]
 }
 
 func splitAndTrim(s, sep string) []string {

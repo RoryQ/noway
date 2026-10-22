@@ -312,5 +312,48 @@ func TestParseCLIArgs_Task10Flags(t *testing.T) {
 	}
 }
 
+func TestParseCLIArgs_FlagsAndOptions(t *testing.T) {
+	args := []string{
+		"-q",
+		"-X",
+		"-skipCheckForUpdate",
+		"-communityFallback",
+		"-workingDirectory=/tmp/myworkdir",
+		"-outputFile=/tmp/out.log",
+		"-color=always",
+		"-outputLogsInJson",
+		"-configFileEncoding=UTF-8",
+		"-infoSinceDate=2026-01-01",
+	}
+
+	cfg, err := parseCLIArgs(args)
+	if err != nil {
+		t.Fatalf("parseCLIArgs failed: %v", err)
+	}
+
+	if !cfg.Quiet {
+		t.Errorf("expected Quiet true")
+	}
+	if !cfg.Debug {
+		t.Errorf("expected Debug true")
+	}
+	if cfg.WorkingDirectory != "/tmp/myworkdir" {
+		t.Errorf("expected WorkingDirectory '/tmp/myworkdir', got %q", cfg.WorkingDirectory)
+	}
+	if cfg.OutputFile != "/tmp/out.log" {
+		t.Errorf("expected OutputFile '/tmp/out.log', got %q", cfg.OutputFile)
+	}
+	if cfg.Color != "always" {
+		t.Errorf("expected Color 'always', got %q", cfg.Color)
+	}
+
+	// Invalid color fails
+	_, err = parseCLIArgs([]string{"-color=bogus"})
+	if err == nil || !strings.Contains(err.Error(), "invalid color") {
+		t.Errorf("expected error for invalid color, got: %v", err)
+	}
+}
+
+
 
 

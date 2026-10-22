@@ -61,6 +61,7 @@ type Configuration struct {
 	SQLMigrationSeparator     string   `json:"sqlMigrationSeparator" yaml:"sqlMigrationSeparator" toml:"sqlMigrationSeparator"`                 // default: __
 	SQLMigrationSuffixes      []string `json:"sqlMigrationSuffixes" yaml:"sqlMigrationSuffixes" toml:"sqlMigrationSuffixes"`                   // default: [.sql]
 	Encoding                  string   `json:"encoding" yaml:"encoding" toml:"encoding"`                                                 // default: UTF-8
+	WorkingDirectory          string   `json:"workingDirectory" yaml:"workingDirectory" toml:"workingDirectory"`
 
 	// Placeholder replacement
 	PlaceholderReplacement bool              `json:"placeholderReplacement" yaml:"placeholderReplacement" toml:"placeholderReplacement"` // default: true
@@ -100,7 +101,11 @@ type Configuration struct {
 
 	// Output & Output formatting
 	OutputType   string `json:"outputType" yaml:"outputType" toml:"outputType"`       // "text" or "json"
+	OutputFile   string `json:"outputFile" yaml:"outputFile" toml:"outputFile"`
+	Color        string `json:"color" yaml:"color" toml:"color"`
 	DryRunOutput string `json:"dryRunOutput" yaml:"dryRunOutput" toml:"dryRunOutput"` // Output file for dry run SQL (or - for stdout)
+	Quiet        bool   `json:"-" yaml:"-" toml:"-"`
+	Debug        bool   `json:"-" yaml:"-" toml:"-"`
 
 	// BigQuery Specific Connection Overrides
 	GCPProjectID          string `json:"gcpProjectId" yaml:"gcpProjectId" toml:"gcpProjectId"`
@@ -290,6 +295,26 @@ func (c *Configuration) Finalize() error {
 		c.OutputType = "text"
 	} else if c.OutputType != "text" && c.OutputType != "json" {
 		return fmt.Errorf("invalid outputType '%s': must be 'text' or 'json'", c.OutputType)
+	}
+
+	c.Color = strings.ToLower(strings.TrimSpace(c.Color))
+	if c.Color != "" && c.Color != "always" && c.Color != "never" && c.Color != "auto" {
+		return fmt.Errorf("invalid color '%s': must be 'always', 'never' or 'auto'", c.Color)
+	}
+
+	// Apply workingDirectory to relative locations if set
+	if c.WorkingDirectory != "" {
+		for i, loc := range c.Locations {
+			prefix := ""
+			p := loc
+			if strings.HasPrefix(loc, "filesystem:") {
+				prefix = "filesystem:"
+				p = strings.TrimPrefix(loc, "filesystem:")
+			}
+			if !filepath.IsAbs(p) {
+				c.Locations[i] = prefix + filepath.Join(c.WorkingDirectory, p)
+			}
+		}
 	}
 
 	return nil
