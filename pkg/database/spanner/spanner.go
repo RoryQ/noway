@@ -1151,7 +1151,7 @@ func AbbreviateDescription(desc string) string {
 	return database.AbbreviateDescription(desc)
 }
 
-// AbbreviateScript truncates script to at most 1000 runes ("..." + last 997).
+// AbbreviateScript truncates script to at most 1000 runes ("..." + runes 3 to 1000).
 func AbbreviateScript(script string) string {
 	return database.AbbreviateScript(script)
 }

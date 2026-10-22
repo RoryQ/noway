@@ -9,11 +9,11 @@ func AbbreviateDescription(desc string) string {
 	return string(r[:197]) + "..."
 }
 
-// AbbreviateScript truncates script to at most 1000 runes ("..." + last 997).
+// AbbreviateScript truncates script to at most 1000 runes ("..." + runes 3 to 1000).
 func AbbreviateScript(script string) string {
 	r := []rune(script)
 	if len(r) <= 1000 {
 		return script
 	}
-	return "..." + string(r[len(r)-997:])
+	return "..." + string(r[3:1000])
 }

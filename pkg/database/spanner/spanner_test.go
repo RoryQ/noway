@@ -1055,18 +1055,19 @@ func TestAbbreviateDescriptionAndScript(t *testing.T) {
 		t.Errorf("unexpected abbreviated description: %s", abbrDesc)
 	}
 
-	// 2. Script truncation (max 1000 runes, "..." + last 997)
+	// 2. Script truncation (max 1000 runes, "..." + runes 3 to 1000)
 	shortScript := strings.Repeat("x", 1000)
 	if AbbreviateScript(shortScript) != shortScript {
 		t.Errorf("expected 1000 char script to remain unchanged")
 	}
 
-	longScript := strings.Repeat("x", 103) + strings.Repeat("y", 997) // 1100 chars
+	longScript := strings.Repeat("x", 100) + strings.Repeat("y", 1000) // 1100 chars
 	abbrScript := AbbreviateScript(longScript)
 	if len([]rune(abbrScript)) != 1000 {
 		t.Errorf("expected abbreviated script length 1000, got %d", len([]rune(abbrScript)))
 	}
-	if abbrScript != "..."+strings.Repeat("y", 997) {
+	expected := "..." + string([]rune(longScript)[3:1000])
+	if abbrScript != expected {
 		t.Errorf("unexpected abbreviated script: %s", abbrScript)
 	}
 }
