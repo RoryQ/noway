@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -167,6 +169,48 @@ flyway.password=secret_staging
 	}
 	if cfg.Password != "secret_staging" {
 		t.Errorf("expected staging password 'secret_staging', got %s", cfg.Password)
+	}
+}
+
+func TestParseCLIArgs_UnknownEnvironmentWithoutEnvironmentsTable_ReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	confFile := filepath.Join(tmpDir, "flyway.conf")
+	_ = os.WriteFile(confFile, []byte("flyway.url=jdbc:bigquery:;ProjectId=p;DefaultDataset=d;\n"), 0644)
+
+	args := []string{
+		"-configFile=" + confFile,
+		"-environment=production",
+	}
+
+	_, err := parseCLIArgs(args)
+	if err == nil {
+		t.Fatalf("expected error for unknown environment with no environments table, got nil")
+	}
+	if !strings.Contains(err.Error(), "environment 'production' not found in config") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestParseCLIArgs_EnvironmentExactCaseMismatch_ReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	tomlFile := filepath.Join(tmpDir, "flyway.toml")
+	content := `
+[environments.production]
+url = "jdbc:bigquery:;ProjectId=p;DefaultDataset=d;"
+`
+	_ = os.WriteFile(tomlFile, []byte(content), 0644)
+
+	args := []string{
+		"-configFile=" + tomlFile,
+		"-environment=Production",
+	}
+
+	_, err := parseCLIArgs(args)
+	if err == nil {
+		t.Fatalf("expected error for case mismatched environment, got nil")
+	}
+	if !strings.Contains(err.Error(), "environment 'Production' not found in config") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 

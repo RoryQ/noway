@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -442,6 +443,73 @@ func TestLoadFromFiles_PlaceholderWithDotsAndMultiFile(t *testing.T) {
 	}
 	if cfg.Placeholders["root.dotted.key"] != "world" {
 		t.Errorf("expected root.dotted.key='world', got '%s'", cfg.Placeholders["root.dotted.key"])
+	}
+}
+
+func TestUnknownEnvironment_NoEnvironmentsTable_ReturnsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	conf := filepath.Join(tmpDir, "simple.toml")
+	_ = os.WriteFile(conf, []byte("url = \"jdbc:bigquery:;ProjectId=p;DefaultDataset=d;\"\n"), 0644)
+
+	// 1. Specifying unknown environment with config file having no [environments] table
+	cfg := NewDefaultConfiguration()
+	cfg.Environment = "staging"
+	err := LoadFromFilesInto([]string{conf}, cfg)
+	if err == nil {
+		t.Fatalf("expected error for environment 'staging' when no [environments] table exists, got nil")
+	}
+	if !strings.Contains(err.Error(), "environment 'staging' not found in config") {
+		t.Errorf("expected error message to mention 'staging', got: %v", err)
+	}
+
+	// 2. Specifying default environment with config file having no [environments] table succeeds
+	cfgDefault := NewDefaultConfiguration()
+	cfgDefault.Environment = "default"
+	if err := LoadFromFilesInto([]string{conf}, cfgDefault); err != nil {
+		t.Fatalf("expected default environment to succeed without [environments] table, got: %v", err)
+	}
+
+	// 3. Specifying unknown environment with no config files at all
+	cfgNoFiles := NewDefaultConfiguration()
+	cfgNoFiles.Environment = "production"
+	if err := LoadFromFilesInto(nil, cfgNoFiles); err == nil {
+		t.Fatalf("expected error for environment 'production' with no config files, got nil")
+	}
+}
+
+func TestEnvironmentMatching_ExactCase(t *testing.T) {
+	tmpDir := t.TempDir()
+	conf := filepath.Join(tmpDir, "flyway.toml")
+	content := `
+[environments.production]
+url = "jdbc:bigquery:;ProjectId=prod-proj;DefaultDataset=prod_ds;"
+user = "prod_user"
+`
+	_ = os.WriteFile(conf, []byte(content), 0644)
+
+	// 1. Exact case matches
+	cfgExact := NewDefaultConfiguration()
+	cfgExact.Environment = "production"
+	if err := LoadFromFilesInto([]string{conf}, cfgExact); err != nil {
+		t.Fatalf("exact match 'production' failed: %v", err)
+	}
+	if cfgExact.User != "prod_user" {
+		t.Errorf("expected prod_user, got: %s", cfgExact.User)
+	}
+
+	// 2. Different case does NOT match (Flyway matches exact name)
+	cfgMismatch1 := NewDefaultConfiguration()
+	cfgMismatch1.Environment = "Production"
+	if err := LoadFromFilesInto([]string{conf}, cfgMismatch1); err == nil {
+		t.Fatalf("expected error for 'Production' due to case mismatch, got nil")
+	} else if !strings.Contains(err.Error(), "environment 'Production' not found in config") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	cfgMismatch2 := NewDefaultConfiguration()
+	cfgMismatch2.Environment = "PRODUCTION"
+	if err := LoadFromFilesInto([]string{conf}, cfgMismatch2); err == nil {
+		t.Fatalf("expected error for 'PRODUCTION' due to case mismatch, got nil")
 	}
 }
 

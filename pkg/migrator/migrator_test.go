@@ -1615,5 +1615,11 @@ func TestStandaloneClean_TakesLock(t *testing.T) {
 	if histExists {
 		t.Errorf("expected history table to be dropped by standalone clean")
 	}
+
+	// 3. A waiting process fails because the table does not exist and it does not migrate into a schema that is being cleaned
+	_, lockErr := db.Lock(ctx, "test_ds", "flyway_schema_history")
+	if lockErr == nil {
+		t.Fatalf("expected lock attempt to fail because history table was dropped, got nil")
+	}
 }
 

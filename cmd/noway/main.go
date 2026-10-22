@@ -161,6 +161,10 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 		if err := config.LoadFromFilesInto([]string{autoConf}, cfg); err != nil {
 			return nil, err
 		}
+	} else {
+		if err := config.LoadFromFilesInto(nil, cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	// 2. Load from Environment

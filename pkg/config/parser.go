@@ -155,8 +155,15 @@ func setDottedKey(m map[string]any, key string, val any) {
 	for i := 0; i < len(parts)-1; i++ {
 		p := parts[i]
 		matchedKey := p
+		isEnvName := (i == 1 && strings.EqualFold(parts[0], "environments"))
 		for ek := range curr {
-			if strings.EqualFold(ek, p) {
+			match := false
+			if isEnvName {
+				match = (ek == p)
+			} else {
+				match = strings.EqualFold(ek, p)
+			}
+			if match {
 				matchedKey = ek
 				break
 			}
@@ -170,8 +177,15 @@ func setDottedKey(m map[string]any, key string, val any) {
 	}
 	leaf := parts[len(parts)-1]
 	matchedLeaf := leaf
+	isEnvName := (len(parts) == 2 && strings.EqualFold(parts[0], "environments"))
 	for ek := range curr {
-		if strings.EqualFold(ek, leaf) {
+		match := false
+		if isEnvName {
+			match = (ek == leaf)
+		} else {
+			match = strings.EqualFold(ek, leaf)
+		}
+		if match {
 			matchedLeaf = ek
 			break
 		}
@@ -181,10 +195,17 @@ func setDottedKey(m map[string]any, key string, val any) {
 
 func setPlaceholderInMap(m map[string]any, path []string, phName string, val any) {
 	curr := m
-	for _, p := range path {
+	for i, p := range path {
 		matchedKey := p
+		isEnvName := (i == 1 && len(path) > 1 && strings.EqualFold(path[0], "environments"))
 		for ek := range curr {
-			if strings.EqualFold(ek, p) {
+			match := false
+			if isEnvName {
+				match = (ek == p)
+			} else {
+				match = strings.EqualFold(ek, p)
+			}
+			if match {
 				matchedKey = ek
 				break
 			}
@@ -207,24 +228,35 @@ func setPlaceholderInMap(m map[string]any, path []string, phName string, val any
 }
 
 func mergeMaps(dst, src map[string]any) {
+	mergeMapsInternal(dst, src, false)
+}
+
+func mergeMapsInternal(dst, src map[string]any, isEnvsMap bool) {
 	for k, srcVal := range src {
 		if srcVal == nil {
 			continue
 		}
 		dstKey := k
 		for existingK := range dst {
-			if strings.EqualFold(existingK, k) {
+			match := false
+			if isEnvsMap {
+				match = (existingK == k)
+			} else {
+				match = strings.EqualFold(existingK, k)
+			}
+			if match {
 				dstKey = existingK
 				break
 			}
 		}
 
 		if srcMap, ok := srcVal.(map[string]any); ok {
+			childIsEnvs := !isEnvsMap && strings.EqualFold(dstKey, "environments")
 			if dstMap, ok := dst[dstKey].(map[string]any); ok {
-				mergeMaps(dstMap, srcMap)
+				mergeMapsInternal(dstMap, srcMap, childIsEnvs)
 			} else {
 				newMap := make(map[string]any, len(srcMap))
-				mergeMaps(newMap, srcMap)
+				mergeMapsInternal(newMap, srcMap, childIsEnvs)
 				dst[dstKey] = newMap
 			}
 		} else {
@@ -378,47 +410,36 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 	}
 
 	// 3. Apply [environments] table
+	var envObj map[string]any
 	if envsMap != nil {
-		var envObj map[string]any
 		for ek, ev := range envsMap {
-			if strings.EqualFold(ek, targetEnv) {
+			if ek == targetEnv {
 				if m, ok := ev.(map[string]any); ok {
 					envObj = m
 					break
 				}
 			}
 		}
+	}
 
-		if envObj == nil {
-			if strings.EqualFold(targetEnv, "default") {
-				for ek, ev := range envsMap {
-					if strings.EqualFold(ek, "default") {
-						if m, ok := ev.(map[string]any); ok {
-							envObj = m
-							break
-						}
-					}
-				}
-			} else {
-				return fmt.Errorf("environment '%s' not found in config", targetEnv)
-			}
+	if envObj == nil {
+		if targetEnv != "default" {
+			return fmt.Errorf("environment '%s' not found in config", targetEnv)
 		}
-
-		if envObj != nil {
-			// Apply environment properties
-			for k, v := range envObj {
-				if strings.EqualFold(k, "flyway") {
-					continue
-				}
-				applyAnyValue(cfg, k, v)
+	} else {
+		// Apply environment properties
+		for k, v := range envObj {
+			if strings.EqualFold(k, "flyway") {
+				continue
 			}
-			// Apply nested [environments.<env>.flyway]
-			for k, v := range envObj {
-				if strings.EqualFold(k, "flyway") {
-					if envFlywayMap, ok := v.(map[string]any); ok {
-						for fk, fv := range envFlywayMap {
-							applyAnyValue(cfg, fk, fv)
-						}
+			applyAnyValue(cfg, k, v)
+		}
+		// Apply nested [environments.<env>.flyway]
+		for k, v := range envObj {
+			if strings.EqualFold(k, "flyway") {
+				if envFlywayMap, ok := v.(map[string]any); ok {
+					for fk, fv := range envFlywayMap {
+						applyAnyValue(cfg, fk, fv)
 					}
 				}
 			}

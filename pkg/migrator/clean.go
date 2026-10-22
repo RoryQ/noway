@@ -33,40 +33,15 @@ func (m *Migrator) Clean(ctx context.Context) (*CleanResult, error) {
 	}
 
 	if exists {
-		unlock, err := m.db.Lock(ctx, defaultSchema, table)
+		_, err := m.db.Lock(ctx, defaultSchema, table)
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterCleanError")
 			return nil, fmt.Errorf("failed to acquire database lock for clean: %w", err)
 		}
-		defer func() {
-			if unlock != nil {
-				_ = unlock(context.Background())
-			}
-		}()
-
-		res, err := m.cleanInternal(ctx, table, false)
-		if err != nil {
-			return nil, err
-		}
-
-		if unlock != nil {
-			if uErr := unlock(context.Background()); uErr != nil {
-				_ = m.callbackRunner.Fire(ctx, "afterCleanError")
-				return nil, uErr
-			}
-			unlock = nil
-		}
-
-		if err := m.db.CleanSchema(ctx, defaultSchema); err != nil {
-			_ = m.callbackRunner.Fire(ctx, "afterCleanError")
-			return nil, fmt.Errorf("failed dropping schema history table '%s': %w", table, err)
-		}
-
-		if err := m.callbackRunner.Fire(ctx, "afterClean"); err != nil {
-			return nil, err
-		}
-
-		return res, nil
+		// Drop the history table while the lock is held, and do not call unlock
+		// because the lock row goes with the table. A waiting process then fails
+		// because the table does not exist and it does not migrate into a schema
+		// that is being cleaned.
 	}
 
 	return m.cleanInternal(ctx, "", true)

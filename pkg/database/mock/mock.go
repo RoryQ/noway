@@ -173,6 +173,7 @@ func (m *MockDatabase) CleanSchema(ctx context.Context, schema string, excludeTa
 				delete(m.history, k)
 			}
 		}
+		m.isLocked = false
 	}
 	return nil
 }
@@ -268,12 +269,14 @@ func (m *MockDatabase) DeleteHistory(ctx context.Context, schema, table string, 
 
 func (m *MockDatabase) Lock(ctx context.Context, schema, table string) (database.UnlockFunc, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if tables, ok := m.tables[schema]; ok && !tables[table] {
+		return nil, fmt.Errorf("table %s.%s does not exist", schema, table)
+	}
 	if m.isLocked {
-		m.mu.Unlock()
 		return nil, fmt.Errorf("already locked")
 	}
 	m.isLocked = true
-	m.mu.Unlock()
 
 	return func(ctx context.Context) error {
 		m.mu.Lock()
