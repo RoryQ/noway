@@ -748,4 +748,112 @@ func TestValidateAndRepair_LongDescriptionAndScript(t *testing.T) {
 	}
 }
 
+func TestValidate_PendingAndOutdatedRepeatableMigrations(t *testing.T) {
+	ctx := context.Background()
+
+	fs := fstest.MapFS{
+		"migrations/R__my_view.sql": &fstest.MapFile{Data: []byte("CREATE VIEW my_view AS SELECT 1;")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	// 1. Initial history table exists (e.g. from prior migrations)
+	_ = db.EnsureSchema(ctx, "test_ds")
+	_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+
+	// Validate reports pending repeatable migration
+	valRes, err := m.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if valRes.Valid {
+		t.Fatalf("expected Validate to fail on pending repeatable migration")
+	}
+	expectedPendingErr := "Detected resolved repeatable migration not applied to database: my view. To fix this error, either run migrate, or set -ignoreMigrationPatterns='*:pending'."
+	if !strings.Contains(valRes.Error(), expectedPendingErr) {
+		t.Errorf("expected error message %q, got: %s", expectedPendingErr, valRes.Error())
+	}
+
+	// Ignoring pending migrations allows Validate to pass
+	cfgIgnorePending := *cfg
+	cfgIgnorePending.IgnoreMigrationPatterns = []string{"*:pending"}
+	cfgIgnorePending.IgnoreMigrationPatternsExplicitlySet = true
+	mIgnorePending, _ := migrator.New(&cfgIgnorePending, db)
+	valResIgnore, err := mIgnorePending.Validate(ctx)
+	if err != nil || !valResIgnore.Valid {
+		t.Fatalf("expected Validate to pass with *:pending, got errors: %v", err)
+	}
+
+	// 2. Migrate executes the repeatable migration
+	migRes, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if migRes.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed, got %d", migRes.MigrationsExecuted)
+	}
+
+	// After migrate, Validate passes
+	valResAfterMigrate, err := m.Validate(ctx)
+	if err != nil || !valResAfterMigrate.Valid {
+		t.Fatalf("expected Validate to pass after migrate, got: %v", err)
+	}
+
+	// 3. Modify repeatable migration on disk (changed checksum -> OUTDATED)
+	fs["migrations/R__my_view.sql"] = &fstest.MapFile{Data: []byte("CREATE VIEW my_view AS SELECT 2;")}
+
+	valResOutdated, err := m.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if valResOutdated.Valid {
+		t.Fatalf("expected Validate to fail on outdated repeatable migration")
+	}
+	expectedOutdatedErr := "Detected outdated resolved repeatable migration that should be re-applied to database: my view. Run migrate to execute this migration."
+	if !strings.Contains(valResOutdated.Error(), expectedOutdatedErr) {
+		t.Errorf("expected error message %q, got: %s", expectedOutdatedErr, valResOutdated.Error())
+	}
+
+	// Outdated repeatable is also ignored by *:pending
+	valResOutdatedIgnored, err := mIgnorePending.Validate(ctx)
+	if err != nil || !valResOutdatedIgnored.Valid {
+		t.Fatalf("expected outdated repeatable to be ignored by *:pending, got: %v", err)
+	}
+
+	// Repeatable:pending also ignores outdated repeatable
+	cfgRepeatablePending := *cfg
+	cfgRepeatablePending.IgnoreMigrationPatterns = []string{"repeatable:pending"}
+	cfgRepeatablePending.IgnoreMigrationPatternsExplicitlySet = true
+	mRepeatablePending, _ := migrator.New(&cfgRepeatablePending, db)
+	valResRepIgnored, err := mRepeatablePending.Validate(ctx)
+	if err != nil || !valResRepIgnored.Valid {
+		t.Fatalf("expected outdated repeatable to be ignored by repeatable:pending, got: %v", err)
+	}
+
+	// 4. Migrate re-runs outdated repeatable
+	migRes2, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("second Migrate failed: %v", err)
+	}
+	if migRes2.MigrationsExecuted != 1 {
+		t.Fatalf("expected 1 migration executed, got %d", migRes2.MigrationsExecuted)
+	}
+
+	// 5. Subsequent Validate passes cleanly
+	valResFinal, err := m.Validate(ctx)
+	if err != nil || !valResFinal.Valid {
+		t.Fatalf("expected final Validate to pass, got: %v", err)
+	}
+}
+
+
 

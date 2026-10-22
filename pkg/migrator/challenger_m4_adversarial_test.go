@@ -647,7 +647,8 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 		_ = db.EnsureSchema(ctx, "test_ds")
 		_ = db.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
 
-		cs := int64(12345)
+		sqlText := "CREATE VIEW custom_user_view AS SELECT 1;"
+		cs, _ := checksum.CalculateString(sqlText)
 		_ = db.InsertHistory(ctx, "test_ds", "flyway_schema_history", database.HistoryRecord{
 			InstalledRank: 1,
 			Version:       nil,
@@ -662,7 +663,7 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 		// The script filename "R__custom_user_view.sql" differs from history "R__legacy_path_file.sql"
 		fs := fstest.MapFS{
 			"migrations/R__custom_user_view.sql": &fstest.MapFile{
-				Data: []byte("CREATE VIEW custom_user_view AS SELECT 1;"),
+				Data: []byte(sqlText),
 			},
 		}
 
@@ -685,7 +686,7 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 		}
 	})
 
-	// Subtest 6b: Checksum difference tolerance
+	// Subtest 6b: Checksum difference reports outdated repeatable
 	t.Run("ChecksumDifferenceTolerance", func(t *testing.T) {
 		db := mock.NewMockDatabase()
 		_ = db.EnsureSchema(ctx, "test_ds")
@@ -723,8 +724,17 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Validate failed: %v", err)
 		}
-		if !valRes.Valid {
-			t.Errorf("repeatable migrations with modified checksums must NOT fail validation (outdated state meant for re-run), got: %s", valRes.Error())
+		if valRes.Valid {
+			t.Errorf("repeatable migrations with modified checksums must fail validation by default as outdated")
+		}
+		if !strings.Contains(valRes.Error(), "Detected outdated resolved repeatable migration that should be re-applied to database") {
+			t.Errorf("unexpected error message: %s", valRes.Error())
+		}
+
+		// When pending is ignored (via ignorePending or pattern *:pending), Validate passes
+		valResIgnore, err := m.Validate(ctx, true)
+		if err != nil || !valResIgnore.Valid {
+			t.Errorf("expected Validate to pass with ignorePending=true, got: %v", err)
 		}
 	})
 

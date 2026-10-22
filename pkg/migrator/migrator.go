@@ -530,7 +530,6 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	maxAppliedVersion := history.MaxAppliedVersion
 	baselineVersion := history.BaselineVersion
 	appliedByVersion := history.AppliedVersioned
-	appliedRepeatables := history.AppliedRepeatables
 
 	if isDryRun && !historyExists && len(nonEmptySchemas) > 0 && m.config.BaselineOnMigrate {
 		bVerStr := m.config.BaselineVersion
@@ -625,7 +624,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(nil, key) {
 			continue
 		}
-		lastRun, wasApplied := appliedRepeatables[key]
+		lastRun, wasApplied := history.FindAppliedRepeatable(res)
 		if !wasApplied {
 			pendingRepeatable = append(pendingRepeatable, res)
 		} else if !lastRun.Success || !res.ChecksumMatches(lastRun.Checksum) {

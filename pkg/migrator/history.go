@@ -3,6 +3,7 @@ package migrator
 import (
 	"strings"
 
+	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/resolver"
 	"github.com/roryq/noway/pkg/version"
 )
@@ -39,6 +40,32 @@ type ProcessedHistory struct {
 
 	// NextInstalledRank is max(installed_rank) + 1 across all records in history.
 	NextInstalledRank int
+}
+
+// FindAppliedRepeatable returns the latest active applied record for a repeatable migration.
+func (h *ProcessedHistory) FindAppliedRepeatable(res resolver.ResolvedMigration) (resolver.AppliedMigration, bool) {
+	if res.Description != "" {
+		if app, ok := h.AppliedRepeatables[res.Description]; ok {
+			return app, true
+		}
+		if app, ok := h.AppliedRepeatables[database.AbbreviateDescription(res.Description)]; ok {
+			return app, true
+		}
+	}
+	if res.Script != "" {
+		if app, ok := h.AppliedRepeatables[res.Script]; ok {
+			return app, true
+		}
+		if app, ok := h.AppliedRepeatables[database.AbbreviateScript(res.Script)]; ok {
+			return app, true
+		}
+		for _, app := range h.AppliedRepeatables {
+			if app.Script == res.Script || app.Script == database.AbbreviateScript(res.Script) {
+				return app, true
+			}
+		}
+	}
+	return resolver.AppliedMigration{}, false
 }
 
 // processAppliedHistory analyzes applied records in chronological order and resolves

@@ -428,6 +428,54 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 		}
 	}
 
+	// Check for unapplied (pending / outdated) repeatable migrations
+	for _, res := range resolved.RepeatableMigrations {
+		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(nil, res.Description) {
+			continue
+		}
+		if res.Config.ShouldExecute != "" {
+			shouldExec, err := resolver.EvaluateShouldExecute(res.Config.ShouldExecute, m.replacer, m.builtins)
+			if err == nil && !shouldExec {
+				continue
+			}
+		}
+
+		// If this repeatable previously failed in the database (and not repaired), it is already reported as failed
+		isFailed := false
+		for _, f := range history.FailedMigrations {
+			if (f.Version == nil || f.Version.IsEmpty()) && (f.Description == res.Description || f.Script == res.Script) {
+				isFailed = true
+				break
+			}
+		}
+		if isFailed {
+			continue
+		}
+
+		app, wasApplied := history.FindAppliedRepeatable(res)
+		if !wasApplied {
+			if !ignorePendingArg && !m.isIgnored("pending", res) {
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Version:     nil,
+					Description: res.Description,
+					File:        res.Script,
+					Message:     fmt.Sprintf("Detected resolved repeatable migration not applied to database: %s. To fix this error, either run migrate, or set -ignoreMigrationPatterns='*:pending'.", res.Description),
+				})
+			}
+		} else if app.Checksum != nil && !res.ChecksumMatches(app.Checksum) {
+			if !ignorePendingArg && !m.isIgnored("pending", res) {
+				result.Valid = false
+				result.Errors = append(result.Errors, ValidationError{
+					Version:     nil,
+					Description: res.Description,
+					File:        res.Script,
+					Message:     fmt.Sprintf("Detected outdated resolved repeatable migration that should be re-applied to database: %s. Run migrate to execute this migration.", res.Description),
+				})
+			}
+		}
+	}
+
 	validateCount := len(resolved.VersionedMigrations) + len(resolved.RepeatableMigrations)
 	result.finalize(m.DatabaseName(), validateCount)
 

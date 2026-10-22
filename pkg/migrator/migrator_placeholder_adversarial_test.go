@@ -182,13 +182,22 @@ func TestAdversarial_PlaceholderChangeRepeatableRerunVsRawConf(t *testing.T) {
 		t.Fatalf("failed to create second migrator: %v", err)
 	}
 
-	// Validate must pass: V1 checksum is RAW so it hasn't changed; repeatables do not fail validation on checksum change
+	// Outdated repeatable reports error by default:
 	valRes, err := m2.Validate(ctx)
 	if err != nil {
 		t.Fatalf("Validate failed: %v", err)
 	}
-	if !valRes.Valid {
-		t.Fatalf("expected Validate to succeed after placeholder change, got errors: %s", valRes.Error())
+	if valRes.Valid {
+		t.Fatalf("expected Validate to report outdated repeatable")
+	}
+
+	// When pending/outdated is ignored, V1 validates because its checksum is RAW and unchanged
+	valResIgnore, err := m2.Validate(ctx, true)
+	if err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+	if !valResIgnore.Valid {
+		t.Fatalf("expected Validate to succeed for V1 with ignorePending=true, got errors: %s", valResIgnore.Error())
 	}
 
 	// Migrate with new placeholder:

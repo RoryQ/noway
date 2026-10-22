@@ -819,8 +819,8 @@ func TestMigratePlaceholderChecksumming(t *testing.T) {
 		t.Fatalf("failed to create changed migrator: %v", err)
 	}
 
-	// V1 still validates because versioned checksum is raw
-	valResChanged, err := mChanged.Validate(ctx)
+	// V1 still validates because versioned checksum is raw (with ignorePending=true as used in migrate)
+	valResChanged, err := mChanged.Validate(ctx, true)
 	if err != nil {
 		t.Fatalf("Validate error on changed config: %v", err)
 	}
