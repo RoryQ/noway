@@ -49,6 +49,11 @@ type Configuration struct {
 	IgnoreFutureMigrations  bool             `json:"ignoreFutureMigrations" yaml:"ignoreFutureMigrations" toml:"ignoreFutureMigrations"` // default: true
 	IgnoreMissingMigrations bool             `json:"ignoreMissingMigrations" yaml:"ignoreMissingMigrations" toml:"ignoreMissingMigrations"` // default: false
 	IgnorePendingMigrations bool             `json:"ignorePendingMigrations" yaml:"ignorePendingMigrations" toml:"ignorePendingMigrations"` // default: false
+	IgnoreMigrationPatterns              []string         `json:"ignoreMigrationPatterns" yaml:"ignoreMigrationPatterns" toml:"ignoreMigrationPatterns"` // default: ["*:future"]
+	SkipExecutingMigrations              bool             `json:"skipExecutingMigrations" yaml:"skipExecutingMigrations" toml:"skipExecutingMigrations"` // default: false
+	CherryPick                           []string         `json:"cherryPick" yaml:"cherryPick" toml:"cherryPick"`
+	FailOnMissingTarget                  bool             `json:"failOnMissingTarget" yaml:"failOnMissingTarget" toml:"failOnMissingTarget"`             // default: false
+	IgnoreMigrationPatternsExplicitlySet bool             `json:"-" yaml:"-" toml:"-"`
 	CleanDisabled           bool             `json:"cleanDisabled" yaml:"cleanDisabled" toml:"cleanDisabled"`                             // default: true
 	CleanOnValidationError  bool             `json:"cleanOnValidationError" yaml:"cleanOnValidationError" toml:"cleanOnValidationError"` // default: false
 	Mixed                   bool             `json:"mixed" yaml:"mixed" toml:"mixed"`                                                     // default: false
@@ -74,6 +79,8 @@ type Configuration struct {
 	GCPCredentialsFile    string `json:"gcpCredentialsFile" yaml:"gcpCredentialsFile" toml:"gcpCredentialsFile"`
 	GCPCredentialsJSON    string `json:"gcpCredentialsJson" yaml:"gcpCredentialsJson" toml:"gcpCredentialsJson"`
 	GCPBigQueryEndpoint   string `json:"gcpBigQueryEndpoint" yaml:"gcpBigQueryEndpoint" toml:"gcpBigQueryEndpoint"`
+	GCPOAuthType          *int   `json:"gcpOAuthType" yaml:"gcpOAuthType" toml:"gcpOAuthType"`
+	GCPAccessToken        string `json:"gcpAccessToken" yaml:"gcpAccessToken" toml:"gcpAccessToken"`
 
 	// Cloud Spanner Specific Connection Overrides
 	GCPSpannerInstanceID  string `json:"gcpSpannerInstanceId" yaml:"gcpSpannerInstanceId" toml:"gcpSpannerInstanceId"`
@@ -105,6 +112,7 @@ func NewDefaultConfiguration() *Configuration {
 		IgnoreFutureMigrations:       true,
 		IgnoreMissingMigrations:      false,
 		IgnorePendingMigrations:      false,
+		IgnoreMigrationPatterns:      []string{"*:future"},
 		CleanDisabled:                true,
 		CleanOnValidationError:       false,
 		BaselineVersion:              "1",
@@ -161,6 +169,12 @@ func (c *Configuration) Finalize() error {
 			}
 			if c.DefaultSchema == "" && params.DefaultDataset != "" {
 				c.DefaultSchema = params.DefaultDataset
+			}
+			if c.GCPOAuthType == nil && params.OAuthTypeSet {
+				c.GCPOAuthType = &params.OAuthType
+			}
+			if c.GCPAccessToken == "" && params.AccessToken != "" {
+				c.GCPAccessToken = params.AccessToken
 			}
 		}
 	}
@@ -225,7 +239,89 @@ func (c *Configuration) Finalize() error {
 		c.Locations = []string{"filesystem:sql"}
 	}
 
+	// Map old booleans onto IgnoreMigrationPatterns
+	if len(c.IgnoreMigrationPatterns) == 0 {
+		c.IgnoreMigrationPatterns = []string{"*:future"}
+	}
+	if !c.IgnoreFutureMigrations {
+		c.IgnoreMigrationPatterns = removeStateFromPatterns(c.IgnoreMigrationPatterns, "future")
+	} else if !c.IsIgnored("future", "", nil) && !c.IgnoreMigrationPatternsExplicitlySet {
+		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:future")
+	}
+	if c.IgnoreMissingMigrations && !c.IsIgnored("missing", "", nil) {
+		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:missing")
+	}
+	if c.IgnorePendingMigrations && !c.IsIgnored("pending", "", nil) {
+		c.IgnoreMigrationPatterns = append(c.IgnoreMigrationPatterns, "*:pending", "*:outdated")
+	}
+
 	return nil
+}
+
+// IsIgnored checks whether a given migration state matches IgnoreMigrationPatterns.
+// Supported states include: "future", "missing", "pending", "outdated", "ignored".
+// Pattern format is [type_or_version:]<state>, e.g.: "*:future", "repeatable:missing", "*:pending".
+func (c *Configuration) IsIgnored(state string, migType string, ver *version.Version) bool {
+	targetState := strings.ToLower(strings.TrimSpace(state))
+	if targetState == "" {
+		return false
+	}
+
+	for _, rawPattern := range c.IgnoreMigrationPatterns {
+		pattern := strings.ToLower(strings.TrimSpace(rawPattern))
+		if pattern == "" {
+			continue
+		}
+
+		rulePattern := "*"
+		ruleState := pattern
+		if idx := strings.Index(pattern, ":"); idx != -1 {
+			rulePattern = strings.TrimSpace(pattern[:idx])
+			ruleState = strings.TrimSpace(pattern[idx+1:])
+		}
+
+		matchedState := false
+		if ruleState == targetState || ruleState == "*" {
+			matchedState = true
+		} else if ruleState == "pending" && targetState == "outdated" {
+			matchedState = true
+		}
+
+		if !matchedState {
+			continue
+		}
+
+		if rulePattern == "*" {
+			return true
+		}
+		if migType != "" && strings.EqualFold(rulePattern, migType) {
+			return true
+		}
+		if ver == nil && strings.EqualFold(rulePattern, "repeatable") {
+			return true
+		}
+		if ver != nil && (rulePattern == strings.ToLower(ver.String()) || rulePattern == strings.ToLower(ver.Normalized())) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func removeStateFromPatterns(patterns []string, state string) []string {
+	stateLower := strings.ToLower(strings.TrimSpace(state))
+	var res []string
+	for _, p := range patterns {
+		clean := strings.ToLower(strings.TrimSpace(p))
+		ruleState := clean
+		if idx := strings.Index(clean, ":"); idx != -1 {
+			ruleState = strings.TrimSpace(clean[idx+1:])
+		}
+		if ruleState != stateLower {
+			res = append(res, p)
+		}
+	}
+	return res
 }
 
 // GetDefaultSchema returns the effective default schema name.

@@ -22,6 +22,15 @@ type ProcessedHistory struct {
 	// FailedMigrations contains active failed migrations (not deleted and not undone).
 	FailedMigrations []resolver.AppliedMigration
 
+	// FailedVersions contains versions that failed in the database (not deleted and not undone).
+	FailedVersions map[string]bool
+
+	// DeletedVersions contains versions marked deleted.
+	DeletedVersions map[string]bool
+
+	// UndoneVersions contains versions marked undone.
+	UndoneVersions map[string]bool
+
 	// MaxAppliedVersion is the highest version among active, successfully applied versioned migrations.
 	MaxAppliedVersion *version.Version
 
@@ -39,6 +48,9 @@ func processAppliedHistory(records []resolver.AppliedMigration) ProcessedHistory
 		Records:            make([]resolver.AppliedMigration, len(records)),
 		AppliedVersioned:   make(map[string]resolver.AppliedMigration),
 		AppliedRepeatables: make(map[string]resolver.AppliedMigration),
+		FailedVersions:     make(map[string]bool),
+		DeletedVersions:    make(map[string]bool),
+		UndoneVersions:     make(map[string]bool),
 		NextInstalledRank:  1,
 	}
 
@@ -58,6 +70,7 @@ func processAppliedHistory(records []resolver.AppliedMigration) ProcessedHistory
 		// When a DELETE row is encountered, mark all prior matching applied rows as Deleted
 		if rec.Type == "DELETE" {
 			if rec.Version != nil && !rec.Version.IsEmpty() {
+				result.DeletedVersions[rec.Version.Normalized()] = true
 				for j := i - 1; j >= 0; j-- {
 					prev := &result.Records[j]
 					if prev.Type != "DELETE" && prev.Type != "SCHEMA" && prev.Version != nil && prev.Version.Equals(*rec.Version) {
@@ -75,6 +88,7 @@ func processAppliedHistory(records []resolver.AppliedMigration) ProcessedHistory
 		} else if strings.HasPrefix(rec.Type, "UNDO") {
 			// When an UNDO row is encountered, mark prior matching applied rows as Undone
 			if rec.Version != nil && !rec.Version.IsEmpty() {
+				result.UndoneVersions[rec.Version.Normalized()] = true
 				for j := i - 1; j >= 0; j-- {
 					prev := &result.Records[j]
 					if !strings.HasPrefix(prev.Type, "UNDO") && prev.Type != "SCHEMA" && prev.Version != nil && prev.Version.Equals(*rec.Version) {
@@ -98,6 +112,9 @@ func processAppliedHistory(records []resolver.AppliedMigration) ProcessedHistory
 		if !rec.Success {
 			if !rec.Deleted && !rec.Undone {
 				result.FailedMigrations = append(result.FailedMigrations, rec)
+				if rec.Version != nil && !rec.Version.IsEmpty() {
+					result.FailedVersions[rec.Version.Normalized()] = true
+				}
 			}
 			continue
 		}

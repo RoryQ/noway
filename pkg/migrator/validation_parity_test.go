@@ -356,3 +356,224 @@ func TestValidate_NonEmptySchemaWithoutHistoryTable(t *testing.T) {
 		}
 	})
 }
+
+func TestValidate_PendingMigrationReporting(t *testing.T) {
+	ctx := context.Background()
+
+	fs := fstest.MapFS{
+		"migrations/V1__first.sql":  &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+		"migrations/V2__second.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t2 (id INT64);")},
+	}
+
+	db := mock.NewMockDatabase()
+	_ = db.EnsureSchema(ctx, "test_schema")
+	_ = db.EnsureHistoryTable(ctx, "test_schema", "flyway_schema_history")
+
+	v1Str := "1"
+	cs, _ := checksum.CalculateString("CREATE TABLE t1 (id INT64);")
+	_ = db.InsertHistory(ctx, "test_schema", "flyway_schema_history", database.HistoryRecord{
+		InstalledRank: 1,
+		Version:       &v1Str,
+		Description:   "first",
+		Type:          "SQL",
+		Script:        "V1__first.sql",
+		Checksum:      &cs,
+		Success:       true,
+	})
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_schema"
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	// 1. Standard Validate reports pending V2
+	valRes, err := m.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if valRes.Valid {
+		t.Fatalf("expected Validate to fail on pending V2")
+	}
+	if !strings.Contains(valRes.Error(), "Detected resolved migration not applied to database: 2") {
+		t.Errorf("expected error message to mention detected resolved migration not applied, got: %s", valRes.Error())
+	}
+
+	// 2. Validate with ignorePending=true passes
+	valResIgnore, err := m.Validate(ctx, true)
+	if err != nil || !valResIgnore.Valid {
+		t.Fatalf("expected Validate with ignorePending=true to pass, got: %v", err)
+	}
+
+	// 3. Validate with IgnoreMigrationPatterns = ["*:pending"] passes
+	cfg2 := *cfg
+	cfg2.IgnoreMigrationPatterns = []string{"*:pending"}
+	cfg2.IgnoreMigrationPatternsExplicitlySet = true
+	m2, _ := migrator.New(&cfg2, db)
+	valRes2, err := m2.Validate(ctx)
+	if err != nil || !valRes2.Valid {
+		t.Fatalf("expected Validate with *:pending pattern to pass, got: %v", err)
+	}
+}
+
+func TestValidate_DeletedRepeatableReporting(t *testing.T) {
+	ctx := context.Background()
+
+	fs := fstest.MapFS{
+		"migrations/R__my_view.sql": &fstest.MapFile{Data: []byte("CREATE VIEW v1 AS SELECT 1;")},
+		"migrations/.keep":          &fstest.MapFile{Data: []byte("")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_schema"
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	// Migrate initial repeatable
+	if _, err := m.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	// Delete repeatable file from disk
+	delete(fs, "migrations/R__my_view.sql")
+
+	// 1. Validate reports missing repeatable
+	valRes, err := m.Validate(ctx)
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if valRes.Valid {
+		t.Fatalf("expected Validate to fail when repeatable is deleted without DELETE row")
+	}
+	if !strings.Contains(valRes.Error(), "Detected applied migration not resolved locally: R__my_view.sql") {
+		t.Errorf("unexpected error message: %s", valRes.Error())
+	}
+
+	// 2. Repair writes DELETE row
+	repRes, err := m.Repair(ctx)
+	if err != nil {
+		t.Fatalf("Repair failed: %v", err)
+	}
+	if len(repRes.DeletedMigrations) != 1 || repRes.DeletedMigrations[0] != "R__my_view.sql" {
+		t.Errorf("expected R__my_view.sql marked as DELETE, got: %+v", repRes.DeletedMigrations)
+	}
+
+	// 3. Subsequent Validate passes
+	valResAfter, err := m.Validate(ctx)
+	if err != nil || !valResAfter.Valid {
+		t.Fatalf("expected Validate to pass after repair inserted DELETE row, got: %v", err)
+	}
+}
+
+func TestMigrator_SkipExecutingMigrations(t *testing.T) {
+	ctx := context.Background()
+
+	fs := fstest.MapFS{
+		"migrations/V1__create_table.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+	}
+
+	db := mock.NewMockDatabase()
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_schema"
+	cfg.FS = fs
+	cfg.Locations = []string{"migrations"}
+	cfg.SkipExecutingMigrations = true
+
+	m, err := migrator.New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	migRes, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if migRes.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed (history record written), got %d", migRes.MigrationsExecuted)
+	}
+
+	// Verify history table has V1 record
+	history, err := db.FetchHistory(ctx, "test_schema", "flyway_schema_history")
+	if err != nil || len(history) != 1 {
+		t.Fatalf("expected 1 history record, got len=%d, err=%v", len(history), err)
+	}
+	if history[0].Script != "V1__create_table.sql" || !history[0].Success {
+		t.Errorf("unexpected history record: %+v", history[0])
+	}
+
+	// Verify SQL was NOT executed: ExecutedStatements is empty
+	if len(db.ExecutedStatements()) != 0 {
+		t.Errorf("expected 0 executed statements when SkipExecutingMigrations=true, got %v", db.ExecutedStatements())
+	}
+}
+
+func TestMigrator_CherryPickAndFailOnMissingTarget(t *testing.T) {
+	ctx := context.Background()
+
+	fs := fstest.MapFS{
+		"migrations/V1__one.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t1 (id INT64);")},
+		"migrations/V2__two.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE t2 (id INT64);")},
+		"migrations/V3__three.sql": &fstest.MapFile{Data: []byte("CREATE TABLE t3 (id INT64);")},
+	}
+
+	// 1. CherryPick: only migrate V2
+	db1 := mock.NewMockDatabase()
+	cfg1 := config.NewDefaultConfiguration()
+	cfg1.DefaultSchema = "test_schema"
+	cfg1.FS = fs
+	cfg1.Locations = []string{"migrations"}
+	cfg1.CherryPick = []string{"2"}
+
+	m1, err := migrator.New(cfg1, db1)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+	res1, err := m1.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if res1.MigrationsExecuted != 1 || res1.ExecutedMigrations[0].Version != "2" {
+		t.Errorf("expected only V2 to be cherry-picked, got %+v", res1.ExecutedMigrations)
+	}
+
+	// 2. FailOnMissingTarget with missing target version
+	db2 := mock.NewMockDatabase()
+	cfg2 := config.NewDefaultConfiguration()
+	cfg2.DefaultSchema = "test_schema"
+	cfg2.FS = fs
+	cfg2.Locations = []string{"migrations"}
+	cfg2.Target = "99"
+	cfg2.FailOnMissingTarget = true
+
+	m2, _ := migrator.New(cfg2, db2)
+	_, err = m2.Migrate(ctx)
+	if err == nil || !strings.Contains(err.Error(), "no migration with a target version 99 could be found") {
+		t.Errorf("expected error for missing target version, got: %v", err)
+	}
+
+	// 3. FailOnMissingTarget with missing cherry-pick version
+	db3 := mock.NewMockDatabase()
+	cfg3 := config.NewDefaultConfiguration()
+	cfg3.DefaultSchema = "test_schema"
+	cfg3.FS = fs
+	cfg3.Locations = []string{"migrations"}
+	cfg3.CherryPick = []string{"99"}
+	cfg3.FailOnMissingTarget = true
+
+	m3, _ := migrator.New(cfg3, db3)
+	_, err = m3.Migrate(ctx)
+	if err == nil || !strings.Contains(err.Error(), "no migration with version 99 could be found to cherry pick") {
+		t.Errorf("expected error for missing cherry-pick version, got: %v", err)
+	}
+}
+

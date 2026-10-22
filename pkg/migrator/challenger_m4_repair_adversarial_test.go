@@ -478,13 +478,13 @@ func TestChallenger_RepairMissingRepeatableMigration_MarkedDeleteAndValidatePass
 		// Delete R__view.sql from disk
 		delete(fs, "migrations/R__view.sql")
 
-		// Before Repair: In Flyway, Validate passes (missing repeatable is treated as DELETED, not error)
+		// Before Repair: Validate fails because R__view.sql is missing from disk without a DELETE record
 		valBefore, err := m.Validate(ctx)
 		if err != nil {
 			t.Fatalf("Validate failed: %v", err)
 		}
-		if !valBefore.Valid {
-			t.Fatalf("expected Validate to pass when applied repeatable is missing from disk (Flyway parity), got error: %s", valBefore.Error())
+		if valBefore.Valid {
+			t.Fatalf("expected Validate to fail when applied repeatable is missing from disk without DELETE record")
 		}
 
 		// Run Repair
@@ -695,11 +695,11 @@ func TestChallenger_RepairFailedMigration_RemovedAndSubsequentRetry(t *testing.T
 		db.SetFailOnExecute("")
 		fs["migrations/V2__bad.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE t2 (id INT64);")}
 
-		// Validate now passes
+		// Validate with ignorePending (as done by validateOnMigrate) passes
 		m2, _ := New(cfg, db)
-		valAfter, err := m2.Validate(ctx)
+		valAfter, err := m2.Validate(ctx, true)
 		if err != nil || !valAfter.Valid {
-			t.Fatalf("expected Validate to pass after repair and SQL fix, valid=%v, err=%v", valAfter.Valid, err)
+			t.Fatalf("expected Validate to pass after repair and SQL fix with ignorePending=true, valid=%v, err=%v", valAfter.Valid, err)
 		}
 
 		// Migrate again: V2 must successfully apply!
@@ -962,9 +962,9 @@ func TestChallenger_RepairComprehensive_AllInvariantsCombined(t *testing.T) {
 	db.SetFailOnExecute("")
 	fs["migrations/V3__failing.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE t3 (id INT64);")}
 
-	// 8. Validate MUST now succeed completely!
+	// 8. Validate with ignorePending (as done by Migrate) MUST now succeed!
 	mClean, _ := New(cfg, db)
-	valAfter, err := mClean.Validate(ctx)
+	valAfter, err := mClean.Validate(ctx, true)
 	if err != nil {
 		t.Fatalf("Validate after repair and fix failed: %v", err)
 	}

@@ -192,4 +192,101 @@ func TestSpannerConfAndEnv(t *testing.T) {
 	}
 }
 
+func TestBigQueryOAuthURLParsing(t *testing.T) {
+	// 1. OAuthType=0 with OAuthPvtKeyPath
+	url1 := "jdbc:bigquery://https://www.googleapis.com/bigquery/v2:443;ProjectId=p;OAuthType=0;OAuthServiceAcctEmail=a@b;OAuthPvtKeyPath=/k.json;DefaultDataset=analytics"
+	p1, err := ParseJDBCBigQueryURL(url1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p1.OAuthType != 0 || !p1.OAuthTypeSet {
+		t.Errorf("expected OAuthType=0, set=true, got %d, %v", p1.OAuthType, p1.OAuthTypeSet)
+	}
+	if p1.ServiceAccountFile != "/k.json" {
+		t.Errorf("expected ServiceAccountFile '/k.json', got %q", p1.ServiceAccountFile)
+	}
+	if p1.DefaultDataset != "analytics" {
+		t.Errorf("expected DefaultDataset 'analytics', got %q", p1.DefaultDataset)
+	}
+
+	cfg1 := NewDefaultConfiguration()
+	cfg1.URL = url1
+	if err := cfg1.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+	if cfg1.GCPOAuthType == nil || *cfg1.GCPOAuthType != 0 {
+		t.Errorf("expected GCPOAuthType 0, got %v", cfg1.GCPOAuthType)
+	}
+	if cfg1.GCPCredentialsFile != "/k.json" {
+		t.Errorf("expected GCPCredentialsFile '/k.json', got %q", cfg1.GCPCredentialsFile)
+	}
+
+	// 2. OAuthType=2 with OAuthAccessToken
+	url2 := "jdbc:bigquery://https://www.googleapis.com/bigquery/v2:443;ProjectId=p;OAuthType=2;OAuthAccessToken=ya29.xyz;DefaultDataset=analytics"
+	p2, err := ParseJDBCBigQueryURL(url2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p2.OAuthType != 2 || !p2.OAuthTypeSet {
+		t.Errorf("expected OAuthType=2, got %d", p2.OAuthType)
+	}
+	if p2.AccessToken != "ya29.xyz" {
+		t.Errorf("expected AccessToken 'ya29.xyz', got %q", p2.AccessToken)
+	}
+
+	cfg2 := NewDefaultConfiguration()
+	cfg2.URL = url2
+	if err := cfg2.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+	if cfg2.GCPOAuthType == nil || *cfg2.GCPOAuthType != 2 {
+		t.Errorf("expected GCPOAuthType 2, got %v", cfg2.GCPOAuthType)
+	}
+	if cfg2.GCPAccessToken != "ya29.xyz" {
+		t.Errorf("expected GCPAccessToken 'ya29.xyz', got %q", cfg2.GCPAccessToken)
+	}
+}
+
+func TestTask10ConfigurationOptions(t *testing.T) {
+	cfg := NewDefaultConfiguration()
+	// Test defaults
+	if len(cfg.IgnoreMigrationPatterns) != 1 || cfg.IgnoreMigrationPatterns[0] != "*:future" {
+		t.Errorf("expected default IgnoreMigrationPatterns [*:future], got %v", cfg.IgnoreMigrationPatterns)
+	}
+	if !cfg.IsIgnored("future", "", nil) {
+		t.Errorf("expected future to be ignored by default")
+	}
+	if cfg.IsIgnored("missing", "", nil) {
+		t.Errorf("expected missing not to be ignored by default")
+	}
+
+	// Test repeatable:missing pattern
+	cfg.IgnoreMigrationPatterns = []string{"repeatable:missing"}
+	cfg.IgnoreMigrationPatternsExplicitlySet = true
+	if !cfg.IsIgnored("missing", "repeatable", nil) {
+		t.Errorf("expected repeatable:missing to match repeatable")
+	}
+	if !cfg.IsIgnored("missing", "SQL", nil) {
+		t.Errorf("expected repeatable:missing to match SQL when ver is nil")
+	}
+
+	// Test old booleans mapping onto IgnoreMigrationPatterns in Finalize()
+	cfg2 := NewDefaultConfiguration()
+	cfg2.IgnoreFutureMigrations = false
+	cfg2.IgnoreMissingMigrations = true
+	cfg2.IgnorePendingMigrations = true
+	if err := cfg2.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+	if cfg2.IsIgnored("future", "", nil) {
+		t.Errorf("expected future not to be ignored when IgnoreFutureMigrations=false")
+	}
+	if !cfg2.IsIgnored("missing", "", nil) {
+		t.Errorf("expected missing to be ignored when IgnoreMissingMigrations=true")
+	}
+	if !cfg2.IsIgnored("pending", "", nil) {
+		t.Errorf("expected pending to be ignored when IgnorePendingMigrations=true")
+	}
+}
+
 

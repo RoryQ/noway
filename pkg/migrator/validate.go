@@ -101,7 +101,8 @@ func (r *ValidateResult) Error() string {
 }
 
 // Validate validates the applied migrations in the database against the resolved local migrations.
-func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
+func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*ValidateResult, error) {
+	ignorePendingArg := len(ignorePending) > 0 && ignorePending[0]
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 
@@ -218,9 +219,9 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			if app.Deleted || app.Undone {
 				continue
 			}
-			// In Flyway, if app.Version is a future version and IgnoreFutureMigrations=true,
+			// In Flyway, if app.Version is a future version and IgnoreFutureMigrations=true (or future is ignored),
 			// this is FUTURE_FAILED, so it does not fail validation (Flyway only warns on future failed migrations).
-			if app.Version != nil && !app.Version.IsEmpty() && (maxResolvedVersion == nil || app.Version.IsNewerThan(*maxResolvedVersion)) && m.config.IgnoreFutureMigrations {
+			if app.Version != nil && !app.Version.IsEmpty() && (maxResolvedVersion == nil || app.Version.IsNewerThan(*maxResolvedVersion)) && m.isIgnored("future", app) {
 				continue
 			}
 			result.Valid = false
@@ -244,7 +245,7 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 				verKey := app.Version.Normalized()
 				res, found := resolvedUndoByVersion[verKey]
 				if !found {
-					if !m.config.IgnoreMissingMigrations {
+					if !m.isIgnored("missing", app) {
 						result.Valid = false
 						result.Errors = append(result.Errors, ValidationError{
 							Version:     app.Version,
@@ -308,7 +309,7 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 			if !found {
 				// Check if it's future
 				if maxResolvedVersion != nil && app.Version.IsNewerThan(*maxResolvedVersion) {
-					if !m.config.IgnoreFutureMigrations {
+					if !m.isIgnored("future", app) {
 						result.Valid = false
 						result.Errors = append(result.Errors, ValidationError{
 							Version:     app.Version,
@@ -318,7 +319,7 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 						})
 					}
 				} else {
-					if !m.config.IgnoreMissingMigrations {
+					if !m.isIgnored("missing", app) {
 						result.Valid = false
 						result.Errors = append(result.Errors, ValidationError{
 							Version:     app.Version,
@@ -374,7 +375,16 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 				res, found = resolvedRepeatableByScript[app.Script]
 			}
 			if !found {
-				// Repeatable migration deleted or renamed on disk -> Flyway treats as DELETED, not a validation error
+				// Repeatable migration deleted or renamed on disk -> report unless missing migrations are ignored
+				if !m.isIgnored("missing", app) {
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Version:     nil,
+						Description: app.Description,
+						File:        app.Script,
+						Message:     fmt.Sprintf("Detected applied migration not resolved locally: %s", app.Script),
+					})
+				}
 				continue
 			}
 
@@ -404,44 +414,70 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 		}
 	}
 
-	// Feature 13: Check for out-of-order pending versioned migrations
-	if !m.config.IgnorePendingMigrations && !m.config.OutOfOrder && maxAppliedVersion != nil {
-		effectiveTarget := m.determineEffectiveTarget(
-			maxAppliedVersion,
-			baselineVersion,
-			appliedByVersion,
-			resolved.VersionedMigrations,
-		)
+	// Check for unapplied (pending / outdated) versioned migrations
+	effectiveTarget := m.determineEffectiveTarget(
+		maxAppliedVersion,
+		baselineVersion,
+		appliedByVersion,
+		resolved.VersionedMigrations,
+	)
 
-		for _, res := range resolved.VersionedMigrations {
-			if res.Version == nil || res.Version.IsEmpty() {
+	for _, res := range resolved.VersionedMigrations {
+		if res.Version == nil || res.Version.IsEmpty() {
+			continue
+		}
+		verKey := res.Version.Normalized()
+		if appliedVersions[verKey] || history.UndoneVersions[verKey] || history.DeletedVersions[verKey] || history.FailedVersions[verKey] {
+			continue
+		}
+
+		// Covered by baseline
+		if baselineVersion != nil && baselineVersion.IsAtLeast(*res.Version) {
+			continue
+		}
+
+		// Above target cutoff
+		if effectiveTarget != nil && res.Version.IsNewerThan(*effectiveTarget) {
+			continue
+		}
+
+		// Conditional shouldExecute check
+		if res.Config.ShouldExecute != "" {
+			shouldExec, err := resolver.EvaluateShouldExecute(res.Config.ShouldExecute, m.replacer, m.builtins)
+			if err == nil && !shouldExec {
 				continue
 			}
-			verKey := res.Version.Normalized()
-			if appliedVersions[verKey] {
-				continue
-			}
+		}
 
-			// Covered by baseline
-			if baselineVersion != nil && baselineVersion.IsAtLeast(*res.Version) {
-				continue
-			}
-
-			// Above target cutoff
-			if effectiveTarget != nil && res.Version.IsNewerThan(*effectiveTarget) {
-				continue
-			}
-
-			// Conditional shouldExecute check
-			if res.Config.ShouldExecute != "" {
-				shouldExec, err := resolver.EvaluateShouldExecute(res.Config.ShouldExecute, m.replacer, m.builtins)
-				if err == nil && !shouldExec {
-					continue
+		// Check if it's outdated or pending
+		isOutdated := maxAppliedVersion != nil && maxAppliedVersion.IsNewerThan(*res.Version)
+		if isOutdated {
+			if m.config.OutOfOrder {
+				// With OutOfOrder enabled, in Flyway its state becomes PENDING
+				if !ignorePendingArg && !m.isIgnored("pending", res) {
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Version:     res.Version,
+						Description: res.Description,
+						File:        res.Script,
+						Message:     fmt.Sprintf("Detected resolved migration not applied to database: %s", res.Version),
+					})
+				}
+			} else {
+				// OutOfOrder disabled: state is OUTDATED
+				if !m.isIgnored("outdated", res) && !m.isIgnored("pending", res) {
+					result.Valid = false
+					result.Errors = append(result.Errors, ValidationError{
+						Version:     res.Version,
+						Description: res.Description,
+						File:        res.Script,
+						Message:     fmt.Sprintf("Detected resolved migration not applied to database: %s", res.Version),
+					})
 				}
 			}
-
-			// If strictly older than maximum applied version: out-of-order pending violation!
-			if maxAppliedVersion.IsNewerThan(*res.Version) {
+		} else {
+			// Normal pending migration
+			if !ignorePendingArg && !m.isIgnored("pending", res) {
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
 					Version:     res.Version,
@@ -467,4 +503,31 @@ func (m *Migrator) Validate(ctx context.Context) (*ValidateResult, error) {
 	}
 
 	return result, nil
+}
+
+// isIgnored checks whether a given migration state is ignored according to IgnoreMigrationPatterns.
+// State may be "future", "missing", "pending", "outdated", or "ignored".
+func (m *Migrator) isIgnored(state string, migDetails ...any) bool {
+	if m.config == nil {
+		return false
+	}
+	var migType string
+	var ver *version.Version
+	for _, d := range migDetails {
+		switch v := d.(type) {
+		case string:
+			migType = v
+		case *version.Version:
+			ver = v
+		case version.Version:
+			ver = &v
+		case resolver.ResolvedMigration:
+			migType = string(v.Type)
+			ver = v.Version
+		case resolver.AppliedMigration:
+			migType = v.Type
+			ver = v.Version
+		}
+	}
+	return m.config.IsIgnored(state, migType, ver)
 }

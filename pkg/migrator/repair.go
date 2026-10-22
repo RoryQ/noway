@@ -6,6 +6,7 @@ import (
 
 	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/resolver"
+	"github.com/roryq/noway/pkg/version"
 )
 
 // RepairOutput describes a repaired migration matching Flyway RepairOutput.
@@ -104,9 +105,13 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 
 	// Map resolved by version
 	resolvedByVersion := make(map[string]resolver.ResolvedMigration)
+	var maxResolvedVersion *version.Version
 	for _, res := range resolved.VersionedMigrations {
 		if res.Version != nil {
 			resolvedByVersion[res.Version.Normalized()] = res
+			if maxResolvedVersion == nil || res.Version.IsNewerThan(*maxResolvedVersion) {
+				maxResolvedVersion = res.Version
+			}
 		}
 	}
 	resolvedRepeatableByDesc := make(map[string]resolver.ResolvedMigration)
@@ -197,6 +202,9 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 				}
 			} else {
 				// Feature 18: Missing versioned migration on disk -> Insert separate DELETE record
+				if m.isIgnored("missing", app) {
+					continue
+				}
 				if !deletedVersions[verKey] {
 					deletedVersions[verKey] = true
 					var verStr *string
@@ -260,6 +268,9 @@ func (m *Migrator) Repair(ctx context.Context) (res *RepairResult, retErr error)
 				}
 			} else {
 				// Feature 18: Missing repeatable migration on disk -> Insert separate DELETE record
+				if m.isIgnored("missing", app) {
+					continue
+				}
 				if !deletedRepeatableDescs[app.Description] {
 					deletedRepeatableDescs[app.Description] = true
 					rec := database.HistoryRecord{

@@ -99,12 +99,22 @@ func TestChallenger_OutOfOrder_Enabled_ValidationPasses(t *testing.T) {
 		Data: []byte("CREATE TABLE t1 (id INT64);"),
 	}
 
+	// Standard Validate fails because V1 is pending
 	valRes, err := m.Validate(ctx)
 	if err != nil {
 		t.Fatalf("Validate returned unexpected system error: %v", err)
 	}
-	if !valRes.Valid {
-		t.Fatalf("expected validation to pass when outOfOrder=true, got errors: %s", valRes.Error())
+	if valRes.Valid {
+		t.Fatalf("expected standard validate to fail because V1 is pending")
+	}
+
+	// Validate with ignorePending (used by Migrate) passes when outOfOrder=true
+	valResPending, err := m.Validate(ctx, true)
+	if err != nil {
+		t.Fatalf("Validate returned unexpected system error: %v", err)
+	}
+	if !valResPending.Valid {
+		t.Fatalf("expected validation with ignorePending to pass when outOfOrder=true, got errors: %s", valResPending.Error())
 	}
 }
 
@@ -197,12 +207,19 @@ func TestChallenger_OutOfOrder_Disabled_ForwardPendingAllowed(t *testing.T) {
 		Data: []byte("CREATE TABLE t2 (id INT64);"),
 	}
 
+	// Standard Validate fails on forward pending V2
 	valRes, err := m.Validate(ctx)
 	if err != nil {
 		t.Fatalf("Validate failed: %v", err)
 	}
-	if !valRes.Valid {
-		t.Errorf("forward pending migration V2 should not fail validation when outOfOrder=false, got: %s", valRes.Error())
+	if valRes.Valid {
+		t.Errorf("expected standard Validate to fail on forward pending migration V2")
+	}
+
+	// Validate with ignorePending=true passes
+	valResIgnore, err := m.Validate(ctx, true)
+	if err != nil || !valResIgnore.Valid {
+		t.Errorf("forward pending migration V2 should pass validation when ignorePending=true, got: %v", err)
 	}
 }
 
@@ -791,9 +808,19 @@ func TestChallenger_RepeatableMigrations_Invariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Validate failed: %v", err)
 		}
-		// In Flyway, missing/deleted repeatable migrations do NOT cause validation failure (treated as DELETED)
-		if !valRes.Valid {
-			t.Fatalf("expected missing repeatable migration to pass validation (Flyway parity), got error: %s", valRes.Error())
+		// In Flyway, missing repeatable migration fails validation unless DELETE row exists or missing is ignored
+		if valRes.Valid {
+			t.Fatalf("expected missing repeatable migration to fail validation without DELETE row")
+		}
+
+		// When ignoreMigrationPatterns includes *:missing, Validate passes
+		cfgIgnore := *cfg
+		cfgIgnore.IgnoreMigrationPatterns = []string{"*:missing"}
+		cfgIgnore.IgnoreMigrationPatternsExplicitlySet = true
+		mIgnore, _ := New(&cfgIgnore, db)
+		valResIgnore, err := mIgnore.Validate(ctx)
+		if err != nil || !valResIgnore.Valid {
+			t.Fatalf("expected Validate to pass with *:missing ignored, got: %v", err)
 		}
 	})
 

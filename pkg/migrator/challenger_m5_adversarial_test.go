@@ -798,13 +798,13 @@ func TestChallenger_M5_CorruptedHistoryRecords(t *testing.T) {
 
 		m, _ := New(cfg, db)
 
-		// 1. In Flyway, Validate does not fail on orphaned/deleted repeatable migration
+		// 1. In Flyway, Validate fails on missing repeatable migration and pending migration before repair
 		valRes, err := m.Validate(ctx)
 		if err != nil {
 			t.Fatalf("Validate failed: %v", err)
 		}
-		if !valRes.Valid {
-			t.Errorf("expected Validate to pass on orphaned repeatable record (Flyway parity), got: %s", valRes.Error())
+		if valRes.Valid {
+			t.Errorf("expected Validate to fail on orphaned repeatable record and pending migration before repair")
 		}
 
 		// 2. Repair should mark missing repeatable migration as DELETE
@@ -816,8 +816,8 @@ func TestChallenger_M5_CorruptedHistoryRecords(t *testing.T) {
 			t.Errorf("expected orphaned.sql marked as DELETE, got %+v", repRes.DeletedMigrations)
 		}
 
-		// 3. Subsequent Validate should pass because DELETE records are ignored
-		valAfter, err := m.Validate(ctx)
+		// 3. Subsequent Validate with ignorePending should pass because DELETE records are ignored
+		valAfter, err := m.Validate(ctx, true)
 		if err != nil || !valAfter.Valid {
 			t.Errorf("expected Validate to pass after Repair marked orphaned as DELETE, got: %s", valAfter.Error())
 		}

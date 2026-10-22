@@ -2244,4 +2244,75 @@ func TestIsNotFoundError(t *testing.T) {
 	}
 }
 
+func TestBigQueryNew_OAuthTypeValidation(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Missing ProjectID
+	cfgNoProj := config.NewDefaultConfiguration()
+	cfgNoProj.GCPProjectID = ""
+	_, err := New(ctx, cfgNoProj)
+	if err == nil || !strings.Contains(err.Error(), "project ID is required") {
+		t.Errorf("expected error for missing project ID, got: %v", err)
+	}
+
+	// 2. OAuthType=0 without key file / json
+	cfgType0 := config.NewDefaultConfiguration()
+	cfgType0.GCPProjectID = "test-proj"
+	zero := 0
+	cfgType0.GCPOAuthType = &zero
+	cfgType0.GCPCredentialsFile = ""
+	cfgType0.GCPCredentialsJSON = ""
+	_, err = New(ctx, cfgType0)
+	if err == nil || !strings.Contains(err.Error(), "OAuthType=0 requires OAuthPvtKeyPath") {
+		t.Errorf("expected error for OAuthType=0 without key file, got: %v", err)
+	}
+
+	// 3. OAuthType=2 without access token
+	cfgType2 := config.NewDefaultConfiguration()
+	cfgType2.GCPProjectID = "test-proj"
+	two := 2
+	cfgType2.GCPOAuthType = &two
+	cfgType2.GCPAccessToken = ""
+	_, err = New(ctx, cfgType2)
+	if err == nil || !strings.Contains(err.Error(), "OAuthType=2 requires OAuthAccessToken") {
+		t.Errorf("expected error for OAuthType=2 without access token, got: %v", err)
+	}
+
+	// 4. Unknown OAuthType
+	cfgUnknown := config.NewDefaultConfiguration()
+	cfgUnknown.GCPProjectID = "test-proj"
+	invalid := 99
+	cfgUnknown.GCPOAuthType = &invalid
+	_, err = New(ctx, cfgUnknown)
+	if err == nil || !strings.Contains(err.Error(), "unsupported or incomplete OAuthType=99") {
+		t.Errorf("expected error for unknown OAuthType, got: %v", err)
+	}
+}
+
+func TestBigQueryDatabase_DefaultDatasetHelper(t *testing.T) {
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "analytics_ds"
+	cfg.GCPProjectID = "test-project"
+
+	db := &BigQueryDatabase{
+		projectID: cfg.GCPProjectID,
+		config:    cfg,
+	}
+
+	if got := db.getDefaultDataset(); got != "analytics_ds" {
+		t.Errorf("expected getDefaultDataset 'analytics_ds', got %q", got)
+	}
+
+	cfg2 := config.NewDefaultConfiguration()
+	cfg2.DefaultSchema = ""
+	cfg2.GCPDataset = "other_ds"
+	db2 := &BigQueryDatabase{
+		config: cfg2,
+	}
+	if got := db2.getDefaultDataset(); got != "other_ds" {
+		t.Errorf("expected getDefaultDataset 'other_ds', got %q", got)
+	}
+}
+
+
 

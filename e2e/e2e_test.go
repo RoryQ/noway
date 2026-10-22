@@ -847,9 +847,18 @@ func TestTier1_F13_F14_F15_ValidateIntegrity(t *testing.T) {
 
 		db := mock.NewMockDatabase()
 		_ = db.EnsureHistoryTable(ctx, "e2e_dataset", "flyway_schema_history")
-		delVer := "2"
+		v1Ver := "1"
 		_ = db.InsertHistory(ctx, "e2e_dataset", "flyway_schema_history", database.HistoryRecord{
 			InstalledRank: 1,
+			Version:       &v1Ver,
+			Description:   "init",
+			Type:          "SQL",
+			Script:        "V1__init.sql",
+			Success:       true,
+		})
+		delVer := "2"
+		_ = db.InsertHistory(ctx, "e2e_dataset", "flyway_schema_history", database.HistoryRecord{
+			InstalledRank: 2,
 			Version:       &delVer,
 			Description:   "deleted migration",
 			Type:          "DELETE",

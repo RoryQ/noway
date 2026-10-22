@@ -349,8 +349,8 @@ func (n *Noway) Info(ctx context.Context) (*migrator.InfoResult, error) {
 }
 
 // Validate validates applied migrations against local migration scripts.
-func (n *Noway) Validate(ctx context.Context) (*migrator.ValidateResult, error) {
-	return n.migrator.Validate(ctx)
+func (n *Noway) Validate(ctx context.Context, ignorePending ...bool) (*migrator.ValidateResult, error) {
+	return n.migrator.Validate(ctx, ignorePending...)
 }
 
 // Baseline baselines an existing database at a specific version.

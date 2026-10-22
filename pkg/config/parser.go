@@ -490,6 +490,13 @@ func applyAnyValue(cfg *Configuration, key string, val any) error {
 		case "sqlmigrationsuffixes", "sql_migration_suffixes":
 			cfg.SQLMigrationSuffixes = items
 			return nil
+		case "ignoremigrationpatterns", "ignore_migration_patterns", "ignore-migration-patterns":
+			cfg.IgnoreMigrationPatterns = items
+			cfg.IgnoreMigrationPatternsExplicitlySet = true
+			return nil
+		case "cherrypick", "cherry_pick", "cherry-pick":
+			cfg.CherryPick = items
+			return nil
 		default:
 			return applyProperty(cfg, key, strings.Join(items, ","))
 		}
@@ -503,6 +510,13 @@ func applyAnyValue(cfg *Configuration, key string, val any) error {
 			return nil
 		case "sqlmigrationsuffixes", "sql_migration_suffixes":
 			cfg.SQLMigrationSuffixes = v
+			return nil
+		case "ignoremigrationpatterns", "ignore_migration_patterns", "ignore-migration-patterns":
+			cfg.IgnoreMigrationPatterns = v
+			cfg.IgnoreMigrationPatternsExplicitlySet = true
+			return nil
+		case "cherrypick", "cherry_pick", "cherry-pick":
+			cfg.CherryPick = v
 			return nil
 		default:
 			return applyProperty(cfg, key, strings.Join(v, ","))
@@ -657,6 +671,23 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 			return err
 		}
 		cfg.IgnorePendingMigrations = b
+	case "IGNORE_MIGRATION_PATTERNS", "IGNOREMIGRATIONPATTERNS":
+		cfg.IgnoreMigrationPatterns = splitAndTrim(val, ",")
+		cfg.IgnoreMigrationPatternsExplicitlySet = true
+	case "SKIP_EXECUTING_MIGRATIONS", "SKIPEXECUTINGMIGRATIONS":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.SkipExecutingMigrations = b
+	case "CHERRY_PICK", "CHERRYPICK":
+		cfg.CherryPick = splitAndTrim(val, ",")
+	case "FAIL_ON_MISSING_TARGET", "FAILONMISSINGTARGET":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.FailOnMissingTarget = b
 	case "CLEAN_DISABLED", "CLEANDISABLED":
 		b, err := ParseBool(val)
 		if err != nil {
@@ -719,6 +750,14 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 		cfg.GCPCredentialsJSON = val
 	case "GCP_BIGQUERY_ENDPOINT", "GCPBIGQUERYENDPOINT":
 		cfg.GCPBigQueryEndpoint = val
+	case "OAUTH_TYPE", "OAUTHTYPE", "GCP_OAUTH_TYPE", "GCPOAUTHTYPE":
+		if num, err := strconv.Atoi(val); err == nil {
+			cfg.GCPOAuthType = &num
+		}
+	case "OAUTH_ACCESS_TOKEN", "OAUTHACCESSTOKEN", "GCP_ACCESS_TOKEN", "GCPACCESSTOKEN":
+		cfg.GCPAccessToken = val
+	case "OAUTH_PVT_KEY_PATH", "OAUTHPVTKEYPATH":
+		cfg.GCPCredentialsFile = val
 	case "SPANNER_INSTANCE_ID", "SPANNERINSTANCEID", "GCP_SPANNER_INSTANCE_ID", "GCPSPANNERINSTANCEID":
 		cfg.GCPSpannerInstanceID = val
 	case "SPANNER_DATABASE_ID", "SPANNERDATABASEID", "GCP_SPANNER_DATABASE_ID", "GCPSPANNERDATABASEID":
@@ -880,6 +919,23 @@ func applyProperty(cfg *Configuration, key, val string) error {
 			return err
 		}
 		cfg.IgnorePendingMigrations = b
+	case "ignoremigrationpatterns", "ignore_migration_patterns", "ignore-migration-patterns":
+		cfg.IgnoreMigrationPatterns = splitAndTrim(val, ",")
+		cfg.IgnoreMigrationPatternsExplicitlySet = true
+	case "skipexecutingmigrations", "skip_executing_migrations", "skip-executing-migrations":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.SkipExecutingMigrations = b
+	case "cherrypick", "cherry_pick", "cherry-pick":
+		cfg.CherryPick = splitAndTrim(val, ",")
+	case "failonmissingtarget", "fail_on_missing_target", "fail-on-missing-target":
+		b, err := ParseBool(val)
+		if err != nil {
+			return err
+		}
+		cfg.FailOnMissingTarget = b
 	case "cleandisabled", "clean_disabled", "clean-disabled":
 		b, err := ParseBool(val)
 		if err != nil {
@@ -942,6 +998,14 @@ func applyProperty(cfg *Configuration, key, val string) error {
 		cfg.GCPCredentialsJSON = val
 	case "gcpbigqueryendpoint", "bigqueryendpoint", "bigquery_endpoint", "bigquery-endpoint":
 		cfg.GCPBigQueryEndpoint = val
+	case "oauthtype", "oauth_type", "oauth-type", "gcpoauthtype":
+		if num, err := strconv.Atoi(val); err == nil {
+			cfg.GCPOAuthType = &num
+		}
+	case "oauthaccesstoken", "oauth_access_token", "oauth-access-token", "gcpaccesstoken":
+		cfg.GCPAccessToken = val
+	case "oauthpvtkeypath", "oauth_pvt_key_path", "oauth-pvt-key-path":
+		cfg.GCPCredentialsFile = val
 	case "spannerinstanceid", "spanner_instance_id", "spanner-instance-id", "gcpspannerinstanceid", "instanceid", "instance_id":
 		cfg.GCPSpannerInstanceID = val
 	case "spannerdatabaseid", "spanner_database_id", "spanner-database-id", "gcpspannerdatabaseid", "databaseid", "database_id":
@@ -1014,6 +1078,10 @@ var KnownProperties = []string{
 	"ignoreFutureMigrations",
 	"ignoreMissingMigrations",
 	"ignorePendingMigrations",
+	"ignoreMigrationPatterns",
+	"skipExecutingMigrations",
+	"cherryPick",
+	"failOnMissingTarget",
 	"baselineVersion",
 	"baselineDescription",
 	"baselineOnMigrate",
@@ -1040,6 +1108,11 @@ var KnownProperties = []string{
 	"configFiles",
 	"outputType",
 	"dryRunOutput",
+	"oauthType",
+	"oauthAccessToken",
+	"oauthPvtKeyPath",
+	"gcpOAuthType",
+	"gcpAccessToken",
 	"gcpProjectId",
 	"gcpDataset",
 	"gcpLocation",

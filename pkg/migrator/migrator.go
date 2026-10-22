@@ -407,7 +407,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 
 	// 7. Validate on migrate
 	if m.config.ValidateOnMigrate && !isDryRun {
-		valRes, err := m.Validate(ctx)
+		valRes, err := m.Validate(ctx, true)
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			return nil, fmt.Errorf("validation error: %w", err)
@@ -422,6 +422,46 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 			} else {
 				_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 				return nil, fmt.Errorf("%s", valRes.Error())
+			}
+		}
+	}
+
+	// Target check for failOnMissingTarget
+	targetStr := strings.TrimSpace(m.config.Target)
+	if targetStr != "" && !strings.EqualFold(targetStr, "latest") && !strings.EqualFold(targetStr, "current") && !strings.EqualFold(targetStr, "next") {
+		cleanTarget := strings.TrimSuffix(targetStr, "?")
+		isOptional := strings.HasSuffix(targetStr, "?")
+		if m.config.FailOnMissingTarget && !isOptional {
+			found := false
+			for _, res := range resolved.VersionedMigrations {
+				if res.Version != nil && (res.Version.String() == cleanTarget || res.Version.Normalized() == cleanTarget) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if !isDryRun {
+					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				}
+				return nil, fmt.Errorf("no migration with a target version %s could be found", cleanTarget)
+			}
+		}
+	}
+
+	if len(m.config.CherryPick) > 0 && m.config.FailOnMissingTarget {
+		for _, cp := range m.config.CherryPick {
+			found := false
+			for _, res := range resolved.VersionedMigrations {
+				if matchesCherryPick(res.Version, []string{cp}) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if !isDryRun {
+					_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+				}
+				return nil, fmt.Errorf("no migration with version %s could be found to cherry pick", cp)
 			}
 		}
 	}
@@ -441,13 +481,13 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	// Flyway parity: refuse to migrate if schema history contains an unrepaired failed migration
 	// (even when validateOnMigrate=false), because non-transactional DDL databases (BigQuery, Spanner)
 	// would re-apply partial changes or apply later migrations on top of a broken state.
-	// EXCEPTION: Flyway only warns if exactly ONE failed migration exists, and that migration is a future version (with ignoreFutureMigrations=true).
+	// EXCEPTION: Flyway only warns if exactly ONE failed migration exists, and that migration is a future version (with ignoreFutureMigrations=true or future ignored).
 	var blockingFailed []resolver.AppliedMigration
 	var futureFailedWarnings []string
 	if len(history.FailedMigrations) == 1 {
 		failed := history.FailedMigrations[0]
 		isFuture := failed.Version != nil && !failed.Version.IsEmpty() && (maxResolvedVersion == nil || failed.Version.IsNewerThan(*maxResolvedVersion))
-		if isFuture && m.config.IgnoreFutureMigrations {
+		if isFuture && m.isIgnored("future", failed) {
 			futureFailedWarnings = append(futureFailedWarnings, fmt.Sprintf("Schema %s contains a failed future migration to version %s (%s)!", defaultSchema, failed.Version.String(), failed.Script))
 		} else {
 			blockingFailed = append(blockingFailed, failed)
@@ -536,13 +576,20 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 			continue
 		}
 
+		// Check cherryPick
+		if len(m.config.CherryPick) > 0 {
+			if !matchesCherryPick(res.Version, m.config.CherryPick) {
+				continue
+			}
+		}
+
 		// Check target version
 		if effectiveTargetVersion != nil && res.Version.IsNewerThan(*effectiveTargetVersion) {
 			continue
 		}
 
-		// Check out-of-order
-		if maxAppliedVersion != nil && maxAppliedVersion.IsNewerThan(*res.Version) && !m.config.OutOfOrder {
+		// Check out-of-order (bypassed if cherryPick is specified)
+		if maxAppliedVersion != nil && maxAppliedVersion.IsNewerThan(*res.Version) && !m.config.OutOfOrder && len(m.config.CherryPick) == 0 {
 			continue
 		}
 
@@ -746,19 +793,21 @@ func (m *Migrator) executeSQLMigration(
 	startTime := time.Now()
 
 	var execErr error
-	for _, stmt := range stmts {
-		if err := m.callbackRunner.Fire(ctx, "beforeEachMigrateStatement"); err != nil {
-			execErr = err
-			break
-		}
-		if err := m.db.ExecuteStatement(ctx, stmt.SQL); err != nil {
-			_ = m.callbackRunner.Fire(ctx, "afterEachMigrateStatementError")
-			execErr = fmt.Errorf("error executing statement at line %d in %s: %w", stmt.LineNumber, mig.Script, err)
-			break
-		}
-		if err := m.callbackRunner.Fire(ctx, "afterEachMigrateStatement"); err != nil {
-			execErr = err
-			break
+	if !m.config.SkipExecutingMigrations {
+		for _, stmt := range stmts {
+			if err := m.callbackRunner.Fire(ctx, "beforeEachMigrateStatement"); err != nil {
+				execErr = err
+				break
+			}
+			if err := m.db.ExecuteStatement(ctx, stmt.SQL); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterEachMigrateStatementError")
+				execErr = fmt.Errorf("error executing statement at line %d in %s: %w", stmt.LineNumber, mig.Script, err)
+				break
+			}
+			if err := m.callbackRunner.Fire(ctx, "afterEachMigrateStatement"); err != nil {
+				execErr = err
+				break
+			}
 		}
 	}
 
@@ -947,7 +996,11 @@ func (m *Migrator) executeScriptMigration(
 	}
 	cmd.Env = env
 
-	output, execErr := cmd.CombinedOutput()
+	var output []byte
+	var execErr error
+	if !m.config.SkipExecutingMigrations {
+		output, execErr = cmd.CombinedOutput()
+	}
 	execTime := time.Since(startTime).Milliseconds()
 
 	var verStr *string
@@ -1002,4 +1055,24 @@ func (m *Migrator) executeScriptMigration(
 		Script:        mig.Script,
 		ExecutionTime: execTime,
 	}, nil
+}
+
+func matchesCherryPick(v *version.Version, cherryPicks []string) bool {
+	if v == nil {
+		return false
+	}
+	vStr := v.String()
+	vNorm := v.Normalized()
+	for _, cp := range cherryPicks {
+		cpTrim := strings.TrimSpace(cp)
+		if cpTrim == vStr || cpTrim == vNorm {
+			return true
+		}
+		if parsed, err := version.Parse(cpTrim); err == nil {
+			if parsed.Normalized() == vNorm {
+				return true
+			}
+		}
+	}
+	return false
 }

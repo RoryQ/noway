@@ -272,4 +272,45 @@ func TestCLIOverridesEnvironmentVariables(t *testing.T) {
 	}
 }
 
+func TestParseCLIArgs_Task10Flags(t *testing.T) {
+	args := []string{
+		"-url=jdbc:bigquery:;ProjectId=test-proj;DefaultDataset=analytics;",
+		"-ignoreMigrationPatterns=*:missing,repeatable:missing",
+		"-skipExecutingMigrations=true",
+		"-cherryPick=1.0,2.0",
+		"-failOnMissingTarget=true",
+		"-oauthType=2",
+		"-oauthAccessToken=secret-token",
+		"-oauthPvtKeyPath=/custom/key.json",
+	}
+
+	cfg, err := parseCLIArgs(args)
+	if err != nil {
+		t.Fatalf("parseCLIArgs failed: %v", err)
+	}
+
+	if len(cfg.IgnoreMigrationPatterns) != 2 || cfg.IgnoreMigrationPatterns[0] != "*:missing" {
+		t.Errorf("unexpected IgnoreMigrationPatterns: %v", cfg.IgnoreMigrationPatterns)
+	}
+	if !cfg.SkipExecutingMigrations {
+		t.Errorf("expected SkipExecutingMigrations true")
+	}
+	if len(cfg.CherryPick) != 2 || cfg.CherryPick[0] != "1.0" || cfg.CherryPick[1] != "2.0" {
+		t.Errorf("unexpected CherryPick: %v", cfg.CherryPick)
+	}
+	if !cfg.FailOnMissingTarget {
+		t.Errorf("expected FailOnMissingTarget true")
+	}
+	if cfg.GCPOAuthType == nil || *cfg.GCPOAuthType != 2 {
+		t.Errorf("expected GCPOAuthType 2, got %v", cfg.GCPOAuthType)
+	}
+	if cfg.GCPAccessToken != "secret-token" {
+		t.Errorf("expected GCPAccessToken 'secret-token', got %q", cfg.GCPAccessToken)
+	}
+	if cfg.GCPCredentialsFile != "/custom/key.json" {
+		t.Errorf("expected GCPCredentialsFile '/custom/key.json', got %q", cfg.GCPCredentialsFile)
+	}
+}
+
+
 

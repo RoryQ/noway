@@ -252,6 +252,23 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 				return nil, err
 			}
 			cfg.IgnorePendingMigrations = b
+		case "ignoremigrationpatterns", "ignore-migration-patterns", "ignore_migration_patterns":
+			cfg.IgnoreMigrationPatterns = splitAndTrimCLI(val, ",")
+			cfg.IgnoreMigrationPatternsExplicitlySet = true
+		case "skipexecutingmigrations", "skip-executing-migrations", "skip_executing_migrations":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.SkipExecutingMigrations = b
+		case "cherrypick", "cherry-pick", "cherry_pick":
+			cfg.CherryPick = splitAndTrimCLI(val, ",")
+		case "failonmissingtarget", "fail-on-missing-target", "fail_on_missing_target":
+			b, err := parseBoolVal(val)
+			if err != nil {
+				return nil, err
+			}
+			cfg.FailOnMissingTarget = b
 		case "cleandisabled", "clean-disabled", "clean_disabled":
 			b, err := parseBoolVal(val)
 			if err != nil {
@@ -342,6 +359,14 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 			cfg.GCPCredentialsJSON = val
 		case "gcpbigqueryendpoint", "bigqueryendpoint", "bigquery-endpoint":
 			cfg.GCPBigQueryEndpoint = val
+		case "oauthtype", "oauth-type", "oauth_type", "gcpoauthtype":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.GCPOAuthType = &n
+			}
+		case "oauthaccesstoken", "oauth-access-token", "oauth_access_token", "gcpaccesstoken":
+			cfg.GCPAccessToken = val
+		case "oauthpvtkeypath", "oauth-pvt-key-path", "oauth_pvt_key_path":
+			cfg.GCPCredentialsFile = val
 		case "driver":
 			cfg.Driver = val
 		case "gcpspannerinstanceid", "spannerinstanceid", "spannerinstance", "spanner-instance-id", "spanner-instance", "spanner_instance_id":

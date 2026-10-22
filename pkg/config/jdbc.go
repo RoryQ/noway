@@ -13,7 +13,8 @@ type BigQueryConnectionParams struct {
 	DefaultDataset     string
 	Location           string
 	OAuthType          int    // 0 = Service Account, 1 = User, 2 = AccessToken, 3 = ADC
-	ServiceAccountFile string // OAuthPKeyFile / KeyFile
+	OAuthTypeSet       bool
+	ServiceAccountFile string // OAuthPKeyFile / KeyFile / OAuthPvtKeyPath
 	ServiceAccountJSON string // Key JSON string
 	ServiceAccountEmail string
 	AccessToken        string
@@ -79,8 +80,9 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 			case "oauthtype", "oauth_type":
 				if num, err := strconv.Atoi(val); err == nil {
 					params.OAuthType = num
+					params.OAuthTypeSet = true
 				}
-			case "oauthpkeyfile", "oauth_pkey_file", "keyfile", "credentials_file":
+			case "oauthpkeyfile", "oauth_pkey_file", "keyfile", "credentials_file", "oauthpvtkeypath", "oauth_pvt_key_path":
 				params.ServiceAccountFile = val
 			case "oauthserviceacctemail", "oauth_service_acct_email", "service_account_email":
 				params.ServiceAccountEmail = val
@@ -118,6 +120,18 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 		}
 		if kf := q.Get("credentials_file"); kf != "" {
 			params.ServiceAccountFile = kf
+		}
+		if kp := q.Get("oauthpvtkeypath"); kp != "" {
+			params.ServiceAccountFile = kp
+		}
+		if ot := q.Get("oauthtype"); ot != "" {
+			if num, err := strconv.Atoi(ot); err == nil {
+				params.OAuthType = num
+				params.OAuthTypeSet = true
+			}
+		}
+		if at := q.Get("oauthaccesstoken"); at != "" {
+			params.AccessToken = at
 		}
 
 		return params, nil
