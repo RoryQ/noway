@@ -426,4 +426,42 @@ func TestCallbackRunner_ScriptShellSyntaxExecutesWithoutPlaceholderError(t *test
 	}
 }
 
+func TestMigrate_ValidateOnMigrate_PreservesMigrateOperation(t *testing.T) {
+	ctx := context.Background()
+	db := mock.NewMockDatabase()
+	tmpDir := t.TempDir()
+
+	outFile := filepath.Join(tmpDir, "op_out.txt")
+	scriptFile := filepath.Join(tmpDir, "beforeEachMigrate__check_op.sh")
+	scriptContent := fmt.Sprintf("#!/bin/bash\necho \"FLYWAY_OPERATION=$FLYWAY_OPERATION\" > %s\nexit 0\n", outFile)
+	_ = os.WriteFile(scriptFile, []byte(scriptContent), 0755)
+
+	sqlMigration := filepath.Join(tmpDir, "V1__init.sql")
+	_ = os.WriteFile(sqlMigration, []byte("CREATE TABLE t (id INT64);"), 0644)
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.Locations = []string{tmpDir}
+	cfg.ValidateOnMigrate = true
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	_, err = m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	outData, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if !strings.Contains(string(outData), "FLYWAY_OPERATION=MIGRATE") {
+		t.Errorf("expected FLYWAY_OPERATION=MIGRATE during migrate callbacks, got: %s", string(outData))
+	}
+}
+
+
 

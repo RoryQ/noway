@@ -101,9 +101,23 @@ func (r *ValidateResult) Error() string {
 	return sb.String()
 }
 
+type validateOptions struct {
+	ignorePending bool
+	isInternal    bool
+}
+
 // Validate validates the applied migrations in the database against the resolved local migrations.
 func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*ValidateResult, error) {
-	ignorePendingArg := len(ignorePending) > 0 && ignorePending[0]
+	m.callbackRunner.SetOperation("VALIDATE")
+	opts := validateOptions{
+		ignorePending: len(ignorePending) > 0 && ignorePending[0],
+		isInternal:    false,
+	}
+	return m.validate(ctx, opts)
+}
+
+func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*ValidateResult, error) {
+	ignorePendingArg := opts.ignorePending
 	defaultSchema := m.config.GetDefaultSchema()
 	table := m.config.Table
 
@@ -116,17 +130,20 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 	}
 
 	m.callbackRunner.callbacks = resolved.Callbacks
-	m.callbackRunner.SetOperation("VALIDATE")
 
-	if err := m.callbackRunner.Fire(ctx, "beforeValidate"); err != nil {
-		_ = m.callbackRunner.Fire(ctx, "afterValidateError")
-		return nil, err
+	if !opts.isInternal {
+		if err := m.callbackRunner.Fire(ctx, "beforeValidate"); err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+			return nil, err
+		}
 	}
 
 	// 2. Fetch applied migrations
 	exists, err := m.db.HistoryTableExists(ctx, defaultSchema, table)
 	if err != nil {
-		_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+		if !opts.isInternal {
+			_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+		}
 		return nil, fmt.Errorf("failed to check history table existence: %w", err)
 	}
 	if !exists {
@@ -144,8 +161,10 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 		}
 
 		if len(nonEmptySchemas) > 0 && !m.config.BaselineOnMigrate {
-			if err := m.callbackRunner.Fire(ctx, "afterValidateError"); err != nil {
-				return nil, err
+			if !opts.isInternal {
+				if err := m.callbackRunner.Fire(ctx, "afterValidateError"); err != nil {
+					return nil, err
+				}
 			}
 			res := &ValidateResult{
 				Valid: false,
@@ -160,9 +179,11 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 		}
 
 		// No history table yet & schemas empty (or baselineOnMigrate) -> valid (clean state)
-		if err := m.callbackRunner.Fire(ctx, "afterValidate"); err != nil {
-			_ = m.callbackRunner.Fire(ctx, "afterValidateError")
-			return nil, err
+		if !opts.isInternal {
+			if err := m.callbackRunner.Fire(ctx, "afterValidate"); err != nil {
+				_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+				return nil, err
+			}
 		}
 		res := &ValidateResult{Valid: true}
 		res.finalize(m.DatabaseName(), 0)
@@ -171,7 +192,9 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 
 	applied, err := m.db.FetchHistory(ctx, defaultSchema, table)
 	if err != nil {
-		_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+		if !opts.isInternal {
+			_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+		}
 		return nil, fmt.Errorf("failed to fetch schema history: %w", err)
 	}
 
@@ -480,13 +503,17 @@ func (m *Migrator) Validate(ctx context.Context, ignorePending ...bool) (*Valida
 	result.finalize(m.DatabaseName(), validateCount)
 
 	if !result.Valid {
-		_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+		if !opts.isInternal {
+			_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+		}
 		return result, nil
 	}
 
-	if err := m.callbackRunner.Fire(ctx, "afterValidate"); err != nil {
-		_ = m.callbackRunner.Fire(ctx, "afterValidateError")
-		return nil, err
+	if !opts.isInternal {
+		if err := m.callbackRunner.Fire(ctx, "afterValidate"); err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterValidateError")
+			return nil, err
+		}
 	}
 
 	return result, nil

@@ -413,7 +413,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 
 	// 7. Validate on migrate
 	if m.config.ValidateOnMigrate {
-		valRes, err := m.Validate(ctx, true)
+		valRes, err := m.validate(ctx, validateOptions{ignorePending: true, isInternal: true})
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			return nil, fmt.Errorf("validation error: %w", err)
