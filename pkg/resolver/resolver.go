@@ -28,28 +28,43 @@ type ResolverConfig struct {
 	RepeatablePrefix   string   // default "R"
 	UndoPrefix         string   // default "U"
 	BaselinePrefix     string   // default "B"
-	Separator          string   // default "__"
-	Suffixes           []string // default [".sql"]
-	Encoding           string   // default "UTF-8"
-	FailOnMissingLocations bool
+	Separator               string   // default "__"
+	Suffixes                []string // default [".sql", ".sh", ...]
+	SQLMigrationSuffixes    []string // default [".sql"]
+	Encoding                string   // default "UTF-8"
+	FailOnMissingLocations  bool
 	ValidateMigrationNaming bool
-	PlaceholderReplacement *bool
-	Replacer               *parser.PlaceholderReplacer
-	Builtins               parser.BuiltinPlaceholders
+	PlaceholderReplacement  *bool
+	Replacer                *parser.PlaceholderReplacer
+	Builtins                parser.BuiltinPlaceholders
 }
 
 // DefaultResolverConfig returns standard defaults.
 func DefaultResolverConfig() ResolverConfig {
 	return ResolverConfig{
-		Locations:        []string{"filesystem:sql"},
-		Prefix:           "V",
-		RepeatablePrefix: "R",
-		UndoPrefix:       "U",
-		BaselinePrefix:   "B",
-		Separator:        "__",
-		Suffixes:         []string{".sql", ".sh", ".bash", ".cmd", ".ps1", ".bat", ".py"},
-		Encoding:         "UTF-8",
+		Locations:            []string{"filesystem:sql"},
+		Prefix:               "V",
+		RepeatablePrefix:     "R",
+		UndoPrefix:           "U",
+		BaselinePrefix:       "B",
+		Separator:            "__",
+		Suffixes:             []string{".sql", ".sh", ".bash", ".cmd", ".ps1", ".bat", ".py"},
+		SQLMigrationSuffixes: []string{".sql"},
+		Encoding:             "UTF-8",
 	}
+}
+
+func (r *Resolver) isSQLMigrationFile(filename string) bool {
+	suffixes := r.config.SQLMigrationSuffixes
+	if len(suffixes) == 0 {
+		suffixes = []string{".sql"}
+	}
+	for _, suffix := range suffixes {
+		if hasSuffixFold(filename, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Resolver scans and parses migration files.
@@ -717,7 +732,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 		})
 		return nil
 	} else if strings.HasPrefix(filename, r.config.RepeatablePrefix) {
-		if r.config.ValidateMigrationNaming {
+		if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 			return fmt.Errorf("invalid repeatable migration name: %s", filename)
 		}
 		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
@@ -763,7 +778,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 				return nil
 			}
 		}
-		if r.config.ValidateMigrationNaming {
+		if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 			return fmt.Errorf("invalid undo migration name: %s", filename)
 		}
 		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
@@ -812,7 +827,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 				return nil
 			}
 		}
-		if r.config.ValidateMigrationNaming {
+		if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 			return fmt.Errorf("invalid baseline migration name: %s", filename)
 		}
 		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
@@ -842,7 +857,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 		if verStr != "" && unicode.IsDigit(rune(verStr[0])) {
 			ver, err := version.Parse(verStr)
 			if err != nil {
-				if r.config.ValidateMigrationNaming {
+				if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 					return fmt.Errorf("invalid version '%s' in migration file '%s': %w", verStr, filename, err)
 				}
 				log.Printf("INFO: Skipping file '%s' (invalid migration version: %v)", filename, err)
@@ -874,14 +889,14 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 			return nil
 		}
 
-		if r.config.ValidateMigrationNaming {
+		if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 			return fmt.Errorf("invalid versioned migration name: %s", filename)
 		}
 		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
 		return nil
 	}
 
-	if r.config.ValidateMigrationNaming {
+	if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 		return fmt.Errorf("invalid migration name: %s", filename)
 	}
 	log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)

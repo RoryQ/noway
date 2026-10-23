@@ -1183,5 +1183,47 @@ func TestResolver_MissingLocationsAndFileLocations(t *testing.T) {
 	}
 }
 
+func TestResolver_ValidateMigrationNaming_IgnoresHelperScripts(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"migrations/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t1 (id INT64);\n"),
+		},
+		"migrations/helper.sh": &fstest.MapFile{
+			Data: []byte("#!/bin/bash\necho helper\n"),
+		},
+	}
+
+	// 1. With helper.sh, ValidateMigrationNaming=true should succeed because helper.sh is not a SQL migration
+	res := NewResolver(ResolverConfig{
+		FS:                      mockFS,
+		Locations:               []string{"migrations"},
+		ValidateMigrationNaming: true,
+		SQLMigrationSuffixes:    []string{".sql"},
+	})
+	resolved, err := res.Resolve()
+	if err != nil {
+		t.Fatalf("expected helper.sh to be ignored by ValidateMigrationNaming, got: %v", err)
+	}
+	if len(resolved.VersionedMigrations) != 1 {
+		t.Errorf("expected 1 migration, got %d", len(resolved.VersionedMigrations))
+	}
+
+	// 2. An invalid SQL migration name with ValidateMigrationNaming=true must fail
+	mockFS["migrations/invalid.sql"] = &fstest.MapFile{
+		Data: []byte("SELECT 1;\n"),
+	}
+	res2 := NewResolver(ResolverConfig{
+		FS:                      mockFS,
+		Locations:               []string{"migrations"},
+		ValidateMigrationNaming: true,
+		SQLMigrationSuffixes:    []string{".sql"},
+	})
+	_, err = res2.Resolve()
+	if err == nil || !strings.Contains(err.Error(), "invalid migration name") {
+		t.Fatalf("expected error for invalid.sql, got: %v", err)
+	}
+}
+
+
 
 

@@ -122,6 +122,7 @@ func New(in *config.Configuration, db database.Database) (*Migrator, error) {
 		BaselinePrefix:          cfg.BaselineSQLMigrationPrefix,
 		Separator:               cfg.SQLMigrationSeparator,
 		Suffixes:                suffixes,
+		SQLMigrationSuffixes:    cfg.SQLMigrationSuffixes,
 		Encoding:                cfg.Encoding,
 		FailOnMissingLocations:  cfg.FailOnMissingLocations,
 		ValidateMigrationNaming: cfg.ValidateMigrationNaming,
