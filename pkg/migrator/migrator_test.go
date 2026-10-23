@@ -288,6 +288,7 @@ func TestClean(t *testing.T) {
 	}
 }
 
+
 func TestBaselineOnMigrateNonEmptySchema(t *testing.T) {
 	mockFS := fstest.MapFS{
 		"sql/V1__initial.sql": &fstest.MapFile{
@@ -1652,7 +1653,7 @@ func (u *unlockCheckMockDB) Lock(ctx context.Context, schema, table string) (dat
 	}, nil
 }
 
-func TestStandaloneClean_CallsUnlock(t *testing.T) {
+func TestStandaloneClean_CallsUnlockAndIgnoresTableDroppedError(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.NewDefaultConfiguration()
 	cfg.DefaultSchema = "test_ds"
@@ -1664,6 +1665,7 @@ func TestStandaloneClean_CallsUnlock(t *testing.T) {
 
 	wrapped := &unlockCheckMockDB{
 		MockDatabase: baseDB,
+		failOnUnlock: fmt.Errorf("table not found: test_ds.flyway_schema_history"),
 	}
 
 	m, err := New(cfg, wrapped)
@@ -1683,14 +1685,17 @@ func TestStandaloneClean_CallsUnlock(t *testing.T) {
 	}
 }
 
-func TestStandaloneClean_PropagatesUnlockError(t *testing.T) {
+func TestStandaloneClean_PropagatesUnlockErrorWhenTableExists(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.NewDefaultConfiguration()
-	cfg.DefaultSchema = "test_ds"
+	cfg.DefaultSchema = "meta_ds"
+	cfg.Schemas = []string{"test_ds"}
 	cfg.CleanDisabled = false
 
 	baseDB := mock.NewMockDatabase()
-	_ = baseDB.EnsureHistoryTable(ctx, "test_ds", "flyway_schema_history")
+	_ = baseDB.EnsureSchema(ctx, "test_ds")
+	_ = baseDB.EnsureSchema(ctx, "meta_ds")
+	_ = baseDB.EnsureHistoryTable(ctx, "meta_ds", "flyway_schema_history")
 
 	expectedErr := fmt.Errorf("lock heartbeat failed: lock lost")
 	wrapped := &unlockCheckMockDB{
@@ -1705,7 +1710,7 @@ func TestStandaloneClean_PropagatesUnlockError(t *testing.T) {
 
 	_, err = m.Clean(ctx)
 	if err == nil || !strings.Contains(err.Error(), "lock heartbeat failed") {
-		t.Fatalf("expected unlock error to be propagated by Clean, got %v", err)
+		t.Fatalf("expected unlock error to be propagated by Clean when history table still exists, got %v", err)
 	}
 	if !wrapped.unlockCalled {
 		t.Errorf("expected unlock to be called by Clean")

@@ -40,6 +40,10 @@ func isNotFoundError(err error) bool {
 	if status.Code(err) == codes.NotFound {
 		return true
 	}
+	var bqErr *bigquery.Error
+	if errors.As(err, &bqErr) && bqErr.Reason == "notFound" {
+		return true
+	}
 	return false
 }
 

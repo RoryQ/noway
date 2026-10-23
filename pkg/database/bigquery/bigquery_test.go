@@ -2232,6 +2232,16 @@ func TestIsNotFoundError(t *testing.T) {
 			err:      errors.New("dataset not found"),
 			expected: false,
 		},
+		{
+			name:     "bigquery.Error with Reason notFound",
+			err:      &bigquery.Error{Reason: "notFound", Message: "Not found: Table project:dataset.flyway_schema_history"},
+			expected: true,
+		},
+		{
+			name:     "bigquery.Error with different Reason",
+			err:      &bigquery.Error{Reason: "duplicate", Message: "Already Exists: Table project:dataset.flyway_schema_history"},
+			expected: false,
+		},
 	}
 
 	for _, tc := range tests {

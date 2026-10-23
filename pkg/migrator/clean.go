@@ -39,10 +39,15 @@ func (m *Migrator) Clean(ctx context.Context) (res *CleanResult, retErr error) {
 			return nil, fmt.Errorf("failed to acquire database lock for clean: %w", err)
 		}
 		defer func() {
-			if uErr := unlock(context.Background()); uErr != nil && retErr == nil {
-				_ = m.callbackRunner.Fire(ctx, "afterCleanError")
-				retErr = uErr
+			uErr := unlock(context.Background())
+			if uErr == nil || retErr != nil {
+				return
 			}
+			if exists, err := m.db.HistoryTableExists(ctx, defaultSchema, table); err == nil && !exists {
+				return // the lock row went with the table
+			}
+			_ = m.callbackRunner.Fire(ctx, "afterCleanError")
+			retErr = uErr
 		}()
 	}
 
