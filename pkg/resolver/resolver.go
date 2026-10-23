@@ -31,7 +31,6 @@ type ResolverConfig struct {
 	Separator          string   // default "__"
 	Suffixes           []string // default [".sql"]
 	Encoding           string   // default "UTF-8"
-	IgnoreMissingFiles     bool
 	FailOnMissingLocations bool
 	ValidateMigrationNaming bool
 	PlaceholderReplacement *bool
@@ -185,15 +184,20 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 			if cleanDir == "" {
 				cleanDir = "."
 			}
-			if _, statErr := fs.Stat(r.config.FS, cleanDir); statErr != nil {
+			statInfo, statErr := fs.Stat(r.config.FS, cleanDir)
+			if statErr != nil {
 				if os.IsNotExist(statErr) || errors.Is(statErr, fs.ErrNotExist) {
-					if !r.config.FailOnMissingLocations || r.config.IgnoreMissingFiles {
-						log.Printf("WARNING: migration location '%s' not found: %v", loc, statErr)
+					if !r.config.FailOnMissingLocations {
+						log.Printf("ERROR: migration location '%s' not found: %v", loc, statErr)
 						continue
 					}
 					return nil, fmt.Errorf("migration location does not exist: %s", loc)
 				}
 				return nil, fmt.Errorf("error accessing location '%s': %w", loc, statErr)
+			}
+			if !statInfo.IsDir() {
+				// Flyway skips locations that are files
+				continue
 			}
 			err := r.scanFS(r.config.FS, cleanLoc, result, seen)
 			if err != nil {
@@ -205,29 +209,24 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 		// Filesystem scan
 		info, err := os.Stat(cleanLoc)
 		if err != nil {
-			if !r.config.FailOnMissingLocations || r.config.IgnoreMissingFiles {
-				log.Printf("WARNING: migration directory '%s' does not exist", cleanLoc)
+			if !r.config.FailOnMissingLocations {
+				log.Printf("ERROR: migration directory '%s' does not exist", cleanLoc)
 				continue
 			}
-			// If location does not exist, return error unless IgnoreMissingFiles
 			if os.IsNotExist(err) {
 				return nil, fmt.Errorf("migration directory does not exist: %s", cleanLoc)
 			}
 			return nil, fmt.Errorf("error accessing migration directory '%s': %w", cleanLoc, err)
 		}
 
-		if info.IsDir() {
-			err := r.scanDir(cleanLoc, cleanLoc, result, seen)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			// Single file
-			scriptPath := info.Name()
-			err := r.processFile(filepath.Dir(cleanLoc), info.Name(), cleanLoc, scriptPath, result, seen)
-			if err != nil {
-				return nil, err
-			}
+		if !info.IsDir() {
+			// Flyway skips locations that are files
+			continue
+		}
+
+		err = r.scanDir(cleanLoc, cleanLoc, result, seen)
+		if err != nil {
+			return nil, err
 		}
 	}
 

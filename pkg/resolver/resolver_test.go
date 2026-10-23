@@ -1133,5 +1133,55 @@ func TestResolverCaseInsensitiveSuffix(t *testing.T) {
 	}
 }
 
+func TestResolver_MissingLocationsAndFileLocations(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"migrations/V1__init.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t1 (id INT64);\n"),
+		},
+		"some_file.sql": &fstest.MapFile{
+			Data: []byte("SELECT 1;\n"),
+		},
+	}
+
+	// 1. Missing location with FailOnMissingLocations = false succeeds
+	resMissing := NewResolver(ResolverConfig{
+		FS:                      mockFS,
+		Locations:               []string{"non_existent_folder"},
+		FailOnMissingLocations:  false,
+	})
+	resolved, err := resMissing.Resolve()
+	if err != nil {
+		t.Fatalf("expected missing location to be skipped when FailOnMissingLocations=false, got: %v", err)
+	}
+	if len(resolved.VersionedMigrations) != 0 {
+		t.Errorf("expected 0 migrations, got %d", len(resolved.VersionedMigrations))
+	}
+
+	// 2. Missing location with FailOnMissingLocations = true fails
+	resMissingFail := NewResolver(ResolverConfig{
+		FS:                      mockFS,
+		Locations:               []string{"non_existent_folder"},
+		FailOnMissingLocations:  true,
+	})
+	_, err = resMissingFail.Resolve()
+	if err == nil {
+		t.Fatalf("expected error when FailOnMissingLocations=true, got nil")
+	}
+
+	// 3. Location pointing to a regular file is skipped by Flyway
+	resFileLoc := NewResolver(ResolverConfig{
+		FS:                      mockFS,
+		Locations:               []string{"some_file.sql"},
+		FailOnMissingLocations:  true,
+	})
+	resolvedFile, err := resFileLoc.Resolve()
+	if err != nil {
+		t.Fatalf("expected file location to be skipped, got error: %v", err)
+	}
+	if len(resolvedFile.VersionedMigrations) != 0 {
+		t.Errorf("expected 0 migrations when location is a file, got %d", len(resolvedFile.VersionedMigrations))
+	}
+}
+
 
 

@@ -278,7 +278,6 @@ func TestChallengerM5_MissingFilesHandling(t *testing.T) {
 		res := NewResolver(ResolverConfig{
 			Locations:              []string{"/nonexistent/directory/path/here"},
 			FailOnMissingLocations: true,
-			IgnoreMissingFiles:     false,
 		})
 		_, err := res.Resolve()
 		if err == nil {
@@ -286,11 +285,10 @@ func TestChallengerM5_MissingFilesHandling(t *testing.T) {
 		}
 	})
 
-	t.Run("succeeds on non-existent directory when FailOnMissingLocations is false or IgnoreMissingFiles is true", func(t *testing.T) {
+	t.Run("succeeds on non-existent directory when FailOnMissingLocations is false", func(t *testing.T) {
 		res := NewResolver(ResolverConfig{
 			Locations:              []string{"/nonexistent/directory/path/here"},
 			FailOnMissingLocations: false,
-			IgnoreMissingFiles:     true,
 		})
 		resolved, err := res.Resolve()
 		if err != nil {
