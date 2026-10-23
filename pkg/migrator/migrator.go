@@ -869,6 +869,11 @@ func (m *Migrator) executeSQLMigration(
 		Success:       execErr == nil,
 	}
 
+	if execErr != nil {
+		_ = m.callbackRunner.Fire(ctx, "beforeEachMigrateError")
+		_ = m.callbackRunner.Fire(ctx, "afterEachMigrateError")
+	}
+
 	// Record in history table
 	if recErr := m.db.InsertHistory(ctx, schema, table, historyRec); recErr != nil {
 		if execErr == nil {
@@ -878,8 +883,6 @@ func (m *Migrator) executeSQLMigration(
 	}
 
 	if execErr != nil {
-		_ = m.callbackRunner.Fire(ctx, "beforeEachMigrateError")
-		_ = m.callbackRunner.Fire(ctx, "afterEachMigrateError")
 		return nil, execErr
 	}
 
@@ -1085,6 +1088,11 @@ func (m *Migrator) executeScriptMigration(
 		Success:       execErr == nil,
 	}
 
+	if execErr != nil {
+		_ = m.callbackRunner.Fire(ctx, "beforeEachMigrateError")
+		_ = m.callbackRunner.Fire(ctx, "afterEachMigrateError")
+	}
+
 	if recErr := m.db.InsertHistory(ctx, schema, table, historyRec); recErr != nil {
 		if execErr == nil {
 			return nil, fmt.Errorf("CRITICAL: script migration %s completed successfully, but failed to insert schema history record (%w). The database schema has been modified, but the migration is unrecorded in %s. Manual intervention is required: manually insert the missing history row into %s or revert the schema changes before running migrate again.", mig.Script, recErr, table, table)
@@ -1093,8 +1101,6 @@ func (m *Migrator) executeScriptMigration(
 	}
 
 	if execErr != nil {
-		_ = m.callbackRunner.Fire(ctx, "beforeEachMigrateError")
-		_ = m.callbackRunner.Fire(ctx, "afterEachMigrateError")
 		return nil, fmt.Errorf("script migration %s failed (exit %v): %w\nOutput:\n%s", mig.Script, execErr, execErr, string(output))
 	}
 
