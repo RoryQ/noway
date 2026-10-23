@@ -1136,4 +1136,18 @@ func TestSpannerInsertHistory_TruncatesLongDescriptionAndScript(t *testing.T) {
 	}
 }
 
+func TestSpannerEnsureHistoryTable_ConcurrentRaceSucceeds(t *testing.T) {
+	_, db := setupSpannerTestDB(t)
+	ctx := context.Background()
+
+	// First creation succeeds
+	if err := db.EnsureHistoryTable(ctx, "", "flyway_schema_history"); err != nil {
+		t.Fatalf("first EnsureHistoryTable failed: %v", err)
+	}
+
+	// Second creation simulates concurrent execution or re-run where table already exists
+	if err := db.EnsureHistoryTable(ctx, "", "flyway_schema_history"); err != nil {
+		t.Fatalf("second EnsureHistoryTable failed: %v", err)
+	}
+}
 

@@ -995,7 +995,13 @@ func (db *SpannerDatabase) EnsureHistoryTable(ctx context.Context, schema, table
 	ddl := db.HistoryTableDDL(schema, table)
 	ddl = strings.TrimSuffix(ddl, ";")
 
-	return db.ExecuteStatement(ctx, ddl)
+	if execErr := db.ExecuteStatement(ctx, ddl); execErr != nil {
+		if exists, checkErr := db.HistoryTableExists(ctx, schema, table); checkErr == nil && exists {
+			return nil
+		}
+		return execErr
+	}
+	return nil
 }
 
 // HistoryTableExists checks if the history table exists in Spanner.
