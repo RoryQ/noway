@@ -492,18 +492,25 @@ func (r *Resolver) scanDir(locRoot, dirPath string, result *ResolveResult, seen 
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() {
-			if strings.HasPrefix(entry.Name(), ".") {
-				continue
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		fullPath := filepath.Join(dirPath, entry.Name())
+		isDir := entry.IsDir()
+		if !isDir {
+			if fi, err := os.Stat(fullPath); err == nil && fi.IsDir() {
+				isDir = true
 			}
-			subPath := filepath.Join(dirPath, entry.Name())
-			if err := r.scanDir(locRoot, subPath, result, seen); err != nil {
+		}
+
+		if isDir {
+			if err := r.scanDir(locRoot, fullPath, result, seen); err != nil {
 				return err
 			}
 			continue
 		}
 
-		fullPath := filepath.Join(dirPath, entry.Name())
 		relPath, err := filepath.Rel(locRoot, fullPath)
 		if err != nil {
 			relPath = entry.Name()

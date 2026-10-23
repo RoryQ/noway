@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -1223,6 +1224,51 @@ func TestResolver_ValidateMigrationNaming_IgnoresHelperScripts(t *testing.T) {
 		t.Fatalf("expected error for invalid.sql, got: %v", err)
 	}
 }
+
+func TestResolver_DirectorySymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create real directory with a migration outside scanned location
+	realDir := filepath.Join(tmpDir, "real_target")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real dir: %v", err)
+	}
+	v1File := filepath.Join(realDir, "V1__init.sql")
+	if err := os.WriteFile(v1File, []byte("CREATE TABLE t1 (id INT64);\n"), 0644); err != nil {
+		t.Fatalf("failed to write V1 file: %v", err)
+	}
+
+	// Create scan directory with a symlink to realDir and a hidden symlink
+	scanDir := filepath.Join(tmpDir, "scan_root")
+	if err := os.MkdirAll(scanDir, 0755); err != nil {
+		t.Fatalf("failed to create scan dir: %v", err)
+	}
+
+	linkPath := filepath.Join(scanDir, "linked_migrations")
+	if err := os.Symlink(realDir, linkPath); err != nil {
+		t.Skipf("symlinks not supported on this OS/filesystem: %v", err)
+	}
+
+	hiddenLinkPath := filepath.Join(scanDir, ".hidden_linked_migrations")
+	_ = os.Symlink(realDir, hiddenLinkPath)
+
+	res := NewResolver(ResolverConfig{
+		Locations: []string{scanDir},
+	})
+
+	resolved, err := res.Resolve()
+	if err != nil {
+		t.Fatalf("failed to resolve directory with symlink: %v", err)
+	}
+
+	if len(resolved.VersionedMigrations) != 1 {
+		t.Fatalf("expected exactly 1 versioned migration from symlinked dir, got %d", len(resolved.VersionedMigrations))
+	}
+	if resolved.VersionedMigrations[0].Version.String() != "1" {
+		t.Errorf("expected version 1, got %s", resolved.VersionedMigrations[0].Version.String())
+	}
+}
+
 
 
 
