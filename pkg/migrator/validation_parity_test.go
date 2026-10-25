@@ -660,12 +660,12 @@ func TestMigrator_CherryPick_ConsecutiveRuns(t *testing.T) {
 		t.Fatalf("expected only V4 to be executed, got %+v", res2.ExecutedMigrations)
 	}
 
-	// 3. Third run: cherry-pick repeatable migration
+	// 3. Third run: cherry-pick repeatable migration by script name
 	cfg3 := config.NewDefaultConfiguration()
 	cfg3.DefaultSchema = "test_schema"
 	cfg3.FS = fs
 	cfg3.Locations = []string{"migrations"}
-	cfg3.CherryPick = []string{"view"}
+	cfg3.CherryPick = []string{"R__view.sql"}
 
 	m3, err := migrator.New(cfg3, db)
 	if err != nil {
@@ -677,6 +677,25 @@ func TestMigrator_CherryPick_ConsecutiveRuns(t *testing.T) {
 	}
 	if res3.MigrationsExecuted != 1 || res3.ExecutedMigrations[0].Description != "view" {
 		t.Fatalf("expected only R__view to be executed, got %+v", res3.ExecutedMigrations)
+	}
+
+	// 4. Fourth run: cherry-pick a LOWER version V2 when V3 and V4 are already applied and outOfOrder=false
+	cfg4 := config.NewDefaultConfiguration()
+	cfg4.DefaultSchema = "test_schema"
+	cfg4.FS = fs
+	cfg4.Locations = []string{"migrations"}
+	cfg4.CherryPick = []string{"2"}
+
+	m4, err := migrator.New(cfg4, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+	res4, err := m4.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("fourth Migrate (lower version cherry-pick) failed: %v", err)
+	}
+	if res4.MigrationsExecuted != 1 || res4.ExecutedMigrations[0].Version != "2" {
+		t.Fatalf("expected only V2 to be executed, got %+v", res4.ExecutedMigrations)
 	}
 }
 

@@ -265,7 +265,7 @@ func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*Validat
 			continue
 		}
 
-		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(app.Version, app.Description) {
+		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(app.Version, app.Description, app.Script) {
 			continue
 		}
 
@@ -399,7 +399,7 @@ func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*Validat
 		if res.Version == nil || res.Version.IsEmpty() {
 			continue
 		}
-		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(res.Version, res.Description) {
+		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(res.Version, res.Description, res.Script) {
 			continue
 		}
 		verKey := res.Version.Normalized()
@@ -426,9 +426,10 @@ func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*Validat
 		}
 
 		// Check if it's ignored or pending
+		ignoredIgnored := len(m.config.CherryPick) > 0 || m.config.IsIgnoredIgnored()
 		isIgnored := maxAppliedVersion != nil && maxAppliedVersion.IsNewerThan(*res.Version) && !m.config.OutOfOrder
 		if isIgnored {
-			if !m.isIgnored("ignored", res) {
+			if !ignoredIgnored && !m.isIgnored("ignored", res) {
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
 					Version:     res.Version,
@@ -453,7 +454,7 @@ func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*Validat
 
 	// Check for unapplied (pending / outdated) repeatable migrations
 	for _, res := range resolved.RepeatableMigrations {
-		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(nil, res.Description) {
+		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(nil, res.Description, res.Script) {
 			continue
 		}
 		if res.Config.ShouldExecute != "" {

@@ -463,18 +463,14 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 			found := false
 			singleCfg := config.Configuration{CherryPick: []string{cp}}
 			for _, res := range resolved.VersionedMigrations {
-				if singleCfg.IsPicked(res.Version, res.Description) {
+				if singleCfg.IsPicked(res.Version, res.Description, res.Script) {
 					found = true
 					break
 				}
 			}
 			if !found {
 				for _, res := range resolved.RepeatableMigrations {
-					key := res.Description
-					if key == "" {
-						key = res.Script
-					}
-					if singleCfg.IsPicked(nil, key) {
+					if singleCfg.IsPicked(nil, res.Description, res.Script) {
 						found = true
 						break
 					}
@@ -600,7 +596,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 
 		// Check cherryPick
 		if len(m.config.CherryPick) > 0 {
-			if !m.config.IsPicked(res.Version, res.Description) {
+			if !m.config.IsPicked(res.Version, res.Description, res.Script) {
 				continue
 			}
 		}
@@ -621,11 +617,7 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	// 9. Find pending / modified repeatable migrations
 	var pendingRepeatable []resolver.ResolvedMigration
 	for _, res := range resolved.RepeatableMigrations {
-		key := res.Description
-		if key == "" {
-			key = res.Script
-		}
-		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(nil, key) {
+		if len(m.config.CherryPick) > 0 && !m.config.IsPicked(nil, res.Description, res.Script) {
 			continue
 		}
 		lastRun, wasApplied := history.FindAppliedRepeatable(res)

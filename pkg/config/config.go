@@ -369,8 +369,8 @@ func (c *Configuration) ResolvedLocations() []string {
 // IsPicked checks whether a migration is selected by the cherryPick configuration.
 // If cherryPick is empty, all migrations are considered picked.
 // For versioned migrations (v != nil), it matches against version strings.
-// For repeatable migrations (v == nil), it matches against the migration description.
-func (c *Configuration) IsPicked(v *version.Version, description string) bool {
+// For repeatable migrations (v == nil), it matches against the migration description or script name.
+func (c *Configuration) IsPicked(v *version.Version, description string, script ...string) bool {
 	if len(c.CherryPick) == 0 {
 		return true
 	}
@@ -395,8 +395,19 @@ func (c *Configuration) IsPicked(v *version.Version, description string) bool {
 		if strings.EqualFold(cpTrim, description) {
 			return true
 		}
+		for _, s := range script {
+			if strings.EqualFold(cpTrim, s) || strings.EqualFold(cpTrim, filepath.Base(s)) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// IsIgnoredIgnored returns true if ignored migrations should be ignored during validation.
+// In Flyway, this is true if cherryPick is set, or if ignoreMigrationPatterns ignores "ignored" migrations.
+func (c *Configuration) IsIgnoredIgnored() bool {
+	return len(c.CherryPick) > 0 || c.MatchesPattern(true, "ignored")
 }
 
 // ValidatePattern represents a pattern for ignoring migrations during validation.
