@@ -80,7 +80,7 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 			case "oauthtype", "oauth_type":
 				num, err := strconv.Atoi(strings.TrimSpace(val))
 				if err != nil {
-					return nil, fmt.Errorf("invalid integer value %q for %s", val, key)
+					return nil, fmt.Errorf("invalid integer value for %s", key)
 				}
 				params.OAuthType = num
 				params.OAuthTypeSet = true
@@ -93,7 +93,7 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 			case "timeout":
 				num, err := strconv.Atoi(strings.TrimSpace(val))
 				if err != nil {
-					return nil, fmt.Errorf("invalid integer value %q for %s", val, key)
+					return nil, fmt.Errorf("invalid integer value for %s", key)
 				}
 				params.TimeoutSeconds = num
 			}
@@ -131,7 +131,7 @@ func ParseJDBCBigQueryURL(rawURL string) (*BigQueryConnectionParams, error) {
 		if ot := q.Get("oauthtype"); ot != "" {
 			num, err := strconv.Atoi(strings.TrimSpace(ot))
 			if err != nil {
-				return nil, fmt.Errorf("invalid integer value %q for oauthtype", ot)
+				return nil, fmt.Errorf("invalid integer value for oauthtype")
 			}
 			params.OAuthType = num
 			params.OAuthTypeSet = true
@@ -244,7 +244,7 @@ func ParseJDBCSpannerURL(rawURL string) (*SpannerConnectionParams, error) {
 			case "oauthtype", "oauth_type":
 				num, err := strconv.Atoi(strings.TrimSpace(v))
 				if err != nil {
-					return nil, fmt.Errorf("invalid integer value %q for %s", v, k)
+					return nil, fmt.Errorf("invalid integer value for %s", k)
 				}
 				params.OAuthType = num
 				params.OAuthTypeSet = true

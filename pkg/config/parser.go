@@ -612,7 +612,7 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "LOCK_RETRY_COUNT", "LOCKRETRYCOUNT":
 		n, err := strconv.Atoi(strings.TrimSpace(val))
 		if err != nil {
-			return fmt.Errorf("invalid integer value %q for %s", val, key)
+			return fmt.Errorf("invalid integer value for %s", key)
 		}
 		cfg.LockRetryCount = n
 	case "SCHEMAS":
@@ -757,7 +757,7 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "CONNECT_RETRIES", "CONNECTRETRIES":
 		n, err := strconv.Atoi(strings.TrimSpace(val))
 		if err != nil {
-			return fmt.Errorf("invalid integer value %q for %s", val, key)
+			return fmt.Errorf("invalid integer value for %s", key)
 		}
 		cfg.ConnectRetries = n
 	case "BASELINE_VERSION", "BASELINEVERSION":
@@ -789,7 +789,7 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "OAUTH_TYPE", "OAUTHTYPE", "GCP_OAUTH_TYPE", "GCPOAUTHTYPE":
 		num, err := strconv.Atoi(strings.TrimSpace(val))
 		if err != nil {
-			return fmt.Errorf("invalid integer value %q for %s", val, key)
+			return fmt.Errorf("invalid integer value for %s", key)
 		}
 		cfg.GCPOAuthType = &num
 	case "OAUTH_ACCESS_TOKEN", "OAUTHACCESSTOKEN", "GCP_ACCESS_TOKEN", "GCPACCESSTOKEN":
@@ -885,7 +885,7 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "lockretrycount", "lock_retry_count", "lock-retry-count":
 		n, err := strconv.Atoi(strings.TrimSpace(val))
 		if err != nil {
-			return fmt.Errorf("invalid integer value %q for %s", val, key)
+			return fmt.Errorf("invalid integer value for %s", key)
 		}
 		cfg.LockRetryCount = n
 	case "schemas":
@@ -1034,7 +1034,7 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "connectretries", "connect_retries", "connect-retries":
 		n, err := strconv.Atoi(strings.TrimSpace(val))
 		if err != nil {
-			return fmt.Errorf("invalid integer value %q for %s", val, key)
+			return fmt.Errorf("invalid integer value for %s", key)
 		}
 		cfg.ConnectRetries = n
 	case "baselineversion", "baseline_version", "baseline-version":
@@ -1066,7 +1066,7 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "oauthtype", "oauth_type", "oauth-type", "gcpoauthtype":
 		num, err := strconv.Atoi(strings.TrimSpace(val))
 		if err != nil {
-			return fmt.Errorf("invalid integer value %q for %s", val, key)
+			return fmt.Errorf("invalid integer value for %s", key)
 		}
 		cfg.GCPOAuthType = &num
 	case "oauthaccesstoken", "oauth_access_token", "oauth-access-token", "gcpaccesstoken":
@@ -1194,7 +1194,7 @@ func ParseBool(s string) (bool, error) {
 	if lower == "false" {
 		return false, nil
 	}
-	return false, fmt.Errorf("invalid boolean value %q: must be 'true' or 'false'", s)
+	return false, fmt.Errorf("invalid boolean value: must be 'true' or 'false'")
 }
 
 // KnownProperties lists canonical Flyway and Noway configuration property names.

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/earthboundkid/versioninfo/v2"
 	"github.com/roryq/noway"
@@ -138,7 +140,8 @@ func main() {
 	}
 	defer nw.Close()
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	switch strings.ToLower(cmd) {
 	case "migrate":

@@ -756,7 +756,7 @@ func (db *BigQueryDatabase) Lock(ctx context.Context, schema, table string) (dat
 
 	checkActiveLockSQL := fmt.Sprintf(`SELECT version FROM %s 
 	WHERE `+"`description`"+` = 'flyway-lock' 
-	ORDER BY `+"`installed_on`"+` ASC LIMIT 1`, tableName)
+	ORDER BY `+"`installed_on`"+` ASC, `+"`version`"+` ASC LIMIT 1`, tableName)
 
 	delSelfSQL := fmt.Sprintf("DELETE FROM %s WHERE `version` = @lock_id AND `description` = 'flyway-lock'", tableName)
 
