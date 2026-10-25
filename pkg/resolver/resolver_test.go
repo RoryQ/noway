@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/roryq/noway/pkg/checksum"
 	"github.com/roryq/noway/pkg/parser"
@@ -1266,6 +1267,50 @@ func TestResolver_DirectorySymlink(t *testing.T) {
 	}
 	if resolved.VersionedMigrations[0].Version.String() != "1" {
 		t.Errorf("expected version 1, got %s", resolved.VersionedMigrations[0].Version.String())
+	}
+}
+
+func TestResolver_SymlinkCycles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	loc := filepath.Join(tmpDir, "loc")
+	if err := os.MkdirAll(loc, 0755); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+
+	v1File := filepath.Join(loc, "V1__init.sql")
+	if err := os.WriteFile(v1File, []byte("CREATE TABLE t1 (id INT64);\n"), 0644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	// 1. One cycle link: loc/cycle1 -> loc
+	cycle1 := filepath.Join(loc, "cycle1")
+	if err := os.Symlink(loc, cycle1); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	// 2. Second cycle link: loc/cycle2 -> loc
+	cycle2 := filepath.Join(loc, "cycle2")
+	if err := os.Symlink(loc, cycle2); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	start := time.Now()
+	res := NewResolver(ResolverConfig{
+		Locations: []string{loc},
+	})
+	resolved, err := res.Resolve()
+	duration := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Resolve with symlink cycles failed: %v", err)
+	}
+	if duration > 1*time.Second {
+		t.Errorf("Resolve took too long with cycles: %v (expected < 1s)", duration)
+	}
+
+	if len(resolved.VersionedMigrations) != 1 {
+		t.Errorf("expected exactly 1 migration despite cycles, got %d", len(resolved.VersionedMigrations))
 	}
 }
 

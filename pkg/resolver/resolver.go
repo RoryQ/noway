@@ -239,7 +239,8 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 			continue
 		}
 
-		err = r.scanDir(cleanLoc, cleanLoc, result, seen)
+		visited := make(map[string]bool)
+		err = r.scanDir(cleanLoc, cleanLoc, result, seen, visited)
 		if err != nil {
 			return nil, err
 		}
@@ -485,7 +486,16 @@ func parseMigrationConfigFile(content string, cfg *MigrationConfig) {
 	}
 }
 
-func (r *Resolver) scanDir(locRoot, dirPath string, result *ResolveResult, seen *seenTracking) error {
+func (r *Resolver) scanDir(locRoot, dirPath string, result *ResolveResult, seen *seenTracking, visited map[string]bool) error {
+	real, err := filepath.EvalSymlinks(dirPath)
+	if err != nil {
+		return fmt.Errorf("error resolving directory '%s': %w", dirPath, err)
+	}
+	if visited[real] {
+		return nil // already scanned through another path, or a cycle
+	}
+	visited[real] = true
+
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return fmt.Errorf("error reading directory '%s': %w", dirPath, err)
@@ -505,7 +515,7 @@ func (r *Resolver) scanDir(locRoot, dirPath string, result *ResolveResult, seen 
 		}
 
 		if isDir {
-			if err := r.scanDir(locRoot, fullPath, result, seen); err != nil {
+			if err := r.scanDir(locRoot, fullPath, result, seen, visited); err != nil {
 				return err
 			}
 			continue
