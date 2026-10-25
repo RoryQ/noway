@@ -381,4 +381,27 @@ func TestValidatePatternParsingAndMatching(t *testing.T) {
 	}
 }
 
+func TestConfiguration_Finalize_Idempotent_ResolvedLocations(t *testing.T) {
+	cfg := NewDefaultConfiguration()
+	cfg.WorkingDirectory = "db"
+	cfg.Locations = []string{"filesystem:sql"}
+
+	for i := 0; i < 3; i++ {
+		if err := cfg.Finalize(); err != nil {
+			t.Fatalf("Finalize call %d failed: %v", i+1, err)
+		}
+	}
+
+	// Locations as given by the user must never be rewritten in place
+	if len(cfg.Locations) != 1 || cfg.Locations[0] != "filesystem:sql" {
+		t.Errorf("expected Locations to remain ['filesystem:sql'], got %v", cfg.Locations)
+	}
+
+	resolved := cfg.ResolvedLocations()
+	expected := "filesystem:" + filepath.Join("db", "sql")
+	if len(resolved) != 1 || resolved[0] != expected {
+		t.Errorf("expected ResolvedLocations [%s], got %v", expected, resolved)
+	}
+}
+
 

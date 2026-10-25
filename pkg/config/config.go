@@ -335,21 +335,6 @@ func (c *Configuration) Finalize() error {
 		return fmt.Errorf("invalid color '%s': must be 'always', 'never' or 'auto'", c.Color)
 	}
 
-	// Apply workingDirectory to relative locations if set
-	if c.WorkingDirectory != "" {
-		for i, loc := range c.Locations {
-			prefix := ""
-			p := loc
-			if strings.HasPrefix(loc, "filesystem:") {
-				prefix = "filesystem:"
-				p = strings.TrimPrefix(loc, "filesystem:")
-			}
-			if !filepath.IsAbs(p) {
-				c.Locations[i] = prefix + filepath.Join(c.WorkingDirectory, p)
-			}
-		}
-	}
-
 	if c.ScriptPlaceholderPrefix == "" {
 		c.ScriptPlaceholderPrefix = "FP__"
 	}
@@ -362,6 +347,23 @@ func (c *Configuration) Finalize() error {
 	}
 
 	return nil
+}
+
+// ResolvedLocations returns Locations with WorkingDirectory applied.
+// It does not change c, so it is safe to call any number of times.
+func (c *Configuration) ResolvedLocations() []string {
+	out := make([]string, len(c.Locations))
+	for i, loc := range c.Locations {
+		prefix, p := "", loc
+		if strings.HasPrefix(loc, "filesystem:") {
+			prefix, p = "filesystem:", strings.TrimPrefix(loc, "filesystem:")
+		}
+		if c.WorkingDirectory != "" && !filepath.IsAbs(p) {
+			p = filepath.Join(c.WorkingDirectory, p)
+		}
+		out[i] = prefix + p
+	}
+	return out
 }
 
 // IsPicked checks whether a migration is selected by the cherryPick configuration.
@@ -470,6 +472,11 @@ func (c *Configuration) GetDefaultSchema() string {
 
 // FindConfigFile looks for standard config files in current directory.
 func FindConfigFile() string {
+	return FindConfigFileIn("")
+}
+
+// FindConfigFileIn looks for standard config files in the specified directory.
+func FindConfigFileIn(dir string) string {
 	candidates := []string{
 		"flyway.conf",
 		"noway.conf",
@@ -483,8 +490,12 @@ func FindConfigFile() string {
 		"noway.json",
 	}
 	for _, f := range candidates {
-		if _, err := os.Stat(f); err == nil {
-			return f
+		target := f
+		if dir != "" {
+			target = filepath.Join(dir, f)
+		}
+		if _, err := os.Stat(target); err == nil {
+			return target
 		}
 	}
 	// Also check ~/.flyway/flyway.conf

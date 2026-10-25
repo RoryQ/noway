@@ -380,6 +380,24 @@ func TestParseCLIArgs_InvalidIntegersAndOAuthValidation(t *testing.T) {
 	}
 }
 
+func TestParseCLIArgs_WorkingDirectoryAndLocations(t *testing.T) {
+	cfg, err := parseCLIArgs([]string{"-workingDirectory=db", "-locations=filesystem:sql"})
+	if err != nil {
+		t.Fatalf("parseCLIArgs error: %v", err)
+	}
+	if cfg.WorkingDirectory != "db" {
+		t.Errorf("expected WorkingDirectory 'db', got %q", cfg.WorkingDirectory)
+	}
+	if len(cfg.Locations) != 1 || cfg.Locations[0] != "filesystem:sql" {
+		t.Errorf("expected user Locations ['filesystem:sql'], got %v", cfg.Locations)
+	}
+	resolved := cfg.ResolvedLocations()
+	expected := "filesystem:" + filepath.Join("db", "sql")
+	if len(resolved) != 1 || resolved[0] != expected {
+		t.Errorf("expected ResolvedLocations [%s], got %v", expected, resolved)
+	}
+}
+
 
 
 

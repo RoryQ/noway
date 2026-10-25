@@ -114,7 +114,7 @@ func New(in *config.Configuration, db database.Database) (*Migrator, error) {
 	}
 
 	res := resolver.NewResolver(resolver.ResolverConfig{
-		Locations:               cfg.Locations,
+		Locations:               cfg.ResolvedLocations(),
 		FS:                      cfg.FS,
 		Prefix:                  cfg.SQLMigrationPrefix,
 		RepeatablePrefix:        cfg.RepeatableSQLMigrationPrefix,

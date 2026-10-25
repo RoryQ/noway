@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -195,7 +196,7 @@ func main() {
 func parseCLIArgs(args []string) (*config.Configuration, error) {
 	cfg := config.NewDefaultConfiguration()
 
-	// 1. Check for configFile/configFiles and environment in args first
+	// 1. Check for workingDirectory, configFile/configFiles and environment in args first
 	var configFiles []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -207,6 +208,8 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 				configFiles = append(configFiles, splitAndTrimCLI(v, ",")...)
 			} else if k == "environment" || k == "env" {
 				cfg.Environment = v
+			} else if k == "workingdirectory" || k == "working-directory" || k == "working_directory" {
+				cfg.WorkingDirectory = v
 			}
 		} else if cleanLower := strings.ToLower(clean); cleanLower == "configfile" || cleanLower == "configfiles" || cleanLower == "config-file" || cleanLower == "config-files" {
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
@@ -218,6 +221,19 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 				cfg.Environment = args[i+1]
 				i++
 			}
+		} else if cleanLower == "workingdirectory" || cleanLower == "working-directory" || cleanLower == "working_directory" {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				cfg.WorkingDirectory = args[i+1]
+				i++
+			}
+		}
+	}
+
+	if cfg.WorkingDirectory == "" {
+		if envWD := os.Getenv("FLYWAY_WORKING_DIRECTORY"); envWD != "" {
+			cfg.WorkingDirectory = envWD
+		} else if envWD := os.Getenv("NOWAY_WORKING_DIRECTORY"); envWD != "" {
+			cfg.WorkingDirectory = envWD
 		}
 	}
 
@@ -230,10 +246,18 @@ func parseCLIArgs(args []string) (*config.Configuration, error) {
 	}
 
 	if len(configFiles) > 0 {
-		if err := config.LoadFromFilesInto(configFiles, cfg); err != nil {
+		resolvedConfigFiles := make([]string, len(configFiles))
+		for idx, cf := range configFiles {
+			if cfg.WorkingDirectory != "" && !filepath.IsAbs(cf) {
+				resolvedConfigFiles[idx] = filepath.Join(cfg.WorkingDirectory, cf)
+			} else {
+				resolvedConfigFiles[idx] = cf
+			}
+		}
+		if err := config.LoadFromFilesInto(resolvedConfigFiles, cfg); err != nil {
 			return nil, err
 		}
-	} else if autoConf := config.FindConfigFile(); autoConf != "" {
+	} else if autoConf := config.FindConfigFileIn(cfg.WorkingDirectory); autoConf != "" {
 		if err := config.LoadFromFilesInto([]string{autoConf}, cfg); err != nil {
 			return nil, err
 		}
