@@ -348,8 +348,8 @@ func TestValidatePatternParsingAndMatching(t *testing.T) {
 	if !vpPending.Matches(false, "pending") {
 		t.Errorf("expected *:pending to match pending repeatable")
 	}
-	if !vpPending.Matches(false, "outdated") {
-		t.Errorf("expected *:pending to match outdated repeatable")
+	if vpPending.Matches(false, "outdated") {
+		t.Errorf("expected *:pending NOT to match outdated in Matches (outdated is checked via IsPendingIgnored)")
 	}
 	if vpPending.Matches(true, "ignored") {
 		t.Errorf("expected *:pending NOT to match ignored")

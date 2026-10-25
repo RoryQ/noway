@@ -59,6 +59,9 @@ type SpannerDatabase struct {
 	// heartbeatAttemptInterceptor is an optional test hook called on each heartbeat attempt.
 	heartbeatAttemptInterceptor func() error
 
+	// testHookHistoryTableExistsFalseOnce is an optional test hook that makes HistoryTableExists return false once.
+	testHookHistoryTableExistsFalseOnce bool
+
 	activeLockMu  sync.Mutex
 	activeLockErr error
 
@@ -1006,6 +1009,11 @@ func (db *SpannerDatabase) EnsureHistoryTable(ctx context.Context, schema, table
 
 // HistoryTableExists checks if the history table exists in Spanner.
 func (db *SpannerDatabase) HistoryTableExists(ctx context.Context, schema, table string) (bool, error) {
+	if db.testHookHistoryTableExistsFalseOnce {
+		db.testHookHistoryTableExistsFalseOnce = false
+		return false, nil
+	}
+
 	tableName := table
 	if tableName == "" {
 		tableName = "flyway_schema_history"

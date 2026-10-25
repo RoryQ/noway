@@ -422,6 +422,9 @@ var validStates = map[string]bool{"*": true, "missing": true, "pending": true, "
 // ParseValidatePattern parses a pattern string of the form <migration_type>:<migration_state>.
 func ParseValidatePattern(p string) (ValidatePattern, error) {
 	parts := strings.Split(p, ":")
+	for len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
 	if len(parts) != 2 {
 		return ValidatePattern{}, fmt.Errorf("invalid pattern '%s': pattern must be of the form <migration_type>:<migration_state>", p)
 	}
@@ -438,7 +441,7 @@ func ParseValidatePattern(p string) (ValidatePattern, error) {
 
 // Matches returns whether the pattern matches the given migration type and state.
 func (v ValidatePattern) Matches(isVersioned bool, state string) bool {
-	matchedState := v.State == "*" || v.State == state || (v.State == "pending" && state == "outdated")
+	matchedState := v.State == "*" || v.State == state
 	if !matchedState {
 		return false
 	}
@@ -468,6 +471,35 @@ func (c *Configuration) MatchesPattern(isVersioned bool, state string) bool {
 func (c *Configuration) IsIgnored(state string, migType string, ver *version.Version) bool {
 	isVersioned := (ver != nil && !ver.IsEmpty()) || strings.EqualFold(migType, "versioned")
 	return c.MatchesPattern(isVersioned, strings.ToLower(strings.TrimSpace(state)))
+}
+
+// IsPendingIgnored returns true if pending migrations should be ignored.
+// In Flyway, this requires either *:pending (or *:*) or both versioned:pending and repeatable:pending.
+func (c *Configuration) IsPendingIgnored() bool {
+	patterns := c.ParsedIgnorePatterns
+	if len(patterns) == 0 && len(c.IgnoreMigrationPatterns) > 0 {
+		for _, p := range c.IgnoreMigrationPatterns {
+			if vp, err := ParseValidatePattern(p); err == nil {
+				patterns = append(patterns, vp)
+			}
+		}
+	}
+	hasVersioned := false
+	hasRepeatable := false
+	for _, p := range patterns {
+		if p.State == "*" || p.State == "pending" {
+			if p.Type == "*" {
+				return true
+			}
+			if p.Type == "versioned" {
+				hasVersioned = true
+			}
+			if p.Type == "repeatable" {
+				hasRepeatable = true
+			}
+		}
+	}
+	return hasVersioned && hasRepeatable
 }
 
 // GetDefaultSchema returns the effective default schema name.

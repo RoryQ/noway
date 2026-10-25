@@ -58,43 +58,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	var cmd string
-	var options []string
-
-	// First pass: identify any known command name
-	for _, arg := range os.Args[1:] {
-		if cmd == "" && validCommands[strings.ToLower(arg)] {
-			cmd = strings.ToLower(arg)
-		} else {
-			options = append(options, arg)
-		}
-	}
-
-	if cmd == "" {
-		for _, arg := range options {
-			clean := strings.ToLower(strings.TrimLeft(arg, "-"))
-			if clean == "version" || clean == "v" {
-				cmd = "version"
-				break
-			}
-			if clean == "help" || clean == "h" || clean == "?" {
-				cmd = "help"
-				break
-			}
-		}
-	}
-
-	if cmd == "" {
-		newOptions := make([]string, 0, len(options))
-		for _, arg := range options {
-			if cmd == "" && !strings.HasPrefix(arg, "-") {
-				cmd = arg
-			} else {
-				newOptions = append(newOptions, arg)
-			}
-		}
-		options = newOptions
-	}
+	cmd, options := extractCommandAndOptions(os.Args[1:])
 
 	if cmd == "" {
 		printHelp()
@@ -195,6 +159,49 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ERROR: Unknown command '%s'. Valid commands: migrate, info, validate, baseline, repair, clean, undo, version\n", cmd)
 		os.Exit(1)
 	}
+}
+
+func extractCommandAndOptions(rawArgs []string) (string, []string) {
+	var cmd string
+	var options []string
+
+	for i := 0; i < len(rawArgs); i++ {
+		arg := rawArgs[i]
+		if strings.HasPrefix(arg, "-") {
+			options = append(options, arg)
+			clean := strings.ToLower(strings.TrimLeft(arg, "-"))
+			if clean == "x" || clean == "q" || clean == "v" || clean == "version" || clean == "h" || clean == "help" || clean == "?" || clean == "skipcheckforupdate" || clean == "communityfallback" {
+				continue
+			}
+			// If not -flag=val, the next argument is the flag's value
+			if !strings.Contains(arg, "=") && i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "-") {
+				options = append(options, rawArgs[i+1])
+				i++
+			}
+		} else {
+			if cmd == "" {
+				cmd = strings.ToLower(arg)
+			} else {
+				options = append(options, arg)
+			}
+		}
+	}
+
+	if cmd == "" {
+		for _, arg := range options {
+			clean := strings.ToLower(strings.TrimLeft(arg, "-"))
+			if clean == "version" || clean == "v" {
+				cmd = "version"
+				break
+			}
+			if clean == "help" || clean == "h" || clean == "?" {
+				cmd = "help"
+				break
+			}
+		}
+	}
+
+	return cmd, options
 }
 
 func parseCLIArgs(args []string) (*config.Configuration, error) {

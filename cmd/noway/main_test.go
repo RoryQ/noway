@@ -414,6 +414,35 @@ func TestParseCLIArgs_FailOnMissingLocationsAndValidateMigrationNaming(t *testin
 	}
 }
 
+func TestExtractCommandAndOptions(t *testing.T) {
+	// 1. -schemas info migrate -> command is "migrate", options are ["-schemas", "info"]
+	cmd, opts := extractCommandAndOptions([]string{"-schemas", "info", "migrate"})
+	if cmd != "migrate" {
+		t.Errorf("expected command 'migrate', got %q", cmd)
+	}
+	if len(opts) != 2 || opts[0] != "-schemas" || opts[1] != "info" {
+		t.Errorf("expected options ['-schemas', 'info'], got %v", opts)
+	}
+
+	// 2. migrate -schemas info -> command is "migrate"
+	cmd, opts = extractCommandAndOptions([]string{"migrate", "-schemas", "info"})
+	if cmd != "migrate" {
+		t.Errorf("expected command 'migrate', got %q", cmd)
+	}
+	if len(opts) != 2 || opts[0] != "-schemas" || opts[1] != "info" {
+		t.Errorf("expected options ['-schemas', 'info'], got %v", opts)
+	}
+
+	// 3. -v -> command is "version"
+	cmd, opts = extractCommandAndOptions([]string{"-v"})
+	if cmd != "version" {
+		t.Errorf("expected command 'version', got %q", cmd)
+	}
+	if len(opts) != 1 || opts[0] != "-v" {
+		t.Errorf("expected options ['-v'], got %v", opts)
+	}
+}
+
 
 
 

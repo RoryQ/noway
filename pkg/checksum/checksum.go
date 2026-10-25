@@ -81,6 +81,40 @@ func CalculateString(s string) (int64, error) {
 	return Calculate(strings.NewReader(s))
 }
 
+// CalculatePreservingBOM calculates CRC32 checksum line by line without stripping any BOM.
+// Used when the input stream or string has already had its single BOM stripped (e.g. by decodeContent).
+func CalculatePreservingBOM(r io.Reader) (int64, error) {
+	scanner := bufio.NewScanner(r)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+	scanner.Split(scanLinesAnyNL)
+
+	crc := crc32.NewIEEE()
+	hasLines := false
+
+	for scanner.Scan() {
+		hasLines = true
+		line := scanner.Text()
+		crc.Write([]byte(line))
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+
+	if !hasLines {
+		return 0, nil
+	}
+
+	val := int32(crc.Sum32())
+	return int64(val), nil
+}
+
+// CalculateStringPreservingBOM calculates CRC32 checksum for a string without stripping any BOM.
+func CalculateStringPreservingBOM(s string) (int64, error) {
+	return CalculatePreservingBOM(strings.NewReader(s))
+}
+
 // CalculateBytes calculates the checksum for byte slice.
 func CalculateBytes(b []byte) (int64, error) {
 	return Calculate(bytes.NewReader(b))

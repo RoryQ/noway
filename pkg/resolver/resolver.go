@@ -451,7 +451,7 @@ func decodeContent(rawData []byte, encodingName string) (string, error) {
 		}
 		text = string(decoded)
 	}
-	// For every encoding, strip leading BOM before checksum and SQL execution
+	// Strip leading BOM (Flyway strips one BOM when reading from file)
 	text = strings.TrimPrefix(text, "\uFEFF")
 	return text, nil
 }
@@ -544,10 +544,6 @@ func (r *Resolver) scanDir(locRoot, dirPath string, result *ResolveResult, seen 
 	}
 
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-
 		fullPath := filepath.Join(dirPath, entry.Name())
 		isDir := entry.IsDir()
 		if !isDir {
@@ -557,6 +553,9 @@ func (r *Resolver) scanDir(locRoot, dirPath string, result *ResolveResult, seen 
 		}
 
 		if isDir {
+			if strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
 			if err := r.scanDir(locRoot, fullPath, result, seen, visited); err != nil {
 				return err
 			}
@@ -586,7 +585,13 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		isDir := d.IsDir()
+		if !isDir && (d.Type()&fs.ModeSymlink != 0) {
+			if fi, err := fs.Stat(fileSys, path); err == nil && fi.IsDir() {
+				isDir = true
+			}
+		}
+		if isDir {
 			if path != cleanDir && strings.HasPrefix(d.Name(), ".") {
 				return fs.SkipDir
 			}
@@ -611,7 +616,8 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 
 		data, err := fs.ReadFile(fileSys, path)
 		if err != nil {
-			return fmt.Errorf("error reading file '%s': %w", path, err)
+			slog.Warn(fmt.Sprintf("skipping unreadable file '%s': %v", path, err))
+			return nil
 		}
 
 		dir := filepath.Dir(path)
@@ -642,14 +648,15 @@ func (r *Resolver) processFile(dir, filename, fullPath, scriptPath string, resul
 
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
-		return fmt.Errorf("error reading file '%s': %w", fullPath, err)
+		slog.Warn(fmt.Sprintf("skipping unreadable file '%s': %v", fullPath, err))
+		return nil
 	}
 
 	return r.parseAndAddMigration(dir, filename, fullPath, scriptPath, data, nil, result, seen)
 }
 
 func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, isRepeatable bool, isScript bool, filename string) (int64, *int64, error) {
-	rawCs, err := checksum.CalculateString(content)
+	rawCs, err := checksum.CalculateStringPreservingBOM(content)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -684,7 +691,7 @@ func (r *Resolver) calculateChecksum(content string, migConfig MigrationConfig, 
 			calcContent = replaced
 		}
 	}
-	cs, err := checksum.CalculateString(calcContent)
+	cs, err := checksum.CalculateStringPreservingBOM(calcContent)
 	if err != nil {
 		return 0, nil, err
 	}

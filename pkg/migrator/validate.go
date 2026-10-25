@@ -227,6 +227,20 @@ func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*Validat
 		appliedVersions[verKey] = true
 	}
 
+	// Track latest applied repeatable rank per description to validate only the latest row (older are superseded)
+	latestRepeatableRank := make(map[string]int)
+	for _, app := range history.Records {
+		if (app.Version == nil || app.Version.IsEmpty()) && app.Type != "DELETE" {
+			key := app.Description
+			if key == "" {
+				key = app.Script
+			}
+			if app.InstalledRank > latestRepeatableRank[key] {
+				latestRepeatableRank[key] = app.InstalledRank
+			}
+		}
+	}
+
 	// Check each applied migration
 	for _, app := range history.Records {
 		if !app.Success {
@@ -330,6 +344,14 @@ func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*Validat
 			}
 		} else {
 			// Feature 14: Repeatable migration validation
+			key := app.Description
+			if key == "" {
+				key = app.Script
+			}
+			if latestRank, ok := latestRepeatableRank[key]; ok && app.InstalledRank < latestRank {
+				continue
+			}
+
 			// Match by description first, fallback to script
 			res, found := resolvedRepeatableByDesc[app.Description]
 			if !found {
@@ -434,7 +456,7 @@ func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*Validat
 					Version:     res.Version,
 					Description: res.Description,
 					File:        res.Script,
-					Message:     fmt.Sprintf("Detected resolved migration not applied to database: %s", res.Version),
+					Message:     fmt.Sprintf("Detected resolved migration not applied to database: %s. To fix this error, either run migrate, or set -ignoreMigrationPatterns='*:pending'.", res.Version),
 				})
 			}
 		}
@@ -476,7 +498,7 @@ func (m *Migrator) validate(ctx context.Context, opts validateOptions) (*Validat
 				})
 			}
 		} else if app.Checksum != nil && !res.ChecksumMatches(app.Checksum) {
-			if !ignorePendingArg && !m.isIgnored("pending", res) {
+			if !ignorePendingArg && !m.config.IsPendingIgnored() {
 				result.Valid = false
 				result.Errors = append(result.Errors, ValidationError{
 					Version:     nil,

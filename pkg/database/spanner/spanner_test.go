@@ -1145,6 +1145,10 @@ func TestSpannerEnsureHistoryTable_ConcurrentRaceSucceeds(t *testing.T) {
 		t.Fatalf("first EnsureHistoryTable failed: %v", err)
 	}
 
+	// Trigger hook so HistoryTableExists returns false initially,
+	// forcing EnsureHistoryTable to attempt DDL and run the retry branch when DDL fails
+	db.testHookHistoryTableExistsFalseOnce = true
+
 	// Second creation simulates concurrent execution or re-run where table already exists
 	if err := db.EnsureHistoryTable(ctx, "", "flyway_schema_history"); err != nil {
 		t.Fatalf("second EnsureHistoryTable failed: %v", err)

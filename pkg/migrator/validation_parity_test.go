@@ -848,14 +848,27 @@ func TestValidate_PendingAndOutdatedRepeatableMigrations(t *testing.T) {
 		t.Fatalf("expected outdated repeatable to be ignored by *:pending, got: %v", err)
 	}
 
-	// Repeatable:pending also ignores outdated repeatable
+	// In Flyway, repeatable:pending alone does NOT ignore outdated repeatables (only *:pending or both versioned:pending and repeatable:pending do)
 	cfgRepeatablePending := *cfg
 	cfgRepeatablePending.IgnoreMigrationPatterns = []string{"repeatable:pending"}
 	cfgRepeatablePending.IgnoreMigrationPatternsExplicitlySet = true
 	mRepeatablePending, _ := migrator.New(&cfgRepeatablePending, db)
 	valResRepIgnored, err := mRepeatablePending.Validate(ctx)
-	if err != nil || !valResRepIgnored.Valid {
-		t.Fatalf("expected outdated repeatable to be ignored by repeatable:pending, got: %v", err)
+	if err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+	if valResRepIgnored.Valid {
+		t.Fatalf("expected repeatable:pending alone NOT to ignore outdated repeatable")
+	}
+
+	// But both versioned:pending and repeatable:pending DO ignore outdated repeatables
+	cfgBothPending := *cfg
+	cfgBothPending.IgnoreMigrationPatterns = []string{"versioned:pending", "repeatable:pending"}
+	cfgBothPending.IgnoreMigrationPatternsExplicitlySet = true
+	mBothPending, _ := migrator.New(&cfgBothPending, db)
+	valResBoth, err := mBothPending.Validate(ctx)
+	if err != nil || !valResBoth.Valid {
+		t.Fatalf("expected both versioned:pending,repeatable:pending to ignore outdated repeatable, got: %v", err)
 	}
 
 	// 4. Migrate re-runs outdated repeatable
