@@ -1079,6 +1079,18 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 		cfg.GCPSpannerDatabaseID = val
 	case "spannerendpoint", "spanner_endpoint", "spanner-endpoint", "gcpspannerendpoint":
 		cfg.GCPSpannerEndpoint = val
+	case "emulator", "useemulator", "use_emulator", "use-emulator", "gcpuseemulator", "gcp_use_emulator", "gcp-use-emulator":
+		b, err := ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("invalid boolean value for %s (expected true or false)", key)
+		}
+		cfg.GCPUseEmulator = b
+	case "emulatorallowremote", "emulator_allow_remote", "emulator-allow-remote", "gcpemulatorallowremote", "gcp_emulator_allow_remote", "gcp-emulator-allow-remote":
+		b, err := ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("invalid boolean value for %s (expected true or false)", key)
+		}
+		cfg.GCPEmulatorAllowRemote = b
 	case "configfile", "configfiles", "config-file", "config-files":
 		// skip
 	case "workingdirectory", "working_directory", "working-directory":

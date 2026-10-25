@@ -187,8 +187,11 @@ func TestSpannerConfAndEnv(t *testing.T) {
 	if cfg.GCPSpannerDatabaseID != "env-db" {
 		t.Errorf("expected GCPSpannerDatabaseID 'env-db', got %q", cfg.GCPSpannerDatabaseID)
 	}
-	if cfg.GCPSpannerEndpoint != "localhost:9010" {
-		t.Errorf("expected GCPSpannerEndpoint 'localhost:9010', got %q", cfg.GCPSpannerEndpoint)
+	if !cfg.GCPUseEmulator {
+		t.Errorf("expected GCPUseEmulator true, got false")
+	}
+	if cfg.GCPSpannerEndpoint != "" {
+		t.Errorf("expected GCPSpannerEndpoint to remain empty (not copied from env), got %q", cfg.GCPSpannerEndpoint)
 	}
 }
 

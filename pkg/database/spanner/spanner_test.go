@@ -2,6 +2,7 @@ package spanner
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1152,6 +1153,41 @@ func TestSpannerEnsureHistoryTable_ConcurrentRaceSucceeds(t *testing.T) {
 	// Second creation simulates concurrent execution or re-run where table already exists
 	if err := db.EnsureHistoryTable(ctx, "", "flyway_schema_history"); err != nil {
 		t.Fatalf("second EnsureHistoryTable failed: %v", err)
+	}
+}
+
+func TestSpannerEndpointAndEmulatorSplit(t *testing.T) {
+	// 1. Explicit endpoint does not set SPANNER_EMULATOR_HOST
+	t.Setenv("SPANNER_EMULATOR_HOST", "")
+	cfg := config.NewDefaultConfiguration()
+	cfg.GCPProjectID = "test-proj"
+	cfg.GCPSpannerInstanceID = "test-inst"
+	cfg.GCPSpannerDatabaseID = "test-db"
+	cfg.GCPSpannerEndpoint = "spanner.p.googleapis.com:443"
+
+	_, _ = New(context.Background(), cfg)
+	if env := os.Getenv("SPANNER_EMULATOR_HOST"); env != "" {
+		t.Errorf("expected SPANNER_EMULATOR_HOST not to be set by New, got %q", env)
+	}
+
+	// 2. Emulator mode refuses non-loopback host
+	cfgRemote := config.NewDefaultConfiguration()
+	cfgRemote.GCPProjectID = "test-proj"
+	cfgRemote.GCPSpannerInstanceID = "test-inst"
+	cfgRemote.GCPSpannerDatabaseID = "test-db"
+	cfgRemote.GCPUseEmulator = true
+	cfgRemote.GCPSpannerEndpoint = "attacker.com:9010"
+
+	_, err := New(context.Background(), cfgRemote)
+	if err == nil || !strings.Contains(err.Error(), "refusing Spanner emulator connection to non-loopback host") {
+		t.Fatalf("expected error refusing remote emulator host, got: %v", err)
+	}
+
+	// 3. With GCPEmulatorAllowRemote=true, remote host is permitted
+	cfgRemote.GCPEmulatorAllowRemote = true
+	_, err = New(context.Background(), cfgRemote)
+	if err != nil && strings.Contains(err.Error(), "refusing Spanner emulator connection") {
+		t.Fatalf("did not expect refusal when GCPEmulatorAllowRemote=true, got: %v", err)
 	}
 }
 

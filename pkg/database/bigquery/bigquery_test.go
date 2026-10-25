@@ -2361,6 +2361,26 @@ func TestIsConflictError(t *testing.T) {
 	}
 }
 
+func TestBigQueryEndpointAndEmulatorSplit(t *testing.T) {
+	// 1. Emulator mode refuses non-loopback host when allow remote is false
+	cfgRemote := config.NewDefaultConfiguration()
+	cfgRemote.GCPProjectID = "test-proj"
+	cfgRemote.GCPUseEmulator = true
+	cfgRemote.GCPBigQueryEndpoint = "http://attacker.com:9050/"
+
+	_, err := New(context.Background(), cfgRemote)
+	if err == nil || !strings.Contains(err.Error(), "refusing BigQuery emulator connection to non-loopback host") {
+		t.Fatalf("expected error refusing remote emulator host, got: %v", err)
+	}
+
+	// 2. With GCPEmulatorAllowRemote=true, remote host is permitted
+	cfgRemote.GCPEmulatorAllowRemote = true
+	_, err = New(context.Background(), cfgRemote)
+	if err != nil && strings.Contains(err.Error(), "refusing BigQuery emulator connection") {
+		t.Fatalf("did not expect refusal when GCPEmulatorAllowRemote=true, got: %v", err)
+	}
+}
+
 
 
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"sort"
@@ -18,7 +19,9 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/roryq/noway/pkg/config"
@@ -120,16 +123,25 @@ func New(ctx context.Context, cfg *config.Configuration) (*SpannerDatabase, erro
 
 	var opts []option.ClientOption
 
-	endpoint := cfg.GCPSpannerEndpoint
-	if endpoint == "" {
-		endpoint = os.Getenv("SPANNER_EMULATOR_HOST")
-	}
-
-	if endpoint != "" {
-		// Emulator connection
-		_ = os.Setenv("SPANNER_EMULATOR_HOST", endpoint)
-		opts = append(opts, option.WithEndpoint(endpoint), option.WithoutAuthentication())
-	} else {
+	switch {
+	case cfg.GCPUseEmulator:
+		host := cfg.GCPSpannerEndpoint
+		if host == "" {
+			host = os.Getenv("SPANNER_EMULATOR_HOST")
+		}
+		if host == "" {
+			host = "localhost:9010"
+		}
+		if !cfg.GCPEmulatorAllowRemote && !database.IsLoopbackHost(host) {
+			return nil, fmt.Errorf("refusing Spanner emulator connection to non-loopback host %q without emulatorAllowRemote=true", host)
+		}
+		slog.Warn("Spanner emulator mode: no TLS and no authentication", "host", host)
+		opts = append(opts, option.WithEndpoint(host), option.WithoutAuthentication(),
+			option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
+	default:
+		if cfg.GCPSpannerEndpoint != "" {
+			opts = append(opts, option.WithEndpoint(cfg.GCPSpannerEndpoint))
+		}
 		if cfg.GCPCredentialsJSON != "" {
 			opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
 		} else if cfg.GCPCredentialsFile != "" {

@@ -123,9 +123,13 @@ type Configuration struct {
 	GCPAccessToken        string `json:"gcpAccessToken" yaml:"gcpAccessToken" toml:"gcpAccessToken"`
 
 	// Cloud Spanner Specific Connection Overrides
-	GCPSpannerInstanceID  string `json:"gcpSpannerInstanceId" yaml:"gcpSpannerInstanceId" toml:"gcpSpannerInstanceId"`
-	GCPSpannerDatabaseID  string `json:"gcpSpannerDatabaseId" yaml:"gcpSpannerDatabaseId" toml:"gcpSpannerDatabaseId"`
-	GCPSpannerEndpoint    string `json:"gcpSpannerEndpoint" yaml:"gcpSpannerEndpoint" toml:"gcpSpannerEndpoint"`
+	GCPSpannerInstanceID   string `json:"gcpSpannerInstanceId" yaml:"gcpSpannerInstanceId" toml:"gcpSpannerInstanceId"`
+	GCPSpannerDatabaseID   string `json:"gcpSpannerDatabaseId" yaml:"gcpSpannerDatabaseId" toml:"gcpSpannerDatabaseId"`
+	GCPSpannerEndpoint     string `json:"gcpSpannerEndpoint" yaml:"gcpSpannerEndpoint" toml:"gcpSpannerEndpoint"`
+
+	// Emulator Settings
+	GCPUseEmulator         bool   `json:"gcpUseEmulator" yaml:"gcpUseEmulator" toml:"gcpUseEmulator"`
+	GCPEmulatorAllowRemote bool   `json:"gcpEmulatorAllowRemote" yaml:"gcpEmulatorAllowRemote" toml:"gcpEmulatorAllowRemote"`
 }
 
 // NewDefaultConfiguration returns standard Flyway defaults.
@@ -227,14 +231,10 @@ func (c *Configuration) Finalize() error {
 			c.GCPCredentialsFile = envKey
 		}
 	}
-	if c.GCPBigQueryEndpoint == "" {
-		if envEndpoint := os.Getenv("BIGQUERY_EMULATOR_HOST"); envEndpoint != "" {
-			c.GCPBigQueryEndpoint = envEndpoint
-		}
-	}
-	if c.GCPSpannerEndpoint == "" {
-		if envEndpoint := os.Getenv("SPANNER_EMULATOR_HOST"); envEndpoint != "" {
-			c.GCPSpannerEndpoint = envEndpoint
+	// Emulator detection: environment variables opt-in to emulator mode
+	if !c.GCPUseEmulator {
+		if os.Getenv("BIGQUERY_EMULATOR_HOST") != "" || os.Getenv("SPANNER_EMULATOR_HOST") != "" {
+			c.GCPUseEmulator = true
 		}
 	}
 	if c.GCPSpannerInstanceID == "" {

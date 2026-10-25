@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
@@ -103,11 +104,18 @@ func New(ctx context.Context, cfg *config.Configuration) (*BigQueryDatabase, err
 
 	var opts []option.ClientOption
 
-	endpoint := cfg.GCPBigQueryEndpoint
-	if endpoint == "" {
-		endpoint = os.Getenv("BIGQUERY_EMULATOR_HOST")
-	}
-	if endpoint != "" {
+	switch {
+	case cfg.GCPUseEmulator:
+		endpoint := cfg.GCPBigQueryEndpoint
+		if endpoint == "" {
+			endpoint = os.Getenv("BIGQUERY_EMULATOR_HOST")
+		}
+		if endpoint == "" {
+			endpoint = "http://localhost:9050/"
+		}
+		if !cfg.GCPEmulatorAllowRemote && !database.IsLoopbackHost(endpoint) {
+			return nil, fmt.Errorf("refusing BigQuery emulator connection to non-loopback host %q without emulatorAllowRemote=true", endpoint)
+		}
 		if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
 			endpoint = "http://" + endpoint
 		}
@@ -117,37 +125,52 @@ func New(ctx context.Context, cfg *config.Configuration) (*BigQueryDatabase, err
 		if !strings.Contains(endpoint, "/bigquery/v2/") {
 			endpoint += "bigquery/v2/"
 		}
+		slog.Warn("BigQuery emulator mode: no authentication", "endpoint", endpoint)
 		opts = append(opts, option.WithEndpoint(endpoint), option.WithoutAuthentication())
-	} else if cfg.GCPAccessToken != "" && (cfg.GCPOAuthType == nil || *cfg.GCPOAuthType != 2) {
-		return nil, fmt.Errorf("OAuthAccessToken is only valid when OAuthType is 2")
-	} else if cfg.GCPOAuthType != nil {
-		switch *cfg.GCPOAuthType {
-		case 0:
-			// Service Account: requires private key file or JSON
+	default:
+		if cfg.GCPBigQueryEndpoint != "" {
+			ep := cfg.GCPBigQueryEndpoint
+			if !strings.HasPrefix(ep, "http://") && !strings.HasPrefix(ep, "https://") {
+				ep = "https://" + ep
+			}
+			if !strings.HasSuffix(ep, "/") {
+				ep += "/"
+			}
+			if !strings.Contains(ep, "/bigquery/v2/") {
+				ep += "bigquery/v2/"
+			}
+			opts = append(opts, option.WithEndpoint(ep))
+		}
+		if cfg.GCPAccessToken != "" && (cfg.GCPOAuthType == nil || *cfg.GCPOAuthType != 2) {
+			return nil, fmt.Errorf("OAuthAccessToken is only valid when OAuthType is 2")
+		} else if cfg.GCPOAuthType != nil {
+			switch *cfg.GCPOAuthType {
+			case 0:
+				// Service Account: requires private key file or JSON
+				if cfg.GCPCredentialsJSON != "" {
+					opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
+				} else if cfg.GCPCredentialsFile != "" {
+					opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
+				} else {
+					return nil, fmt.Errorf("OAuthType=0 requires OAuthPvtKeyPath (service account key file)")
+				}
+			case 2:
+				// AccessToken: requires access token
+				if cfg.GCPAccessToken == "" {
+					return nil, fmt.Errorf("OAuthType=2 requires OAuthAccessToken")
+				}
+				opts = append(opts, option.WithTokenSource(oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.GCPAccessToken})))
+			case 3:
+				// ADC: Application Default Credentials
+			default:
+				return nil, fmt.Errorf("unsupported or incomplete OAuthType=%d: required credentials not provided", *cfg.GCPOAuthType)
+			}
+		} else {
 			if cfg.GCPCredentialsJSON != "" {
 				opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
 			} else if cfg.GCPCredentialsFile != "" {
 				opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
-			} else {
-				return nil, fmt.Errorf("OAuthType=0 requires OAuthPvtKeyPath (service account key file)")
 			}
-		case 2:
-			// AccessToken: requires access token
-			if cfg.GCPAccessToken == "" {
-				return nil, fmt.Errorf("OAuthType=2 requires OAuthAccessToken")
-			}
-			opts = append(opts, option.WithTokenSource(oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.GCPAccessToken})))
-		case 3:
-			// ADC: Application Default Credentials
-			// Default Google API client behavior without credential options uses ADC.
-		default:
-			return nil, fmt.Errorf("unsupported or incomplete OAuthType=%d: required credentials not provided", *cfg.GCPOAuthType)
-		}
-	} else {
-		if cfg.GCPCredentialsJSON != "" {
-			opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
-		} else if cfg.GCPCredentialsFile != "" {
-			opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
 		}
 	}
 
