@@ -6,10 +6,17 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/roryq/noway/pkg/version"
+)
+
+var (
+	bigQueryDatasetRegex = regexp.MustCompile(`^[A-Za-z0-9_]{1,1000}$`)
+	bigQueryTableRegex   = regexp.MustCompile(`^[A-Za-z0-9_\-\s\p{L}]{1,1000}$`)
+	spannerIdentRegex    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
 )
 
 // Clone returns a deep copy that shares no slices, maps, or mutable pointer values with c.
@@ -271,6 +278,37 @@ func (c *Configuration) Finalize() error {
 	} else if c.GCPDataset != "" {
 		c.DefaultSchema = c.GCPDataset
 		c.Schemas = []string{c.GCPDataset}
+	}
+
+	// Validate database identifiers
+	isSpanner := strings.EqualFold(c.Driver, "cloudspanner") || strings.EqualFold(c.Driver, "spanner") || IsSpannerURL(c.URL)
+	if isSpanner {
+		if c.Table != "" && !spannerIdentRegex.MatchString(c.Table) {
+			return fmt.Errorf("invalid table name %q for Cloud Spanner", c.Table)
+		}
+		if c.DefaultSchema != "" && c.DefaultSchema != "default" && !spannerIdentRegex.MatchString(c.DefaultSchema) {
+			return fmt.Errorf("invalid schema name %q for Cloud Spanner", c.DefaultSchema)
+		}
+		for _, s := range c.Schemas {
+			if s != "" && s != "default" && !spannerIdentRegex.MatchString(s) {
+				return fmt.Errorf("invalid schema name %q for Cloud Spanner", s)
+			}
+		}
+	} else {
+		// BigQuery
+		if c.Table != "" {
+			if !bigQueryTableRegex.MatchString(c.Table) || strings.ContainsAny(c.Table, "`\\\n\r\t") {
+				return fmt.Errorf("invalid table name %q for BigQuery", c.Table)
+			}
+		}
+		if c.DefaultSchema != "" && !bigQueryDatasetRegex.MatchString(c.DefaultSchema) {
+			return fmt.Errorf("invalid defaultSchema name %q for BigQuery", c.DefaultSchema)
+		}
+		for _, s := range c.Schemas {
+			if s != "" && !bigQueryDatasetRegex.MatchString(s) {
+				return fmt.Errorf("invalid schema name %q for BigQuery", s)
+			}
+		}
 	}
 
 	// Target version parsing

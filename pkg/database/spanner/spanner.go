@@ -199,14 +199,15 @@ func (db *SpannerDatabase) instancePath() string {
 	return fmt.Sprintf("projects/%s/instances/%s", db.projectID, db.instanceID)
 }
 
-// Quote quotes an identifier with backticks.
+// Quote quotes an identifier with backticks, escaping internal backslashes and backticks.
 func (db *SpannerDatabase) Quote(identifiers ...string) string {
 	quoted := make([]string, 0, len(identifiers))
 	for _, id := range identifiers {
 		if id == "" || id == "default" {
 			continue
 		}
-		escaped := strings.ReplaceAll(id, "`", "\\`")
+		escaped := strings.ReplaceAll(id, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, "`", "\\`")
 		quoted = append(quoted, "`"+escaped+"`")
 	}
 	if len(quoted) == 0 {

@@ -43,9 +43,9 @@ func TestQuote(t *testing.T) {
 			expected: "`myschema`.`users`",
 		},
 		{
-			name:     "escaping backticks",
-			input:    []string{"my`table"},
-			expected: "`my\\`table`",
+			name:     "escaping backticks and backslashes",
+			input:    []string{"my\\`table"},
+			expected: "`my\\\\\\`table`",
 		},
 		{
 			name:     "skip empty or default schema",

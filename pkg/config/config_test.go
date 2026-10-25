@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -404,6 +405,41 @@ func TestConfiguration_Finalize_Idempotent_ResolvedLocations(t *testing.T) {
 	expected := "filesystem:" + filepath.Join("db", "sql")
 	if len(resolved) != 1 || resolved[0] != expected {
 		t.Errorf("expected ResolvedLocations [%s], got %v", expected, resolved)
+	}
+}
+
+func TestIdentifierValidation(t *testing.T) {
+	// BigQuery invalid schema
+	cfgBQ := NewDefaultConfiguration()
+	cfgBQ.Driver = "bigquery"
+	cfgBQ.DefaultSchema = "bad-schema; DROP TABLE x; --"
+	if err := cfgBQ.Finalize(); err == nil || !strings.Contains(err.Error(), "invalid defaultSchema name") {
+		t.Errorf("expected error for invalid BigQuery schema, got: %v", err)
+	}
+
+	// BigQuery invalid table
+	cfgBQTable := NewDefaultConfiguration()
+	cfgBQTable.Driver = "bigquery"
+	cfgBQTable.Table = "table`with`backtick"
+	if err := cfgBQTable.Finalize(); err == nil || !strings.Contains(err.Error(), "invalid table name") {
+		t.Errorf("expected error for invalid BigQuery table with backtick, got: %v", err)
+	}
+
+	// Spanner invalid table
+	cfgSpanner := NewDefaultConfiguration()
+	cfgSpanner.Driver = "cloudspanner"
+	cfgSpanner.Table = "123invalid_table"
+	if err := cfgSpanner.Finalize(); err == nil || !strings.Contains(err.Error(), "invalid table name") {
+		t.Errorf("expected error for invalid Spanner table starting with digit, got: %v", err)
+	}
+
+	// Spanner valid identifiers
+	cfgSpannerValid := NewDefaultConfiguration()
+	cfgSpannerValid.Driver = "cloudspanner"
+	cfgSpannerValid.Table = "flyway_schema_history"
+	cfgSpannerValid.DefaultSchema = "valid_schema"
+	if err := cfgSpannerValid.Finalize(); err != nil {
+		t.Errorf("expected valid Spanner config to succeed, got: %v", err)
 	}
 }
 

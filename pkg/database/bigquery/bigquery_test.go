@@ -34,6 +34,7 @@ func TestQuote(t *testing.T) {
 		{[]string{"dataset"}, "`dataset`"},
 		{[]string{"dataset", "table"}, "`dataset`.`table`"},
 		{[]string{"my`dataset", "my`table"}, "`my\\`dataset`.`my\\`table`"},
+		{[]string{"my\\`dataset", "my\\`table"}, "`my\\\\\\`dataset`.`my\\\\\\`table`"},
 		{[]string{"project", "dataset", "table"}, "`project`.`dataset`.`table`"},
 	}
 

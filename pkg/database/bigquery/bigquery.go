@@ -194,11 +194,12 @@ func (db *BigQueryDatabase) Close() error {
 	return nil
 }
 
-// Quote quotes an identifier with backticks, escaping internal backticks with \`.
+// Quote quotes an identifier with backticks, escaping internal backslashes and backticks.
 func (db *BigQueryDatabase) Quote(identifiers ...string) string {
 	quoted := make([]string, len(identifiers))
 	for i, id := range identifiers {
-		escaped := strings.ReplaceAll(id, "`", "\\`")
+		escaped := strings.ReplaceAll(id, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, "`", "\\`")
 		quoted[i] = "`" + escaped + "`"
 	}
 	return strings.Join(quoted, ".")
