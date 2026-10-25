@@ -216,6 +216,20 @@ flyway.cleanDisabled=true
 In standard Flyway SQL migrations, there is no escape syntax for placeholders (`${...}` is always evaluated as a placeholder).
 As an extension, `noway` supports `$${placeholder}` escaping in SQL migrations, which outputs a literal `${placeholder}` without substitution or error if undefined. (Note: script migrations use Flyway's standard environment variables and do not perform escape parsing).
 
+### Script Migrations & Callbacks Environment
+
+Script migrations (`.sh`, `.bash`, `.cmd`, `.ps1`, `.bat`, `.py`) and script callbacks inherit the parent environment (e.g. `PATH`, `HOME`, GCP application credentials) along with standard Flyway environment variables:
+- `FLYWAY_URL`: database JDBC or connection URL
+- `FLYWAY_USER`: configured database user or current user
+- `FLYWAY_PASSWORD`: configured database password
+- `FLYWAY_DATABASE`: database or schema name
+- `FLYWAY_DEFAULT_SCHEMA`: default schema name
+- `FLYWAY_SCHEMAS`: comma-separated list of configured schemas
+- `FLYWAY_TABLE`: schema history table name
+- `FLYWAY_OPERATION`: current operation (`MIGRATE`, `VALIDATE`, `INFO`, `BASELINE`, `REPAIR`, `UNDO`, `CLEAN`)
+- `FP__<placeholder>`: each configured placeholder exposed with `FP__` prefix (and suffix `__` if configured)
+
+
 ---
 
 ## License

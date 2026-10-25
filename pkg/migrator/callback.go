@@ -195,7 +195,6 @@ func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.
 	setIfNotEmpty("FLYWAY_USER", cbUserIfKnown)
 	setIfNotEmpty("NOWAY_USER", cbUserIfKnown)
 	setIfNotEmpty("FLYWAY_PASSWORD", c.config.Password)
-	setIfNotEmpty("NOWAY_PASSWORD", c.config.Password)
 
 	setIfNotEmpty("FLYWAY_OPERATION", op)
 	setIfNotEmpty("NOWAY_OPERATION", op)

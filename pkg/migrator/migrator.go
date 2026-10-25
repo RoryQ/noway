@@ -989,7 +989,6 @@ func (m *Migrator) executeScriptMigration(
 	setIfNotEmpty("FLYWAY_USER", userIfKnown)
 	setIfNotEmpty("NOWAY_USER", userIfKnown)
 	setIfNotEmpty("FLYWAY_PASSWORD", m.config.Password)
-	setIfNotEmpty("NOWAY_PASSWORD", m.config.Password)
 
 	setIfNotEmpty("FLYWAY_DATABASE", schema)
 	setIfNotEmpty("NOWAY_DATABASE", schema)
