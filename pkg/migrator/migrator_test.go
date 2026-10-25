@@ -1717,3 +1717,63 @@ func TestStandaloneClean_PropagatesUnlockErrorWhenTableExists(t *testing.T) {
 	}
 }
 
+func TestScriptMigration_RelativeLocationRunsCorrectScriptNotPlanted(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working dir: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	sqlDir := filepath.Join(tmpDir, "sql")
+	if err := os.MkdirAll(sqlDir, 0755); err != nil {
+		t.Fatalf("failed to create sqlDir: %v", err)
+	}
+
+	outPath := filepath.Join(tmpDir, "result.txt")
+
+	// The migration in sql/V1__rel.sh
+	realScript := filepath.Join(sqlDir, "V1__rel.sh")
+	if err := os.WriteFile(realScript, []byte(fmt.Sprintf("#!/bin/bash\necho CORRECT > %s\nexit 0\n", outPath)), 0755); err != nil {
+		t.Fatalf("failed to write real script: %v", err)
+	}
+
+	// Callback that plants sql/sql/V1__rel.sh after resolution but before migration execution
+	cbScript := filepath.Join(sqlDir, "beforeEachMigrate.sh")
+	cbContent := fmt.Sprintf("#!/bin/bash\nmkdir -p sql/sql\necho \"#!/bin/bash\necho PLANTED > %s\nexit 0\n\" > sql/sql/V1__rel.sh\nchmod 755 sql/sql/V1__rel.sh\nexit 0\n", outPath)
+	if err := os.WriteFile(cbScript, []byte(cbContent), 0755); err != nil {
+		t.Fatalf("failed to write callback script: %v", err)
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.Locations = []string{"filesystem:sql"} // relative location
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if res.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+
+	outData, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if strings.TrimSpace(string(outData)) != "CORRECT" {
+		t.Errorf("expected output 'CORRECT', got %q (planted script ran instead!)", string(outData))
+	}
+}
+

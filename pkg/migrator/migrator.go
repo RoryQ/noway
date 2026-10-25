@@ -953,23 +953,21 @@ func (m *Migrator) executeScriptMigration(
 
 	slog.Debug("Executing script migration", "script", mig.Script, "path", scriptPath)
 
-	var cmd *exec.Cmd
-	switch filepath.Ext(scriptPath) {
-	case ".cmd", ".bat":
-		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", scriptPath)
-	case ".ps1":
-		cmd = exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
-	case ".py":
-		cmd = exec.CommandContext(ctx, "python3", scriptPath)
-	default:
-		cmd = exec.CommandContext(ctx, "/bin/bash", scriptPath)
+	absScriptPath, err := filepath.Abs(scriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving script path %s: %w", scriptPath, err)
 	}
 
-	if mig.PhysicalLocation != "" {
-		dir := filepath.Dir(mig.PhysicalLocation)
-		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-			cmd.Dir = dir
-		}
+	var cmd *exec.Cmd
+	switch filepath.Ext(absScriptPath) {
+	case ".cmd", ".bat":
+		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", absScriptPath)
+	case ".ps1":
+		cmd = exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-File", absScriptPath)
+	case ".py":
+		cmd = exec.CommandContext(ctx, "python3", absScriptPath)
+	default:
+		cmd = exec.CommandContext(ctx, "/bin/bash", absScriptPath)
 	}
 
 	env := os.Environ()
