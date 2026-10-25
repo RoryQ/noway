@@ -225,6 +225,9 @@ func (m *MockDatabase) FetchHistory(ctx context.Context, schema, table string) (
 }
 
 func (m *MockDatabase) InsertHistory(ctx context.Context, schema, table string, record database.HistoryRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/roryq/noway/pkg/config"
 	"github.com/roryq/noway/pkg/database"
@@ -73,9 +74,16 @@ func (c *CallbackRunner) Fire(ctx context.Context, event string) error {
 		return nil
 	}
 
+	execCtx := ctx
+	if strings.HasSuffix(event, "Error") {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+	}
+
 	for _, cb := range scripts {
 		if isScriptFile(cb.Filename) {
-			if err := c.executeScriptCallback(ctx, cb, event); err != nil {
+			if err := c.executeScriptCallback(execCtx, cb, event); err != nil {
 				return err
 			}
 			continue
@@ -92,7 +100,7 @@ func (c *CallbackRunner) Fire(ctx context.Context, event string) error {
 
 		stmts := c.parser.SplitStatements(sql)
 		for _, stmt := range stmts {
-			if err := c.db.ExecuteStatement(ctx, stmt.SQL); err != nil {
+			if err := c.db.ExecuteStatement(execCtx, stmt.SQL); err != nil {
 				return fmt.Errorf("error executing callback '%s' statement (line %d): %w", cb.Filename, stmt.LineNumber, err)
 			}
 		}

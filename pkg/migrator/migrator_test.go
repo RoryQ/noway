@@ -1838,3 +1838,87 @@ func TestMigrate_EmbeddedScript_NotHijackedByDiskFile(t *testing.T) {
 	}
 }
 
+type cancelOnStmtDatabase struct {
+	database.Database
+	cancelFn    context.CancelFunc
+	targetSubstr string
+}
+
+func (c *cancelOnStmtDatabase) ExecuteStatement(ctx context.Context, sql string) error {
+	if strings.Contains(sql, c.targetSubstr) && c.cancelFn != nil {
+		c.cancelFn()
+	}
+	return c.Database.ExecuteStatement(ctx, sql)
+}
+
+func TestMigrate_ContextCancelledSavesHistoryAndHaltsAtBoundary(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__first.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t1 (id INT64);"),
+		},
+		"sql/V2__second.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE t2 (id INT64);"),
+		},
+		"sql/afterMigrateError.sql": &fstest.MapFile{
+			Data: []byte("CREATE TABLE err_marker (id INT64);"),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"sql"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseDB := mock.NewMockDatabase()
+	wrappedDB := &cancelOnStmtDatabase{
+		Database:     baseDB,
+		cancelFn:     cancel,
+		targetSubstr: "CREATE TABLE t1",
+	}
+
+	m, err := New(cfg, wrappedDB)
+	if err != nil {
+		t.Fatalf("failed to create Migrator: %v", err)
+	}
+
+	_, err = m.Migrate(ctx)
+	if err == nil || !strings.Contains(err.Error(), "migration cancelled") {
+		t.Fatalf("expected migration to halt with cancellation error, got %v", err)
+	}
+
+	// 1. V1 history row MUST exist despite ctx cancellation during execution
+	history, err := baseDB.FetchHistory(context.Background(), "test_ds", cfg.Table)
+	if err != nil {
+		t.Fatalf("failed to fetch history: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected exactly 1 recorded migration in history, got %d", len(history))
+	}
+	if history[0].Script != "V1__first.sql" || !history[0].Success {
+		t.Errorf("expected V1 to be recorded successfully, got %+v", history[0])
+	}
+
+	// 2. afterMigrateError must have fired with non-cancelled context
+	stmts := baseDB.ExecutedStatements()
+	foundErrMarker := false
+	for _, s := range stmts {
+		if strings.Contains(s, "err_marker") {
+			foundErrMarker = true
+			break
+		}
+	}
+	if !foundErrMarker {
+		t.Errorf("expected afterMigrateError to execute err_marker statement, executed stmts: %v", stmts)
+	}
+
+	// 3. V2 must not have been executed
+	for _, s := range stmts {
+		if strings.Contains(s, "CREATE TABLE t2") {
+			t.Errorf("V2 statement was executed despite cancellation!")
+		}
+	}
+}
+

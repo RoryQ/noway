@@ -669,6 +669,12 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 
 	// 10. Execute Versioned Migrations
 	for _, mig := range pendingVersioned {
+		if err := ctx.Err(); err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+			result.Success = false
+			return result, fmt.Errorf("migration cancelled: %w", err)
+		}
+
 		if mig.Config.ShouldExecute != "" {
 			shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
 			if err != nil {
@@ -706,6 +712,12 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 	// 11. Execute Repeatable Migrations
 	firedBeforeRepeatables := false
 	for _, mig := range pendingRepeatable {
+		if err := ctx.Err(); err != nil {
+			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
+			result.Success = false
+			return result, fmt.Errorf("migration cancelled: %w", err)
+		}
+
 		if mig.Config.ShouldExecute != "" {
 			shouldExec, err := resolver.EvaluateShouldExecute(mig.Config.ShouldExecute, m.replacer, m.builtins)
 			if err != nil {
@@ -872,7 +884,10 @@ func (m *Migrator) executeSQLMigration(
 	}
 
 	// Record in history table
-	if recErr := m.db.InsertHistory(ctx, schema, table, historyRec); recErr != nil {
+	histCtx, histCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	recErr := m.db.InsertHistory(histCtx, schema, table, historyRec)
+	histCancel()
+	if recErr != nil {
 		if execErr == nil {
 			return nil, fmt.Errorf("CRITICAL: migration %s SQL statements succeeded, but failed to insert schema history record (%w). The database schema has been modified, but the migration is unrecorded in %s. Manual intervention is required: manually insert the missing history row into %s or revert the schema changes before running migrate again.", mig.Script, recErr, table, table)
 		}
@@ -1065,7 +1080,10 @@ func (m *Migrator) executeScriptMigration(
 		_ = m.callbackRunner.Fire(ctx, "afterEachMigrateError")
 	}
 
-	if recErr := m.db.InsertHistory(ctx, schema, table, historyRec); recErr != nil {
+	histCtx, histCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	recErr := m.db.InsertHistory(histCtx, schema, table, historyRec)
+	histCancel()
+	if recErr != nil {
 		if execErr == nil {
 			return nil, fmt.Errorf("CRITICAL: script migration %s completed successfully, but failed to insert schema history record (%w). The database schema has been modified, but the migration is unrecorded in %s. Manual intervention is required: manually insert the missing history row into %s or revert the schema changes before running migrate again.", mig.Script, recErr, table, table)
 		}

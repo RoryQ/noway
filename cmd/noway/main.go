@@ -55,16 +55,20 @@ var validCommands = map[string]bool{
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	if len(os.Args) < 2 {
 		printHelp()
-		os.Exit(1)
+		return 1
 	}
 
 	cmd, options := extractCommandAndOptions(os.Args[1:])
 
 	if cmd == "" {
 		printHelp()
-		os.Exit(1)
+		return 1
 	}
 
 	if cmd == "version" || cmd == "-version" || cmd == "--version" || cmd == "-v" {
@@ -82,22 +86,22 @@ func main() {
 			}
 			data, _ := json.MarshalIndent(out, "", "  ")
 			fmt.Println(string(data))
-			return
+			return 0
 		}
 		printBanner()
-		return
+		return 0
 	}
 
 	if cmd == "help" || cmd == "-help" || cmd == "--help" || cmd == "-h" || cmd == "-?" {
 		printHelp()
-		return
+		return 0
 	}
 
 	// Parse command-line flags and properties
 	cfg, err := parseCLIArgs(options)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	level := slog.LevelInfo
@@ -112,15 +116,16 @@ func main() {
 
 	if err := cfg.Finalize(); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.OutputFile != "" {
 		f, err := os.OpenFile(cfg.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: failed to open output file '%s': %v\n", cfg.OutputFile, err)
-			os.Exit(1)
+			return 1
 		}
+		_ = f.Chmod(0o600)
 		defer f.Close()
 		os.Stdout = f
 	}
@@ -133,34 +138,38 @@ func main() {
 	if err != nil {
 		if cfg.OutputType == "json" {
 			outputJSONError(err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer nw.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop() // restore default handling; the next Ctrl-C kills the process immediately
+	}()
 	defer stop()
 
 	switch strings.ToLower(cmd) {
 	case "migrate":
-		runMigrate(ctx, nw, cfg)
+		return runMigrate(ctx, nw, cfg)
 	case "info":
-		runInfo(ctx, nw, cfg)
+		return runInfo(ctx, nw, cfg)
 	case "validate":
-		runValidate(ctx, nw, cfg)
+		return runValidate(ctx, nw, cfg)
 	case "baseline":
-		runBaseline(ctx, nw, cfg)
+		return runBaseline(ctx, nw, cfg)
 	case "repair":
-		runRepair(ctx, nw, cfg)
+		return runRepair(ctx, nw, cfg)
 	case "clean":
-		runClean(ctx, nw, cfg)
+		return runClean(ctx, nw, cfg)
 	case "undo":
-		runUndo(ctx, nw, cfg)
+		return runUndo(ctx, nw, cfg)
 	default:
 		fmt.Fprintf(os.Stderr, "ERROR: Unknown command '%s'. Valid commands: migrate, info, validate, baseline, repair, clean, undo, version\n", cmd)
-		os.Exit(1)
+		return 1
 	}
 }
 
@@ -387,7 +396,7 @@ func outputJSONError(err error) {
 	fmt.Println(string(data))
 }
 
-func runMigrate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
+func runMigrate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) int {
 	if cfg.OutputType != "json" {
 		fmt.Printf("Database: %s\n", cfg.GCPProjectID)
 		fmt.Printf("Schema: %s\n", cfg.GetDefaultSchema())
@@ -398,16 +407,16 @@ func runMigrate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration)
 	if err != nil {
 		if cfg.OutputType == "json" {
 			outputJSONError(err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.OutputType == "json" {
 		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
-		return
+		return 0
 	}
 
 	if res.MigrationsExecuted == 0 {
@@ -420,91 +429,95 @@ func runMigrate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration)
 		fmt.Printf("Successfully applied %d migration(s) to schema `%s` (total time: %dms), now at version v%s\n",
 			res.MigrationsExecuted, cfg.GetDefaultSchema(), res.TotalExecutionTime, res.TargetVersion)
 	}
+	return 0
 }
 
-func runInfo(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
+func runInfo(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) int {
 	res, err := nw.Info(ctx)
 	if err != nil {
 		if cfg.OutputType == "json" {
 			outputJSONError(err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.OutputType == "json" {
 		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
-		return
+		return 0
 	}
 
 	res.RenderTable(os.Stdout)
+	return 0
 }
 
-func runValidate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
+func runValidate(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) int {
 	res, err := nw.Validate(ctx)
 	if err != nil {
 		if cfg.OutputType == "json" {
 			outputJSONError(err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.OutputType == "json" {
 		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
 		if !res.Valid {
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 
 	if res.Valid {
 		fmt.Println("Successfully validated all applied migrations (0 errors).")
+		return 0
 	} else {
 		fmt.Fprintln(os.Stderr, res.Error())
-		os.Exit(1)
+		return 1
 	}
 }
 
-func runBaseline(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
+func runBaseline(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) int {
 	res, err := nw.Baseline(ctx)
 	if err != nil {
 		if cfg.OutputType == "json" {
 			outputJSONError(err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.OutputType == "json" {
 		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
-		return
+		return 0
 	}
 
 	fmt.Printf("Successfully baselined schema `%s` with version %s (%s)\n", res.Schema, res.BaselineVersion, res.BaselineDescription)
+	return 0
 }
 
-func runRepair(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
+func runRepair(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) int {
 	res, err := nw.Repair(ctx)
 	if err != nil {
 		if cfg.OutputType == "json" {
 			outputJSONError(err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.OutputType == "json" {
 		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
-		return
+		return 0
 	}
 
 	if len(res.RemovedFailed) > 0 {
@@ -518,48 +531,51 @@ func runRepair(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) 
 		}
 	}
 	fmt.Println("Successfully repaired schema history table.")
+	return 0
 }
 
-func runClean(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
+func runClean(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) int {
 	res, err := nw.Clean(ctx)
 	if err != nil {
 		if cfg.OutputType == "json" {
 			outputJSONError(err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.OutputType == "json" {
 		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
-		return
+		return 0
 	}
 
 	for _, s := range res.SchemasCleaned {
 		fmt.Printf("Successfully cleaned schema `%s` (all objects dropped).\n", s)
 	}
+	return 0
 }
 
-func runUndo(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) {
+func runUndo(ctx context.Context, nw *noway.Noway, cfg *config.Configuration) int {
 	res, err := nw.Undo(ctx)
 	if err != nil {
 		if cfg.OutputType == "json" {
 			outputJSONError(err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.OutputType == "json" {
 		data, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(data))
-		return
+		return 0
 	}
 
 	fmt.Printf("Successfully undone migration version %s (%s) in %dms\n", res.UndoneVersion, res.Script, res.ExecutionTime)
+	return 0
 }
 
 func printHelp() {
