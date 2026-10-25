@@ -124,7 +124,7 @@ func New(ctx context.Context, cfg *config.Configuration) (*SpannerDatabase, erro
 	var opts []option.ClientOption
 
 	switch {
-	case cfg.GCPUseEmulator:
+	case cfg.GCPSpannerUseEmulator || cfg.GCPUseEmulator:
 		host := cfg.GCPSpannerEndpoint
 		if host == "" {
 			host = os.Getenv("SPANNER_EMULATOR_HOST")

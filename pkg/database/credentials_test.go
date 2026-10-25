@@ -49,6 +49,24 @@ func TestCredentialOptions(t *testing.T) {
 		t.Fatalf("expected 1 option for OAuthType=2 with token, got %v (err: %v)", opts2, err)
 	}
 
+	// Token provided without OAuthType defaults to OAuthType=2
+	cfgTokenDef := config.NewDefaultConfiguration()
+	cfgTokenDef.GCPAccessToken = "secret-token"
+	optsTokenDef, err := database.CredentialOptions(cfgTokenDef)
+	if err != nil || len(optsTokenDef) != 1 {
+		t.Fatalf("expected token without OAuthType to resolve as OAuthType=2, got %v (err: %v)", optsTokenDef, err)
+	}
+
+	// Token provided with OAuthType=3 must fail
+	cfgTokenO3 := config.NewDefaultConfiguration()
+	o3Token := 3
+	cfgTokenO3.GCPOAuthType = &o3Token
+	cfgTokenO3.GCPAccessToken = "secret-token"
+	_, err = database.CredentialOptions(cfgTokenO3)
+	if err == nil || !strings.Contains(err.Error(), "OAuthAccessToken is only valid with OAuthType=2") {
+		t.Fatalf("expected error for token with OAuthType=3, got: %v", err)
+	}
+
 	// 3. OAuthType=3 (ADC) rejects explicit credentials
 	cfg3 := config.NewDefaultConfiguration()
 	o3 := 3

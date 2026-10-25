@@ -188,11 +188,40 @@ func TestSpannerConfAndEnv(t *testing.T) {
 	if cfg.GCPSpannerDatabaseID != "env-db" {
 		t.Errorf("expected GCPSpannerDatabaseID 'env-db', got %q", cfg.GCPSpannerDatabaseID)
 	}
-	if !cfg.GCPUseEmulator {
-		t.Errorf("expected GCPUseEmulator true, got false")
+	if !cfg.GCPSpannerUseEmulator {
+		t.Errorf("expected GCPSpannerUseEmulator true, got false")
+	}
+	if cfg.GCPBigQueryUseEmulator {
+		t.Errorf("expected GCPBigQueryUseEmulator false when only SPANNER_EMULATOR_HOST is set")
 	}
 	if cfg.GCPSpannerEndpoint != "" {
 		t.Errorf("expected GCPSpannerEndpoint to remain empty (not copied from env), got %q", cfg.GCPSpannerEndpoint)
+	}
+}
+
+func TestEmulatorSettingsSeparation(t *testing.T) {
+	t.Setenv("BIGQUERY_EMULATOR_HOST", "localhost:9050")
+	t.Setenv("SPANNER_EMULATOR_HOST", "")
+
+	cfgBQ := NewDefaultConfiguration()
+	if err := cfgBQ.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+	if !cfgBQ.GCPBigQueryUseEmulator {
+		t.Errorf("expected GCPBigQueryUseEmulator true")
+	}
+	if cfgBQ.GCPSpannerUseEmulator {
+		t.Errorf("expected GCPSpannerUseEmulator false when only BIGQUERY_EMULATOR_HOST is set")
+	}
+
+	// Spanner JDBC URL with AutoConfigEmulator
+	cfgJDBC := NewDefaultConfiguration()
+	cfgJDBC.URL = "jdbc:cloudspanner://localhost:9010/projects/p/instances/i/databases/d?autoConfigEmulator=true;usePlainText=true"
+	if err := cfgJDBC.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+	if !cfgJDBC.GCPSpannerUseEmulator {
+		t.Errorf("expected AutoConfigEmulator in JDBC URL to set GCPSpannerUseEmulator")
 	}
 }
 

@@ -104,7 +104,7 @@ func New(ctx context.Context, cfg *config.Configuration) (*BigQueryDatabase, err
 	var opts []option.ClientOption
 
 	switch {
-	case cfg.GCPUseEmulator:
+	case cfg.GCPBigQueryUseEmulator || cfg.GCPUseEmulator:
 		endpoint := cfg.GCPBigQueryEndpoint
 		if endpoint == "" {
 			endpoint = os.Getenv("BIGQUERY_EMULATOR_HOST")

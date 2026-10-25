@@ -136,6 +136,8 @@ type Configuration struct {
 
 	// Emulator Settings
 	GCPUseEmulator         bool   `json:"gcpUseEmulator" yaml:"gcpUseEmulator" toml:"gcpUseEmulator"`
+	GCPBigQueryUseEmulator bool   `json:"gcpBigQueryUseEmulator" yaml:"gcpBigQueryUseEmulator" toml:"gcpBigQueryUseEmulator"`
+	GCPSpannerUseEmulator  bool   `json:"gcpSpannerUseEmulator" yaml:"gcpSpannerUseEmulator" toml:"gcpSpannerUseEmulator"`
 	GCPEmulatorAllowRemote bool   `json:"gcpEmulatorAllowRemote" yaml:"gcpEmulatorAllowRemote" toml:"gcpEmulatorAllowRemote"`
 }
 
@@ -209,6 +211,9 @@ func (c *Configuration) Finalize() error {
 			if c.Driver == "" {
 				c.Driver = "cloudspanner"
 			}
+			if sParams.AutoConfigEmulator || sParams.UsePlainText {
+				c.GCPSpannerUseEmulator = true
+			}
 		} else {
 			params, err := ParseJDBCBigQueryURL(c.URL)
 			if err != nil {
@@ -238,11 +243,16 @@ func (c *Configuration) Finalize() error {
 		}
 	}
 
-	// Emulator detection: environment variables opt-in to emulator mode
-	if !c.GCPUseEmulator {
-		if os.Getenv("BIGQUERY_EMULATOR_HOST") != "" || os.Getenv("SPANNER_EMULATOR_HOST") != "" {
-			c.GCPUseEmulator = true
-		}
+	// Emulator detection: emulator=true shortcut sets both
+	if c.GCPUseEmulator {
+		c.GCPBigQueryUseEmulator = true
+		c.GCPSpannerUseEmulator = true
+	}
+	if !c.GCPBigQueryUseEmulator && os.Getenv("BIGQUERY_EMULATOR_HOST") != "" {
+		c.GCPBigQueryUseEmulator = true
+	}
+	if !c.GCPSpannerUseEmulator && os.Getenv("SPANNER_EMULATOR_HOST") != "" {
+		c.GCPSpannerUseEmulator = true
 	}
 	if c.GCPSpannerInstanceID == "" {
 		if envInst := os.Getenv("SPANNER_INSTANCE_ID"); envInst != "" {

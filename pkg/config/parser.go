@@ -1079,12 +1079,26 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 		cfg.GCPSpannerDatabaseID = val
 	case "spannerendpoint", "spanner_endpoint", "spanner-endpoint", "gcpspannerendpoint":
 		cfg.GCPSpannerEndpoint = val
+	case "bigqueryemulator", "bigquery_emulator", "bigquery-emulator":
+		b, err := ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("invalid boolean value for %s: must be 'true' or 'false'", key)
+		}
+		cfg.GCPBigQueryUseEmulator = b
+	case "spanneremulator", "spanner_emulator", "spanner-emulator":
+		b, err := ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("invalid boolean value for %s: must be 'true' or 'false'", key)
+		}
+		cfg.GCPSpannerUseEmulator = b
 	case "emulator", "useemulator", "use_emulator", "use-emulator", "gcpuseemulator", "gcp_use_emulator", "gcp-use-emulator":
 		b, err := ParseBool(val)
 		if err != nil {
-			return fmt.Errorf("invalid boolean value for %s (expected true or false)", key)
+			return fmt.Errorf("invalid boolean value for %s: must be 'true' or 'false'", key)
 		}
 		cfg.GCPUseEmulator = b
+		cfg.GCPBigQueryUseEmulator = b
+		cfg.GCPSpannerUseEmulator = b
 	case "emulatorallowremote", "emulator_allow_remote", "emulator-allow-remote", "gcpemulatorallowremote", "gcp_emulator_allow_remote", "gcp-emulator-allow-remote":
 		b, err := ParseBool(val)
 		if err != nil {

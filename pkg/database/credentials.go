@@ -15,6 +15,9 @@ import (
 // Rules:
 // - If no OAuthType is specified, but an explicit credentials file or JSON is provided,
 //   it defaults to OAuthType=0 (Service Account Key).
+// - If no OAuthType is specified, but an explicit access token is provided,
+//   it defaults to OAuthType=2 (Pre-generated Access Token).
+// - OAuthAccessToken is only valid with OAuthType=2.
 // - OAuthType=0 requires a key file (OAuthPvtKeyPath / gcpCredentialsFile) or gcpCredentialsJson.
 // - OAuthType=2 requires OAuthAccessToken.
 // - OAuthType=3 uses Application Default Credentials (ADC) and rejects explicit credentials files/JSON.
@@ -27,6 +30,13 @@ func CredentialOptions(cfg *config.Configuration) ([]option.ClientOption, error)
 	} else if hasExplicit {
 		// An explicit key file or JSON without OAuthType set means OAuthType=0
 		oauthType = 0
+	} else if cfg.GCPAccessToken != "" {
+		// An explicit access token without OAuthType set means OAuthType=2
+		oauthType = 2
+	}
+
+	if cfg.GCPAccessToken != "" && oauthType != 2 {
+		return nil, errors.New("OAuthAccessToken is only valid with OAuthType=2")
 	}
 
 	switch oauthType {
