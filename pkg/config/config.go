@@ -15,7 +15,7 @@ import (
 
 var (
 	bigQueryDatasetRegex = regexp.MustCompile(`^[A-Za-z0-9_]{1,1000}$`)
-	bigQueryTableRegex   = regexp.MustCompile(`^[A-Za-z0-9_\-\s\p{L}]{1,1000}$`)
+	bigQueryTableRegex   = regexp.MustCompile(`^[\p{L}\p{M}\p{N}\p{Pc}\p{Pd}\p{Zs}]{1,1000}$`)
 	spannerIdentRegex    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
 )
 
@@ -301,7 +301,7 @@ func (c *Configuration) Finalize() error {
 	} else {
 		// BigQuery
 		if c.Table != "" {
-			if !bigQueryTableRegex.MatchString(c.Table) || strings.ContainsAny(c.Table, "`\\\n\r\t") {
+			if len(c.Table) > 1024 || !bigQueryTableRegex.MatchString(c.Table) || strings.ContainsAny(c.Table, "`\\\n\r\t") {
 				return fmt.Errorf("invalid table name %q for BigQuery", c.Table)
 			}
 		}

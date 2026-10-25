@@ -578,5 +578,56 @@ connectRetries = "abc"
 	}
 }
 
+func TestParseBool_ErrorMessage_IncludesKey_NoSecretValue(t *testing.T) {
+	cfg := NewDefaultConfiguration()
+	secretVal := "super_secret_token_12345"
+	err := ApplyProperty(cfg, "cleanDisabled", secretVal)
+	if err == nil {
+		t.Fatalf("expected error for invalid boolean value")
+	}
+	if !strings.Contains(err.Error(), "cleanDisabled") {
+		t.Errorf("expected error message to contain key 'cleanDisabled', got: %v", err)
+	}
+	if strings.Contains(err.Error(), secretVal) {
+		t.Errorf("error message must NOT contain secret value, got: %v", err)
+	}
+}
+
+func TestBigQueryTableRegex_ValidUnicodeCategories(t *testing.T) {
+	validNames := []string{
+		"my_table",
+		"table-123",
+		"table 123",
+		"t_\u0663",
+		"t_e\u0301",
+		"t_日本語",
+	}
+	for _, name := range validNames {
+		cfg := NewDefaultConfiguration()
+		cfg.GCPProjectID = "p"
+		cfg.Table = name
+		if err := cfg.Finalize(); err != nil {
+			t.Errorf("expected valid BigQuery table name %q, got error: %v", name, err)
+		}
+	}
+
+	invalidNames := []string{
+		"table`name",
+		"table\\name",
+		"table\nname",
+		"table\rname",
+		"table\tname",
+		strings.Repeat("a", 1025),
+	}
+	for _, name := range invalidNames {
+		cfg := NewDefaultConfiguration()
+		cfg.GCPProjectID = "p"
+		cfg.Table = name
+		if err := cfg.Finalize(); err == nil {
+			t.Errorf("expected error for invalid BigQuery table name %q, got nil", name)
+		}
+	}
+}
+
 
 

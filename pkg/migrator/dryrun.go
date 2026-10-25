@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/roryq/noway/pkg/database"
 	"github.com/roryq/noway/pkg/resolver"
@@ -36,13 +37,43 @@ func NewDryRunBuilder(db database.Database, schema, table, dbName, user string) 
 
 // sqlStringLiteral returns a BigQuery/Spanner single-quoted string literal.
 func sqlStringLiteral(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`, "\n", `\n`, "\r", `\r`, "\t", `\t`)
-	return "'" + r.Replace(s) + "'"
+	var sb strings.Builder
+	sb.WriteByte('\'')
+	for _, r := range s {
+		switch r {
+		case '\\':
+			sb.WriteString(`\\`)
+		case '\'':
+			sb.WriteString(`\'`)
+		case '\n':
+			sb.WriteString(`\n`)
+		case '\r':
+			sb.WriteString(`\r`)
+		case '\t':
+			sb.WriteString(`\t`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&sb, `\x%02x`, r)
+			} else {
+				sb.WriteRune(r)
+			}
+		}
+	}
+	sb.WriteByte('\'')
+	return sb.String()
 }
 
 // sqlComment makes s safe to put after "-- ".
 func sqlComment(s string) string {
-	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	var sb strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r == '\u0085' {
+			sb.WriteRune(' ')
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
 }
 
 // WriteHeader outputs the Dry Run header comment block.
@@ -201,6 +232,7 @@ func (b *DryRunBuilder) Save(destination string) error {
 	if err := os.WriteFile(destination, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("failed to write dryRunOutput to '%s': %w", destination, err)
 	}
+	_ = os.Chmod(destination, 0o600)
 
 	return nil
 }

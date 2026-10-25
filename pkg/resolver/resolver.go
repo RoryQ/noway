@@ -600,11 +600,6 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 		}
 
 		filename := d.Name()
-		for _, ch := range filename {
-			if unicode.IsControl(ch) {
-				return fmt.Errorf("migration file name %q contains invalid control characters", filename)
-			}
-		}
 		if hasSuffixFold(filename, ".conf") {
 			return nil
 		}
@@ -618,6 +613,12 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 		}
 		if !hasValidSuffix {
 			return nil
+		}
+
+		for _, ch := range filename {
+			if unicode.IsControl(ch) {
+				return fmt.Errorf("migration file name %q contains invalid control characters", filename)
+			}
 		}
 
 		data, err := fs.ReadFile(fileSys, path)
@@ -637,12 +638,6 @@ func (r *Resolver) scanFS(fileSys fs.FS, dirPath string, result *ResolveResult, 
 }
 
 func (r *Resolver) processFile(dir, filename, fullPath, scriptPath string, result *ResolveResult, seen *seenTracking) error {
-	for _, ch := range filename {
-		if unicode.IsControl(ch) {
-			return fmt.Errorf("migration file name %q contains invalid control characters", filename)
-		}
-	}
-
 	if hasSuffixFold(filename, ".conf") {
 		return nil
 	}
@@ -656,6 +651,12 @@ func (r *Resolver) processFile(dir, filename, fullPath, scriptPath string, resul
 	}
 	if !hasValidSuffix {
 		return nil
+	}
+
+	for _, ch := range filename {
+		if unicode.IsControl(ch) {
+			return fmt.Errorf("migration file name %q contains invalid control characters", filename)
+		}
 	}
 
 	data, err := os.ReadFile(fullPath)

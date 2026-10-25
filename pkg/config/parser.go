@@ -618,7 +618,7 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "SCHEMAS":
 		cfg.Schemas = splitAndTrim(val, ",")
 	case "CREATE_SCHEMAS", "CREATESCHEMAS":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -640,7 +640,7 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "ENCODING":
 		cfg.Encoding = val
 	case "PLACEHOLDER_REPLACEMENT", "PLACEHOLDERREPLACEMENT":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -658,37 +658,37 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "TARGET":
 		cfg.Target = val
 	case "OUT_OF_ORDER", "OUTOFORDER":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.OutOfOrder = b
 	case "VALIDATE_ON_MIGRATE", "VALIDATEONMIGRATE":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.ValidateOnMigrate = b
 	case "IGNORE_FUTURE_MIGRATIONS", "IGNOREFUTUREMIGRATIONS":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.IgnoreFutureMigrations = b
 	case "IGNORE_MISSING_MIGRATIONS", "IGNOREMISSINGMIGRATIONS":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.IgnoreMissingMigrations = b
 	case "IGNORE_PENDING_MIGRATIONS", "IGNOREPENDINGMIGRATIONS":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.IgnorePendingMigrations = b
 	case "IGNORE_IGNORED_MIGRATIONS", "IGNOREIGNOREDMIGRATIONS":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -697,7 +697,7 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 		cfg.IgnoreMigrationPatterns = splitAndTrim(val, ",")
 		cfg.IgnoreMigrationPatternsExplicitlySet = true
 	case "SKIP_EXECUTING_MIGRATIONS", "SKIPEXECUTINGMIGRATIONS":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -705,49 +705,49 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "CHERRY_PICK", "CHERRYPICK":
 		cfg.CherryPick = splitAndTrim(val, ",")
 	case "FAIL_ON_MISSING_TARGET", "FAILONMISSINGTARGET":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.FailOnMissingTarget = b
 	case "FAIL_ON_MISSING_LOCATIONS", "FAILONMISSINGLOCATIONS":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.FailOnMissingLocations = b
 	case "VALIDATE_MIGRATION_NAMING", "VALIDATEMIGRATIONNAMING":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.ValidateMigrationNaming = b
 	case "CLEAN_DISABLED", "CLEANDISABLED":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.CleanDisabled = b
 	case "CLEAN_ON_VALIDATION_ERROR", "CLEANONVALIDATIONERROR":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.CleanOnValidationError = b
 	case "MIXED":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.Mixed = b
 	case "GROUP":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.Group = b
 	case "BATCH":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -765,7 +765,7 @@ func applyEnvKey(cfg *Configuration, key, val string) error {
 	case "BASELINE_DESCRIPTION", "BASELINEDESCRIPTION":
 		cfg.BaselineDescription = val
 	case "BASELINE_ON_MIGRATE", "BASELINEONMIGRATE":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -891,7 +891,7 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "schemas":
 		cfg.Schemas = splitAndTrim(val, ",")
 	case "createschemas", "create_schemas", "create-schemas":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -917,7 +917,7 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "encoding":
 		cfg.Encoding = val
 	case "placeholderreplacement", "placeholder.replacement", "placeholder_replacement", "placeholder-replacement":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -935,37 +935,37 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "target":
 		cfg.Target = val
 	case "outoforder", "out_of_order", "out-of-order":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.OutOfOrder = b
 	case "validateonmigrate", "validate_on_migrate", "validate-on-migrate":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.ValidateOnMigrate = b
 	case "ignorefuturemigrations", "ignore_future_migrations", "ignore-future-migrations":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.IgnoreFutureMigrations = b
 	case "ignoremissingmigrations", "ignore_missing_migrations", "ignore-missing-migrations":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.IgnoreMissingMigrations = b
 	case "ignorependingmigrations", "ignore_pending_migrations", "ignore-pending-migrations":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.IgnorePendingMigrations = b
 	case "ignoreignoredmigrations", "ignore_ignored_migrations", "ignore-ignored-migrations":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -974,7 +974,7 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 		cfg.IgnoreMigrationPatterns = splitAndTrim(val, ",")
 		cfg.IgnoreMigrationPatternsExplicitlySet = true
 	case "skipexecutingmigrations", "skip_executing_migrations", "skip-executing-migrations":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -982,49 +982,49 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "cherrypick", "cherry_pick", "cherry-pick":
 		cfg.CherryPick = splitAndTrim(val, ",")
 	case "failonmissingtarget", "fail_on_missing_target", "fail-on-missing-target":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.FailOnMissingTarget = b
 	case "failonmissinglocations", "fail_on_missing_locations", "fail-on-missing-locations":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.FailOnMissingLocations = b
 	case "validatemigrationnaming", "validate_migration_naming", "validate-migration-naming":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.ValidateMigrationNaming = b
 	case "cleandisabled", "clean_disabled", "clean-disabled":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.CleanDisabled = b
 	case "cleanonvalidationerror", "clean_on_validation_error", "clean-on-validation-error":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.CleanOnValidationError = b
 	case "mixed":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.Mixed = b
 	case "group":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
 		cfg.Group = b
 	case "batch":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -1042,7 +1042,7 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "baselinedescription", "baseline_description", "baseline-description":
 		cfg.BaselineDescription = val
 	case "baselineonmigrate", "baseline_on_migrate", "baseline-on-migrate":
-		b, err := ParseBool(val)
+		b, err := parseBoolFor(key, val)
 		if err != nil {
 			return err
 		}
@@ -1209,6 +1209,14 @@ func ParseBool(s string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("invalid boolean value: must be 'true' or 'false'")
+}
+
+func parseBoolFor(key, val string) (bool, error) {
+	b, err := ParseBool(val)
+	if err != nil {
+		return false, fmt.Errorf("invalid boolean value for %s: must be 'true' or 'false'", key)
+	}
+	return b, nil
 }
 
 // KnownProperties lists canonical Flyway and Noway configuration property names.

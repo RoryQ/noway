@@ -254,20 +254,25 @@ func setupSpannerTestClient(t *testing.T) (*spannertest.Server, *spanner.Client)
 	return srv, client
 }
 
-func readLockRow(t *testing.T, ctx context.Context, client *spanner.Client) (ownerVersion string, installedBy string, installedOn time.Time, exists bool) {
+func readLockRow(t *testing.T, ctx context.Context, client *spanner.Client) (ownerVersion string, installedBy string, checksum *int64, installedOn time.Time, exists bool) {
 	t.Helper()
-	row, err := client.Single().ReadRow(ctx, "flyway_schema_history", spanner.Key{int64(-100)}, []string{"version", "installed_by", "installed_on"})
+	row, err := client.Single().ReadRow(ctx, "flyway_schema_history", spanner.Key{int64(-100)}, []string{"version", "installed_by", "checksum", "installed_on"})
 	if err != nil {
 		if spanner.ErrCode(err) == codes.NotFound || strings.Contains(strings.ToLower(err.Error()), "not found") {
-			return "", "", time.Time{}, false
+			return "", "", nil, time.Time{}, false
 		}
 		t.Fatalf("unexpected error reading lock row: %v", err)
 	}
 	var verNull spanner.NullString
-	if err := row.Columns(&verNull, &installedBy, &installedOn); err != nil {
+	var csNull spanner.NullInt64
+	if err := row.Columns(&verNull, &installedBy, &csNull, &installedOn); err != nil {
 		t.Fatalf("failed to scan lock row: %v", err)
 	}
-	return verNull.StringVal, installedBy, installedOn, true
+	var csPtr *int64
+	if csNull.Valid {
+		csPtr = &csNull.Int64
+	}
+	return verNull.StringVal, installedBy, csPtr, installedOn, true
 }
 
 func TestSpannerLockAndHeartbeat(t *testing.T) {
@@ -296,12 +301,12 @@ func TestSpannerLockAndHeartbeat(t *testing.T) {
 		t.Fatalf("failed to acquire Spanner lock: %v", err)
 	}
 
-	ownerVer, instBy, initialInstalledOn, exists := readLockRow(t, ctx, client)
+	ownerVer, instBy, cs, initialInstalledOn, exists := readLockRow(t, ctx, client)
 	if !exists {
 		t.Fatalf("expected lock row at installed_rank = -100 to exist")
 	}
-	if ownerVer == "" || instBy == "" || ownerVer != instBy {
-		t.Fatalf("expected non-empty matching owner ID in version (%q) and installed_by (%q)", ownerVer, instBy)
+	if ownerVer == "" || instBy != "" || cs == nil || *cs != 0 {
+		t.Fatalf("expected Flyway parity: owner in version (%q), installed_by='' (got %q), checksum=0 (got %v)", ownerVer, instBy, cs)
 	}
 	if initialInstalledOn.IsZero() {
 		t.Fatalf("expected non-zero initial installed_on timestamp")
@@ -316,7 +321,7 @@ func TestSpannerLockAndHeartbeat(t *testing.T) {
 		t.Errorf("expected 0 heartbeat errors, got %d", errCount)
 	}
 
-	afterOwnerVer, afterInstBy, updatedInstalledOn, exists := readLockRow(t, ctx, client)
+	afterOwnerVer, afterInstBy, _, updatedInstalledOn, exists := readLockRow(t, ctx, client)
 	if !exists {
 		t.Fatalf("expected lock row to still exist after heartbeat")
 	}
@@ -341,7 +346,7 @@ func TestSpannerLockAndHeartbeat(t *testing.T) {
 	if err := unlock(ctx); err != nil {
 		t.Fatalf("failed to unlock: %v", err)
 	}
-	if _, _, _, exists := readLockRow(t, ctx, client); exists {
+	if _, _, _, _, exists := readLockRow(t, ctx, client); exists {
 		t.Errorf("expected lock row to be deleted after unlock")
 	}
 
@@ -355,7 +360,7 @@ func TestSpannerLockAndHeartbeat(t *testing.T) {
 	if err3 != nil {
 		t.Fatalf("failed to acquire lock after release: %v", err3)
 	}
-	owner2Ver, _, _, exists := readLockRow(t, ctx, client)
+	owner2Ver, _, _, _, exists := readLockRow(t, ctx, client)
 	if !exists || owner2Ver == "" || owner2Ver == ownerVer {
 		t.Errorf("expected new lock owner ID distinct from %q, got %q (exists=%v)", ownerVer, owner2Ver, exists)
 	}
@@ -381,7 +386,7 @@ func TestSpannerLockExpiryAndTakeover(t *testing.T) {
 		t.Fatalf("db1 failed to acquire lock: %v", err)
 	}
 
-	owner1, _, installedOn1, exists := readLockRow(t, ctx, client)
+	owner1, _, _, installedOn1, exists := readLockRow(t, ctx, client)
 	if !exists || owner1 == "" {
 		t.Fatalf("expected db1 lock row to exist with owner ID, got owner=%q exists=%v", owner1, exists)
 	}
@@ -406,11 +411,11 @@ func TestSpannerLockExpiryAndTakeover(t *testing.T) {
 		t.Fatalf("expected db2 to take over expired lock, got error: %v", err)
 	}
 
-	owner2, instBy2, installedOn2, exists := readLockRow(t, ctx, client)
+	owner2, instBy2, _, installedOn2, exists := readLockRow(t, ctx, client)
 	if !exists {
 		t.Fatalf("expected lock row to exist after db2 takeover")
 	}
-	if owner2 == "" || owner2 == owner1 || instBy2 != owner2 {
+	if owner2 == "" || owner2 == owner1 || instBy2 != "" {
 		t.Errorf("expected new owner ID after takeover (prev=%q), got version=%q installed_by=%q", owner1, owner2, instBy2)
 	}
 	if !installedOn2.After(installedOn1) {
@@ -423,7 +428,7 @@ func TestSpannerLockExpiryAndTakeover(t *testing.T) {
 		t.Errorf("expected stale unlock1 to fail with ownership mismatch, got: %v", errUnlock1)
 	}
 
-	ownerAfterStaleUnlock, _, _, exists := readLockRow(t, ctx, client)
+	ownerAfterStaleUnlock, _, _, _, exists := readLockRow(t, ctx, client)
 	if !exists || ownerAfterStaleUnlock != owner2 {
 		t.Fatalf("expected db2 lock row (owner %q) to survive stale unlock1, got owner=%q exists=%v", owner2, ownerAfterStaleUnlock, exists)
 	}
@@ -432,7 +437,7 @@ func TestSpannerLockExpiryAndTakeover(t *testing.T) {
 	if err := unlock2(ctx); err != nil {
 		t.Fatalf("expected db2 unlock to succeed, got: %v", err)
 	}
-	if _, _, _, exists := readLockRow(t, ctx, client); exists {
+	if _, _, _, _, exists := readLockRow(t, ctx, client); exists {
 		t.Errorf("expected lock row to be deleted after db2 unlock")
 	}
 }
@@ -492,7 +497,7 @@ func TestSpannerLockHeartbeatErrorPropagation(t *testing.T) {
 		t.Errorf("expected unlock to return heartbeat error, got: %v", unlockErr)
 	}
 
-	ownerAfter, _, _, exists := readLockRow(t, ctx, client)
+	ownerAfter, _, _, _, exists := readLockRow(t, ctx, client)
 	if !exists || ownerAfter != "intruder-owner-id" {
 		t.Errorf("expected intruder lock row to remain intact, got owner=%q exists=%v", ownerAfter, exists)
 	}
@@ -617,8 +622,8 @@ func TestSpannerCleanSchemaAndCleanOnValidationError(t *testing.T) {
 		}
 
 		// 4. The active lock row at installed_rank = -100 must still exist after CleanSchema
-		ownerVer, instBy, _, lockExists := readLockRow(t, ctx, db.client)
-		if !lockExists || ownerVer == "" || ownerVer != instBy {
+		ownerVer, _, _, _, lockExists := readLockRow(t, ctx, db.client)
+		if !lockExists || ownerVer == "" {
 			t.Fatalf("expected lock row to survive CleanSchema, got exists=%v owner=%q", lockExists, ownerVer)
 		}
 
@@ -678,7 +683,7 @@ func TestSpannerCleanSchemaAndCleanOnValidationError(t *testing.T) {
 		}
 
 		// Lock row must be removed after Migrate completes
-		if _, _, _, lockExists := readLockRow(t, ctx, db.client); lockExists {
+		if _, _, _, _, lockExists := readLockRow(t, ctx, db.client); lockExists {
 			t.Errorf("expected lock row to be removed after Migrate completes")
 		}
 

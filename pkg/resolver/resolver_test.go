@@ -1357,6 +1357,29 @@ func TestResolver_RejectsControlCharactersInFilename(t *testing.T) {
 	}
 }
 
+func TestResolver_NonMigrationWithControlCharactersIgnored(t *testing.T) {
+	mockFS := fstest.MapFS{
+		"sql/V1__init.sql": &fstest.MapFile{
+			Data: []byte("SELECT 1;"),
+		},
+		"sql/ignored\x01file.txt": &fstest.MapFile{
+			Data: []byte("some notes"),
+		},
+	}
+
+	res := NewResolver(ResolverConfig{
+		FS:        mockFS,
+		Locations: []string{"sql"},
+	})
+	resolved, err := res.Resolve()
+	if err != nil {
+		t.Fatalf("expected scan to succeed and ignore non-migration file with control char, got: %v", err)
+	}
+	if len(resolved.VersionedMigrations) != 1 {
+		t.Errorf("expected 1 migration resolved, got %d", len(resolved.VersionedMigrations))
+	}
+}
+
 
 
 

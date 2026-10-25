@@ -229,6 +229,8 @@ Script migrations (`.sh`, `.bash`, `.cmd`, `.ps1`, `.bat`, `.py`) and script cal
 - `FLYWAY_OPERATION`: current operation (`MIGRATE`, `VALIDATE`, `INFO`, `BASELINE`, `REPAIR`, `UNDO`, `CLEAN`)
 - `FP__<placeholder>`: each configured placeholder exposed with `FP__` prefix (and suffix `__` if configured)
 
+For convenience and backwards compatibility, corresponding `NOWAY_*` environment variable aliases (e.g. `NOWAY_URL`, `NOWAY_USER`, `NOWAY_DATABASE`, `NOWAY_DEFAULT_SCHEMA`, `NOWAY_SCHEMAS`, `NOWAY_TABLE`, `NOWAY_OPERATION`, `NOWAY_EVENT`, `NOWAY_CALLBACK`, `NOWAY_SCRIPT`, `NOWAY_DESCRIPTION`, `NOWAY_VERSION`, `NOWAY_TYPE`, `NOWAY_GCP_PROJECT_ID`, `NOWAY_GCP_DATASET`, `NOWAY_GCP_LOCATION`, `NOWAY_BIGQUERY_ENDPOINT`) are also exported to child scripts.
+
 
 ---
 
