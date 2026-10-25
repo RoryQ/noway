@@ -1058,6 +1058,33 @@ func TestResolverJavaCharsetsAndBOM(t *testing.T) {
 	}
 }
 
+func TestResolverExtendedEncodings(t *testing.T) {
+	encodings := []string{
+		"Shift_JIS",
+		"windows-31j",
+		"GBK",
+		"GB18030",
+		"Big5",
+		"EUC-JP",
+		"EUC-KR",
+		"IBM437",
+		"UTF-32",
+		"UTF_8",
+		"ISO8859_1",
+		"ISO-8859-2",
+		"windows-1250",
+	}
+
+	for _, enc := range encodings {
+		t.Run(enc, func(t *testing.T) {
+			_, err := decodeContent([]byte("SELECT 1;"), enc)
+			if err != nil {
+				t.Fatalf("failed decoding ASCII content with encoding %q: %v", enc, err)
+			}
+		})
+	}
+}
+
 func TestResolverCaseInsensitiveSuffix(t *testing.T) {
 	mockFS := fstest.MapFS{
 		"migrations/V1__init.SQL": &fstest.MapFile{

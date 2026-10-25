@@ -17,7 +17,13 @@ import (
 	"github.com/roryq/noway/pkg/version"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
+	"golang.org/x/text/encoding/htmlindex"
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/korean"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/encoding/traditionalchinese"
 	textunicode "golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/encoding/unicode/utf32"
 )
 
 // ResolverConfig configures how migrations are discovered and parsed.
@@ -304,39 +310,39 @@ func trimSuffixFold(s, suffix string) string {
 }
 
 func javaCharset(name string) (encoding.Encoding, string, error) {
-	upper := strings.ToUpper(strings.TrimSpace(name))
+	upper := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(name), "_", "-"))
 	switch upper {
 	case "", "UTF-8", "UTF8":
 		return nil, "utf-8", nil
 	case "US-ASCII", "ASCII":
 		return nil, "ascii", nil
-	case "ISO-8859-1", "ISO8859_1", "LATIN1", "LATIN-1", "ISO-LATIN-1":
+	case "ISO-8859-1", "ISO8859-1", "LATIN1", "LATIN-1", "ISO-LATIN-1":
 		return charmap.ISO8859_1, "", nil
-	case "ISO-8859-2", "ISO8859_2", "LATIN2":
+	case "ISO-8859-2", "ISO8859-2", "LATIN2":
 		return charmap.ISO8859_2, "", nil
-	case "ISO-8859-3", "ISO8859_3", "LATIN3":
+	case "ISO-8859-3", "ISO8859-3", "LATIN3":
 		return charmap.ISO8859_3, "", nil
-	case "ISO-8859-4", "ISO8859_4", "LATIN4":
+	case "ISO-8859-4", "ISO8859-4", "LATIN4":
 		return charmap.ISO8859_4, "", nil
-	case "ISO-8859-5", "ISO8859_5":
+	case "ISO-8859-5", "ISO8859-5":
 		return charmap.ISO8859_5, "", nil
-	case "ISO-8859-6", "ISO8859_6":
+	case "ISO-8859-6", "ISO8859-6":
 		return charmap.ISO8859_6, "", nil
-	case "ISO-8859-7", "ISO8859_7":
+	case "ISO-8859-7", "ISO8859-7":
 		return charmap.ISO8859_7, "", nil
-	case "ISO-8859-8", "ISO8859_8":
+	case "ISO-8859-8", "ISO8859-8":
 		return charmap.ISO8859_8, "", nil
-	case "ISO-8859-9", "ISO8859_9", "LATIN5":
+	case "ISO-8859-9", "ISO8859-9", "LATIN5":
 		return charmap.ISO8859_9, "", nil
-	case "ISO-8859-10", "ISO8859_10", "LATIN6":
+	case "ISO-8859-10", "ISO8859-10", "LATIN6":
 		return charmap.ISO8859_10, "", nil
-	case "ISO-8859-13", "ISO8859_13", "LATIN7":
+	case "ISO-8859-13", "ISO8859-13", "LATIN7":
 		return charmap.ISO8859_13, "", nil
-	case "ISO-8859-14", "ISO8859_14", "LATIN8":
+	case "ISO-8859-14", "ISO8859-14", "LATIN8":
 		return charmap.ISO8859_14, "", nil
-	case "ISO-8859-15", "ISO8859_15", "LATIN9":
+	case "ISO-8859-15", "ISO8859-15", "LATIN9":
 		return charmap.ISO8859_15, "", nil
-	case "ISO-8859-16", "ISO8859_16", "LATIN10":
+	case "ISO-8859-16", "ISO8859-16", "LATIN10":
 		return charmap.ISO8859_16, "", nil
 	case "WINDOWS-1250", "CP1250":
 		return charmap.Windows1250, "", nil
@@ -363,6 +369,42 @@ func javaCharset(name string) (encoding.Encoding, string, error) {
 		return textunicode.UTF16(textunicode.BigEndian, textunicode.IgnoreBOM), "", nil
 	case "UTF-16LE":
 		return textunicode.UTF16(textunicode.LittleEndian, textunicode.IgnoreBOM), "", nil
+	case "SHIFT-JIS", "SJIS", "WINDOWS-31J", "MS932", "CP932":
+		return japanese.ShiftJIS, "", nil
+	case "EUC-JP":
+		return japanese.EUCJP, "", nil
+	case "ISO-2022-JP":
+		return japanese.ISO2022JP, "", nil
+	case "GBK", "GB2312":
+		return simplifiedchinese.GBK, "", nil
+	case "GB18030":
+		return simplifiedchinese.GB18030, "", nil
+	case "BIG5", "BIG5-HKSCS":
+		return traditionalchinese.Big5, "", nil
+	case "EUC-KR", "KS-C-5601-1987", "KSC5601":
+		return korean.EUCKR, "", nil
+	case "IBM437", "CP437", "CODEPAGE437":
+		return charmap.CodePage437, "", nil
+	case "UTF-32":
+		return utf32.UTF32(utf32.BigEndian, utf32.UseBOM), "", nil
+	case "UTF-32BE":
+		return utf32.UTF32(utf32.BigEndian, utf32.IgnoreBOM), "", nil
+	case "UTF-32LE":
+		return utf32.UTF32(utf32.LittleEndian, utf32.IgnoreBOM), "", nil
+	}
+	for _, e := range charmap.All {
+		if cm, ok := e.(*charmap.Charmap); ok {
+			cmName := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(cm.String(), " ", "-"), "_", "-"))
+			if cmName == upper || strings.EqualFold(cm.String(), name) {
+				return cm, "", nil
+			}
+		}
+	}
+	if enc, err := htmlindex.Get(name); err == nil {
+		return enc, "", nil
+	}
+	if enc, err := htmlindex.Get(upper); err == nil {
+		return enc, "", nil
 	}
 	return nil, "", fmt.Errorf("unsupported encoding '%s'", name)
 }
