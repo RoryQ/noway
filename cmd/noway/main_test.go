@@ -398,6 +398,22 @@ func TestParseCLIArgs_WorkingDirectoryAndLocations(t *testing.T) {
 	}
 }
 
+func TestParseCLIArgs_FailOnMissingLocationsAndValidateMigrationNaming(t *testing.T) {
+	cfg, err := parseCLIArgs([]string{
+		"-failOnMissingLocations=true",
+		"-validateMigrationNaming=true",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIArgs failed: %v", err)
+	}
+	if !cfg.FailOnMissingLocations {
+		t.Errorf("expected FailOnMissingLocations to be true")
+	}
+	if !cfg.ValidateMigrationNaming {
+		t.Errorf("expected ValidateMigrationNaming to be true")
+	}
+}
+
 
 
 

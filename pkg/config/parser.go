@@ -466,18 +466,18 @@ func applyAnyValue(cfg *Configuration, key string, val any) error {
 	}
 	switch v := val.(type) {
 	case string:
-		return applyProperty(cfg, key, v)
+		return ApplyProperty(cfg, key, v)
 	case bool:
-		return applyProperty(cfg, key, strconv.FormatBool(v))
+		return ApplyProperty(cfg, key, strconv.FormatBool(v))
 	case int:
-		return applyProperty(cfg, key, strconv.Itoa(v))
+		return ApplyProperty(cfg, key, strconv.Itoa(v))
 	case int64:
-		return applyProperty(cfg, key, strconv.FormatInt(v, 10))
+		return ApplyProperty(cfg, key, strconv.FormatInt(v, 10))
 	case float64:
 		if v == float64(int64(v)) {
-			return applyProperty(cfg, key, strconv.FormatInt(int64(v), 10))
+			return ApplyProperty(cfg, key, strconv.FormatInt(int64(v), 10))
 		}
-		return applyProperty(cfg, key, fmt.Sprintf("%v", v))
+		return ApplyProperty(cfg, key, fmt.Sprintf("%v", v))
 	case []any:
 		var items []string
 		for _, item := range v {
@@ -501,7 +501,7 @@ func applyAnyValue(cfg *Configuration, key string, val any) error {
 			cfg.CherryPick = items
 			return nil
 		default:
-			return applyProperty(cfg, key, strings.Join(items, ","))
+			return ApplyProperty(cfg, key, strings.Join(items, ","))
 		}
 	case []string:
 		switch strings.ToLower(key) {
@@ -522,7 +522,7 @@ func applyAnyValue(cfg *Configuration, key string, val any) error {
 			cfg.CherryPick = v
 			return nil
 		default:
-			return applyProperty(cfg, key, strings.Join(v, ","))
+			return ApplyProperty(cfg, key, strings.Join(v, ","))
 		}
 	case map[string]any:
 		keyLower := strings.ToLower(key)
@@ -553,13 +553,13 @@ func applyAnyValue(cfg *Configuration, key string, val any) error {
 			return nil
 		}
 		for subK, subV := range v {
-			if err := applyProperty(cfg, key+"."+subK, subV); err != nil {
+			if err := ApplyProperty(cfg, key+"."+subK, subV); err != nil {
 				return err
 			}
 		}
 		return nil
 	default:
-		return applyProperty(cfg, key, fmt.Sprintf("%v", v))
+		return ApplyProperty(cfg, key, fmt.Sprintf("%v", v))
 	}
 }
 
@@ -845,7 +845,7 @@ func parseProperties(content string, cfg *Configuration) error {
 			cleanKey = cleanKey[len("noway."):]
 		}
 
-		if err := applyProperty(cfg, cleanKey, val); err != nil {
+		if err := ApplyProperty(cfg, cleanKey, val); err != nil {
 			return err
 		}
 	}
@@ -853,7 +853,8 @@ func parseProperties(content string, cfg *Configuration) error {
 	return scanner.Err()
 }
 
-func applyProperty(cfg *Configuration, key, val string) error {
+// ApplyProperty sets a single configuration property on cfg by key and value.
+func ApplyProperty(cfg *Configuration, key, val string) error {
 	cleanKey := key
 	lowerKey := strings.ToLower(cleanKey)
 	if strings.HasPrefix(lowerKey, "flyway.") {
