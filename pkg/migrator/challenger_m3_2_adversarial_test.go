@@ -114,6 +114,7 @@ sys.exit(0)
 					Event:            "afterMigrate",
 					Filename:         "afterMigrate__audit.py",
 					PhysicalLocation: scriptPath,
+					IsOnDisk:         true,
 					Content:          scriptContent,
 				},
 			},

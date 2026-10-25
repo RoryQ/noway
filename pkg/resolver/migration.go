@@ -66,6 +66,7 @@ type ResolvedMigration struct {
 	Type               MigrationType
 	Content            string
 	PhysicalLocation   string
+	IsOnDisk           bool
 	IsRepeatable       bool
 	IsUndo             bool
 	IsBaseline         bool

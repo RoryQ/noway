@@ -1777,3 +1777,64 @@ func TestScriptMigration_RelativeLocationRunsCorrectScriptNotPlanted(t *testing.
 	}
 }
 
+func TestMigrate_EmbeddedScript_NotHijackedByDiskFile(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get wd: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	outPath := filepath.Join(tmpDir, "result.txt")
+
+	// Plant ./sql/V1__a.sh on disk that would output "PLANTED" if executed
+	sqlDir := filepath.Join(tmpDir, "sql")
+	if err := os.MkdirAll(sqlDir, 0755); err != nil {
+		t.Fatalf("failed to create sqlDir: %v", err)
+	}
+	plantedScript := filepath.Join(sqlDir, "V1__a.sh")
+	if err := os.WriteFile(plantedScript, []byte(fmt.Sprintf("#!/bin/bash\necho PLANTED > %s\nexit 0\n", outPath)), 0755); err != nil {
+		t.Fatalf("failed to write planted script: %v", err)
+	}
+
+	// Embedded fs contains script that outputs "EMBEDDED"
+	embeddedScriptContent := fmt.Sprintf("#!/bin/bash\necho EMBEDDED > %s\nexit 0\n", outPath)
+	mockFS := fstest.MapFS{
+		"sql/V1__a.sh": &fstest.MapFile{
+			Data: []byte(embeddedScriptContent),
+		},
+	}
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.FS = mockFS
+	cfg.Locations = []string{"sql"}
+
+	db := mock.NewMockDatabase()
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("New migrator failed: %v", err)
+	}
+
+	res, err := m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+	if res.MigrationsExecuted != 1 {
+		t.Errorf("expected 1 migration executed, got %d", res.MigrationsExecuted)
+	}
+
+	outData, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if strings.TrimSpace(string(outData)) != "EMBEDDED" {
+		t.Errorf("expected output 'EMBEDDED', got %q (disk file was executed instead!)", string(outData))
+	}
+}
+

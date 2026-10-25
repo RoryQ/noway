@@ -102,33 +102,9 @@ func (c *CallbackRunner) Fire(ctx context.Context, event string) error {
 }
 
 func (c *CallbackRunner) executeScriptCallback(ctx context.Context, cb resolver.ResolvedCallback, event string) error {
-	var scriptPath string
-	var cleanup func()
-
-	if cb.PhysicalLocation != "" {
-		if fi, err := os.Stat(cb.PhysicalLocation); err == nil && !fi.IsDir() {
-			scriptPath = cb.PhysicalLocation
-		}
-	}
-
-	if scriptPath == "" {
-		ext := filepath.Ext(cb.Filename)
-		if ext == "" {
-			ext = ".sh"
-		}
-		tmpFile, err := os.CreateTemp("", "noway-callback-*"+ext)
-		if err != nil {
-			return fmt.Errorf("failed creating temp callback script for %s: %w", cb.Filename, err)
-		}
-		if _, err := tmpFile.WriteString(cb.Content); err != nil {
-			tmpFile.Close()
-			os.Remove(tmpFile.Name())
-			return fmt.Errorf("failed writing temp callback script for %s: %w", cb.Filename, err)
-		}
-		tmpFile.Close()
-		_ = os.Chmod(tmpFile.Name(), 0700)
-		scriptPath = tmpFile.Name()
-		cleanup = func() { _ = os.Remove(tmpFile.Name()) }
+	scriptPath, cleanup, err := c.scriptFileFor(cb)
+	if err != nil {
+		return err
 	}
 	if cleanup != nil {
 		defer cleanup()
@@ -280,6 +256,19 @@ func determineOperation(event string) string {
 	default:
 		return "COMMAND"
 	}
+}
+
+func (c *CallbackRunner) scriptFileFor(cb resolver.ResolvedCallback) (path string, cleanup func(), err error) {
+	if c.config.FS == nil && cb.IsOnDisk && cb.PhysicalLocation != "" {
+		abs, err := filepath.Abs(cb.PhysicalLocation)
+		if err != nil {
+			return "", nil, err
+		}
+		if fi, err := os.Stat(abs); err == nil && fi.Mode().IsRegular() {
+			return abs, func() {}, nil
+		}
+	}
+	return writeTempScript(cb.Filename, cb.Content)
 }
 
 func isScriptFile(filename string) bool {

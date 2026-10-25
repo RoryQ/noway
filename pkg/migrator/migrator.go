@@ -919,33 +919,9 @@ func (m *Migrator) executeScriptMigration(
 
 	startTime := time.Now()
 
-	var scriptPath string
-	var cleanup func()
-
-	if mig.PhysicalLocation != "" {
-		if fi, err := os.Stat(mig.PhysicalLocation); err == nil && !fi.IsDir() {
-			scriptPath = mig.PhysicalLocation
-		}
-	}
-
-	if scriptPath == "" {
-		ext := filepath.Ext(mig.Script)
-		if ext == "" {
-			ext = ".sh"
-		}
-		tmpFile, err := os.CreateTemp("", "noway-migration-*"+ext)
-		if err != nil {
-			return nil, fmt.Errorf("failed creating temp script for %s: %w", mig.Script, err)
-		}
-		if _, err := tmpFile.WriteString(mig.Content); err != nil {
-			tmpFile.Close()
-			os.Remove(tmpFile.Name())
-			return nil, fmt.Errorf("failed writing temp script for %s: %w", mig.Script, err)
-		}
-		tmpFile.Close()
-		_ = os.Chmod(tmpFile.Name(), 0700)
-		scriptPath = tmpFile.Name()
-		cleanup = func() { _ = os.Remove(tmpFile.Name()) }
+	scriptPath, cleanup, err := m.scriptFileFor(mig)
+	if err != nil {
+		return nil, err
 	}
 	if cleanup != nil {
 		defer cleanup()
@@ -1115,4 +1091,42 @@ func (m *Migrator) executeScriptMigration(
 		Script:        mig.Script,
 		ExecutionTime: execTime,
 	}, nil
+}
+
+func writeTempScript(name, content string) (path string, cleanup func(), err error) {
+	ext := filepath.Ext(name)
+	if ext == "" {
+		ext = ".sh"
+	}
+	tmpFile, err := os.CreateTemp("", "noway-script-*"+ext)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed creating temp script for %s: %w", name, err)
+	}
+	if _, err := tmpFile.WriteString(content); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+		return "", nil, fmt.Errorf("failed writing temp script for %s: %w", name, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpFile.Name())
+		return "", nil, fmt.Errorf("failed closing temp script for %s: %w", name, err)
+	}
+	if err := os.Chmod(tmpFile.Name(), 0700); err != nil {
+		_ = os.Remove(tmpFile.Name())
+		return "", nil, fmt.Errorf("failed setting permissions on temp script for %s: %w", name, err)
+	}
+	return tmpFile.Name(), func() { _ = os.Remove(tmpFile.Name()) }, nil
+}
+
+func (m *Migrator) scriptFileFor(mig resolver.ResolvedMigration) (path string, cleanup func(), err error) {
+	if (m.config == nil || m.config.FS == nil) && mig.IsOnDisk && mig.PhysicalLocation != "" {
+		abs, err := filepath.Abs(mig.PhysicalLocation)
+		if err != nil {
+			return "", nil, err
+		}
+		if fi, err := os.Stat(abs); err == nil && fi.Mode().IsRegular() {
+			return abs, func() {}, nil
+		}
+	}
+	return writeTempScript(mig.Script, mig.Content)
 }

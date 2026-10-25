@@ -126,6 +126,7 @@ type ResolvedCallback struct {
 	Filename         string          // e.g. "beforeMigrate__first_step.sql"
 	Content          string          // SQL or script contents
 	PhysicalLocation string          // Full filesystem or FS path
+	IsOnDisk         bool            // true if resolved from disk, false if from an fs.FS
 	Type             MigrationType   // TypeSQL or TypeScript
 	IsScript         bool            // true for .sh, .bash, .cmd, .ps1, .bat, .py
 	Config           MigrationConfig // Configuration from .conf file if present
@@ -721,6 +722,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 	}
 
 	isScript := isScriptFile(filename)
+	isOnDisk := fileSys == nil
 
 	defaultType := TypeSQL
 	if isScript {
@@ -760,6 +762,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 				Filename:         filename,
 				Content:          content,
 				PhysicalLocation: fullPath,
+				IsOnDisk:         isOnDisk,
 				Type:             defaultType,
 				IsScript:         isScript,
 				Config:           migConfig,
@@ -803,6 +806,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 			Type:               repType,
 			Content:            content,
 			PhysicalLocation:   fullPath,
+			IsOnDisk:           isOnDisk,
 			IsRepeatable:       true,
 			IsScript:           isScript,
 			Config:             migConfig,
@@ -849,6 +853,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 					Type:             undoType,
 					Content:          content,
 					PhysicalLocation: fullPath,
+					IsOnDisk:         isOnDisk,
 					IsUndo:           true,
 					IsScript:         isScript,
 					Config:           migConfig,
@@ -899,6 +904,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 					Type:             TypeBaseline,
 					Content:          content,
 					PhysicalLocation: fullPath,
+					IsOnDisk:         isOnDisk,
 					IsBaseline:       true,
 					IsScript:         isScript,
 					Config:           migConfig,
@@ -963,6 +969,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 				Type:             defaultType,
 				Content:          content,
 				PhysicalLocation: fullPath,
+				IsOnDisk:         isOnDisk,
 				IsScript:         isScript,
 				Config:           migConfig,
 			})
