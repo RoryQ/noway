@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -203,7 +203,7 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 			if statErr != nil {
 				if os.IsNotExist(statErr) || errors.Is(statErr, fs.ErrNotExist) {
 					if !r.config.FailOnMissingLocations {
-						log.Printf("ERROR: migration location '%s' not found: %v", loc, statErr)
+						slog.Error(fmt.Sprintf("migration location '%s' not found: %v", loc, statErr))
 						continue
 					}
 					return nil, fmt.Errorf("migration location does not exist: %s", loc)
@@ -225,7 +225,7 @@ func (r *Resolver) Resolve() (*ResolveResult, error) {
 		info, err := os.Stat(cleanLoc)
 		if err != nil {
 			if !r.config.FailOnMissingLocations {
-				log.Printf("ERROR: migration directory '%s' does not exist", cleanLoc)
+				slog.Error(fmt.Sprintf("migration directory '%s' does not exist", cleanLoc))
 				continue
 			}
 			if os.IsNotExist(err) {
@@ -747,12 +747,13 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 			IsScript:           isScript,
 			Config:             migConfig,
 		})
+		slog.Debug("Resolved repeatable migration", "script", scriptPath, "desc", desc)
 		return nil
 	} else if strings.HasPrefix(filename, r.config.RepeatablePrefix) {
 		if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 			return fmt.Errorf("invalid repeatable migration name: %s", filename)
 		}
-		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+		slog.Info(fmt.Sprintf("Skipping file '%s' (not a valid migration name)", filename))
 		return nil
 	}
 
@@ -792,13 +793,14 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 					IsScript:         isScript,
 					Config:           migConfig,
 				})
+				slog.Debug("Resolved undo migration", "script", scriptPath, "version", ver.String())
 				return nil
 			}
 		}
 		if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 			return fmt.Errorf("invalid undo migration name: %s", filename)
 		}
-		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+		slog.Info(fmt.Sprintf("Skipping file '%s' (not a valid migration name)", filename))
 		return nil
 	}
 
@@ -841,13 +843,14 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 					IsScript:         isScript,
 					Config:           migConfig,
 				})
+				slog.Debug("Resolved baseline migration", "script", scriptPath, "version", ver.String())
 				return nil
 			}
 		}
 		if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 			return fmt.Errorf("invalid baseline migration name: %s", filename)
 		}
-		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+		slog.Info(fmt.Sprintf("Skipping file '%s' (not a valid migration name)", filename))
 		return nil
 	}
 
@@ -877,7 +880,7 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 				if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 					return fmt.Errorf("invalid version '%s' in migration file '%s': %w", verStr, filename, err)
 				}
-				log.Printf("INFO: Skipping file '%s' (invalid migration version: %v)", filename, err)
+				slog.Info(fmt.Sprintf("Skipping file '%s' (invalid migration version: %v)", filename, err))
 				return nil
 			}
 
@@ -903,19 +906,20 @@ func (r *Resolver) parseAndAddMigration(dir, filename, fullPath, scriptPath stri
 				IsScript:         isScript,
 				Config:           migConfig,
 			})
+			slog.Debug("Resolved versioned migration", "script", scriptPath, "version", ver.String())
 			return nil
 		}
 
 		if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 			return fmt.Errorf("invalid versioned migration name: %s", filename)
 		}
-		log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+		slog.Info(fmt.Sprintf("Skipping file '%s' (not a valid migration name)", filename))
 		return nil
 	}
 
 	if r.config.ValidateMigrationNaming && r.isSQLMigrationFile(filename) {
 		return fmt.Errorf("invalid migration name: %s", filename)
 	}
-	log.Printf("INFO: Skipping file '%s' (not a valid migration name)", filename)
+	slog.Info(fmt.Sprintf("Skipping file '%s' (not a valid migration name)", filename))
 	return nil
 }

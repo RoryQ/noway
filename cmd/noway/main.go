@@ -4,8 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,9 +144,15 @@ func main() {
 		os.Stdout = f
 	}
 
-	if cfg.Quiet {
-		log.SetOutput(io.Discard)
+	level := slog.LevelInfo
+	if cfg.Debug { // -X
+		level = slog.LevelDebug
 	}
+	if cfg.Quiet { // -q
+		level = slog.LevelWarn
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
 
 	if err := cfg.Finalize(); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)

@@ -3,7 +3,7 @@ package migrator
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/roryq/noway/pkg/database"
@@ -93,7 +93,7 @@ func (m *Migrator) baselineInternal(ctx context.Context, defaultSchema, table st
 	for _, app := range applied {
 		if app.Type == "BASELINE" {
 			if app.Version != nil && app.Version.Compare(targetVer) == 0 && (app.Description == bDesc || app.Description == database.AbbreviateDescription(bDesc)) {
-				log.Printf("INFO: Schema %s already baselined with version %s (%s). Skipping.", defaultSchema, bVer, bDesc)
+				slog.Info(fmt.Sprintf("Schema %s already baselined with version %s (%s). Skipping.", defaultSchema, bVer, bDesc))
 				return &BaselineResult{
 					BaselineVersion:       bVer,
 					SuccessfullyBaselined: true,

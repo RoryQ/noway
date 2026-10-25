@@ -3,6 +3,7 @@ package migrator
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -369,12 +370,15 @@ func (m *Migrator) Migrate(ctx context.Context) (res *MigrateResult, retErr erro
 
 	// 3. Acquire database lock (if not dry run)
 	if !isDryRun {
+		slog.Debug("Acquiring database lock", "schema", defaultSchema, "table", table)
 		unlock, err := m.db.Lock(ctx, defaultSchema, table)
 		if err != nil {
 			_ = m.callbackRunner.Fire(ctx, "afterMigrateError")
 			return nil, fmt.Errorf("failed to acquire database lock: %w", err)
 		}
+		slog.Debug("Acquired database lock", "schema", defaultSchema, "table", table)
 		defer func() {
+			slog.Debug("Releasing database lock", "schema", defaultSchema, "table", table)
 			if uErr := unlock(context.Background()); uErr != nil && retErr == nil {
 				retErr = uErr
 			}
@@ -816,6 +820,7 @@ func (m *Migrator) executeSQLMigration(
 				execErr = err
 				break
 			}
+			slog.Debug("Executing SQL statement", "script", mig.Script, "line", stmt.LineNumber)
 			if err := m.db.ExecuteStatement(ctx, stmt.SQL); err != nil {
 				_ = m.callbackRunner.Fire(ctx, "afterEachMigrateStatementError")
 				execErr = fmt.Errorf("error executing statement at line %d in %s: %w", stmt.LineNumber, mig.Script, err)
@@ -945,6 +950,8 @@ func (m *Migrator) executeScriptMigration(
 	if cleanup != nil {
 		defer cleanup()
 	}
+
+	slog.Debug("Executing script migration", "script", mig.Script, "path", scriptPath)
 
 	var cmd *exec.Cmd
 	switch filepath.Ext(scriptPath) {

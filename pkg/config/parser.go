@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -438,7 +438,7 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 				continue
 			}
 			if err := applyAnyValue(cfg, k, v); err != nil {
-				log.Printf("WARNING: %v", err)
+				slog.Warn(err.Error())
 				continue
 			}
 		}
@@ -448,7 +448,7 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 				if envFlywayMap, ok := v.(map[string]any); ok {
 					for fk, fv := range envFlywayMap {
 						if err := applyAnyValue(cfg, fk, fv); err != nil {
-							log.Printf("WARNING: %v", err)
+							slog.Warn(err.Error())
 							continue
 						}
 					}
@@ -1083,7 +1083,7 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 	case "infosincedate", "infountildate", "infosinceversion", "infountilversion", "infoofstate",
 		"info-since-date", "info-until-date", "info-since-version", "info-until-version", "info-of-state",
 		"info_since_date", "info_until_date", "info_since_version", "info_until_version", "info_of_state":
-		log.Printf("WARNING: %s is not supported by noway and is ignored", key)
+		slog.Warn(fmt.Sprintf("%s is not supported by noway and is ignored", key))
 	default:
 		if strings.HasPrefix(cleanKeyLower, "placeholders.") {
 			phKey := cleanKey[len("placeholders."):]
@@ -1101,12 +1101,12 @@ func ApplyProperty(cfg *Configuration, key, val string) error {
 			return nil
 		}
 		if strings.HasPrefix(cleanKeyLower, "jdbcproperties.") || strings.HasPrefix(cleanKeyLower, "plugins.") || strings.HasPrefix(cleanKeyLower, "configurations.") {
-			log.Printf("WARNING: %s is not supported by noway and is ignored", key)
+			slog.Warn(fmt.Sprintf("%s is not supported by noway and is ignored", key))
 			return nil
 		}
 		normKey := strings.ReplaceAll(strings.ReplaceAll(cleanKeyLower, "-", ""), "_", "")
 		if unsupportedFlywayKeys[normKey] {
-			log.Printf("WARNING: %s is not supported by noway and is ignored", key)
+			slog.Warn(fmt.Sprintf("%s is not supported by noway and is ignored", key))
 			return nil
 		}
 		return UnknownPropertyError(cleanKey)
