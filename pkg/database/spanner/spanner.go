@@ -1312,29 +1312,34 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 		_, err := db.client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
 			var querySQL string
 			if supportsCurTS {
-				querySQL = fmt.Sprintf("SELECT version, installed_by, installed_on, CURRENT_TIMESTAMP() AS current_ts FROM %s WHERE installed_rank = -1", db.Quote(tableName))
+				querySQL = fmt.Sprintf("SELECT installed_rank, version, installed_by, installed_on, CURRENT_TIMESTAMP() AS current_ts FROM %s WHERE installed_rank IN (-100, -1) AND description = 'flyway-lock'", db.Quote(tableName))
 			} else {
-				querySQL = fmt.Sprintf("SELECT version, installed_by, installed_on FROM %s WHERE installed_rank = -1", db.Quote(tableName))
+				querySQL = fmt.Sprintf("SELECT installed_rank, version, installed_by, installed_on FROM %s WHERE installed_rank IN (-100, -1) AND description = 'flyway-lock'", db.Quote(tableName))
 			}
 			stmt := spanner.Statement{SQL: querySQL}
 			iter := txn.Query(ctx, stmt)
 			defer iter.Stop()
 
-			row, err := iter.Next()
-			if err != nil && err != iterator.Done {
-				return err
-			}
-			if err != iterator.Done {
+			var expiredKeys []spanner.Key
+			for {
+				row, err := iter.Next()
+				if err == iterator.Done {
+					break
+				}
+				if err != nil {
+					return err
+				}
+				var rank int64
 				var verNull spanner.NullString
 				var instBy string
 				var instOn time.Time
 				var curTS time.Time
 				if supportsCurTS {
-					if scanErr := row.Columns(&verNull, &instBy, &instOn, &curTS); scanErr != nil {
+					if scanErr := row.Columns(&rank, &verNull, &instBy, &instOn, &curTS); scanErr != nil {
 						return scanErr
 					}
 				} else {
-					if scanErr := row.Columns(&verNull, &instBy, &instOn); scanErr != nil {
+					if scanErr := row.Columns(&rank, &verNull, &instBy, &instOn); scanErr != nil {
 						return scanErr
 					}
 				}
@@ -1345,16 +1350,24 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 				if now.Sub(instOn) < ttl {
 					return fmt.Errorf("lock already held by %s", extractLockOwner(verNull, instBy))
 				}
+				expiredKeys = append(expiredKeys, spanner.Key{rank})
 			}
 
-			// Insert or take over expired lock row with our unique owner ID
-			m := spanner.InsertOrUpdate(tableName,
+			// Delete any expired lock rows (at -100 or transitional -1)
+			for _, k := range expiredKeys {
+				if delErr := txn.BufferWrite([]*spanner.Mutation{spanner.Delete(tableName, k)}); delErr != nil {
+					return delErr
+				}
+			}
+
+			// Insert Flyway-compatible lock row at installed_rank = -100 using spanner.Insert
+			m := spanner.Insert(tableName,
 				[]string{"installed_rank", "version", "description", "type", "script", "checksum", "installed_by", "installed_on", "execution_time", "success"},
 				[]interface{}{
-					int64(-1),
+					int64(-100),
 					spanner.NullString{StringVal: lockID, Valid: true},
 					"flyway-lock",
-					"SCHEMA",
+					"",
 					"",
 					spanner.NullInt64{},
 					lockID,
@@ -1429,7 +1442,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 
 					_, hErr := db.client.ReadWriteTransaction(tickCtx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
 						stmt := spanner.Statement{
-							SQL: fmt.Sprintf("SELECT version, installed_by FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
+							SQL: fmt.Sprintf("SELECT version, installed_by FROM %s WHERE installed_rank = -100 AND description = 'flyway-lock'", db.Quote(tableName)),
 						}
 						iter := txn.Query(ctx, stmt)
 						defer iter.Stop()
@@ -1454,7 +1467,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 
 						m := spanner.Update(tableName,
 							[]string{"installed_rank", "installed_on"},
-							[]interface{}{int64(-1), spanner.CommitTimestamp},
+							[]interface{}{int64(-100), spanner.CommitTimestamp},
 						)
 						return txn.BufferWrite([]*spanner.Mutation{m})
 					})
@@ -1546,7 +1559,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 
 					_, delErr := db.client.ReadWriteTransaction(unlockCtx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
 						stmt := spanner.Statement{
-							SQL: fmt.Sprintf("SELECT version, installed_by FROM %s WHERE installed_rank = -1", db.Quote(tableName)),
+							SQL: fmt.Sprintf("SELECT version, installed_by FROM %s WHERE installed_rank = -100 AND description = 'flyway-lock'", db.Quote(tableName)),
 						}
 						iter := txn.Query(ctx, stmt)
 						defer iter.Stop()
@@ -1569,7 +1582,7 @@ func (db *SpannerDatabase) Lock(ctx context.Context, schema, table string) (data
 							return fmt.Errorf("cannot unlock: lock owned by %q, expected %q", owner, lockID)
 						}
 
-						m := spanner.Delete(tableName, spanner.Key{int64(-1)})
+						m := spanner.Delete(tableName, spanner.Key{int64(-100)})
 						return txn.BufferWrite([]*spanner.Mutation{m})
 					})
 

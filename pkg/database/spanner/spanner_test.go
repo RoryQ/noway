@@ -256,7 +256,7 @@ func setupSpannerTestClient(t *testing.T) (*spannertest.Server, *spanner.Client)
 
 func readLockRow(t *testing.T, ctx context.Context, client *spanner.Client) (ownerVersion string, installedBy string, installedOn time.Time, exists bool) {
 	t.Helper()
-	row, err := client.Single().ReadRow(ctx, "flyway_schema_history", spanner.Key{int64(-1)}, []string{"version", "installed_by", "installed_on"})
+	row, err := client.Single().ReadRow(ctx, "flyway_schema_history", spanner.Key{int64(-100)}, []string{"version", "installed_by", "installed_on"})
 	if err != nil {
 		if spanner.ErrCode(err) == codes.NotFound || strings.Contains(strings.ToLower(err.Error()), "not found") {
 			return "", "", time.Time{}, false
@@ -298,7 +298,7 @@ func TestSpannerLockAndHeartbeat(t *testing.T) {
 
 	ownerVer, instBy, initialInstalledOn, exists := readLockRow(t, ctx, client)
 	if !exists {
-		t.Fatalf("expected lock row at installed_rank = -1 to exist")
+		t.Fatalf("expected lock row at installed_rank = -100 to exist")
 	}
 	if ownerVer == "" || instBy == "" || ownerVer != instBy {
 		t.Fatalf("expected non-empty matching owner ID in version (%q) and installed_by (%q)", ownerVer, instBy)
@@ -464,7 +464,7 @@ func TestSpannerLockHeartbeatErrorPropagation(t *testing.T) {
 	// Simulate another process overwriting the lock row with a different owner ID
 	m := spanner.Update("flyway_schema_history",
 		[]string{"installed_rank", "version", "installed_by", "installed_on"},
-		[]interface{}{int64(-1), "intruder-owner-id", "intruder-owner-id", spanner.CommitTimestamp},
+		[]interface{}{int64(-100), "intruder-owner-id", "intruder-owner-id", spanner.CommitTimestamp},
 	)
 	if _, err := client.Apply(ctx, []*spanner.Mutation{m}); err != nil {
 		t.Fatalf("failed to simulate lock takeover: %v", err)
@@ -551,7 +551,7 @@ func TestSpannerCleanSchemaAndCleanOnValidationError(t *testing.T) {
 			t.Fatalf("failed creating users table: %v", err)
 		}
 
-		// Acquire active lock (-1, 'flyway-lock')
+		// Acquire active lock (-100, 'flyway-lock')
 		unlock, err := db.Lock(ctx, "", "flyway_schema_history")
 		if err != nil {
 			t.Fatalf("Lock failed: %v", err)
@@ -616,7 +616,7 @@ func TestSpannerCleanSchemaAndCleanOnValidationError(t *testing.T) {
 			t.Errorf("expected 0 migration rows after CleanSchema, got %d: %+v", len(applied), applied)
 		}
 
-		// 4. The active lock row at installed_rank = -1 must still exist after CleanSchema
+		// 4. The active lock row at installed_rank = -100 must still exist after CleanSchema
 		ownerVer, instBy, _, lockExists := readLockRow(t, ctx, db.client)
 		if !lockExists || ownerVer == "" || ownerVer != instBy {
 			t.Fatalf("expected lock row to survive CleanSchema, got exists=%v owner=%q", lockExists, ownerVer)
@@ -1188,6 +1188,109 @@ func TestSpannerEndpointAndEmulatorSplit(t *testing.T) {
 	_, err = New(context.Background(), cfgRemote)
 	if err != nil && strings.Contains(err.Error(), "refusing Spanner emulator connection") {
 		t.Fatalf("did not expect refusal when GCPEmulatorAllowRemote=true, got: %v", err)
+	}
+}
+
+func TestSpannerLock_ParityWithFlywayMinus100AndTransitionalMinus1(t *testing.T) {
+	_, client := setupSpannerTestClient(t)
+	ctx := context.Background()
+
+	db := &SpannerDatabase{
+		client: client,
+		config: &config.Configuration{LockRetryCount: 1},
+	}
+
+	// 1. Insert Flyway-style lock row at installed_rank = -100
+	m100 := spanner.Insert("flyway_schema_history",
+		[]string{"installed_rank", "version", "description", "type", "script", "checksum", "installed_by", "installed_on", "execution_time", "success"},
+		[]interface{}{
+			int64(-100),
+			spanner.NullString{StringVal: "flyway-128bit-random-hex", Valid: true},
+			"flyway-lock",
+			"",
+			"",
+			spanner.NullInt64{},
+			"",
+			spanner.CommitTimestamp,
+			int64(0),
+			true,
+		},
+	)
+	if _, err := client.Apply(ctx, []*spanner.Mutation{m100}); err != nil {
+		t.Fatalf("failed inserting Flyway lock row at -100: %v", err)
+	}
+
+	// Lock attempt must wait and then fail, reporting lock held by flyway-128bit-random-hex
+	_, err := db.Lock(ctx, "", "flyway_schema_history")
+	if err == nil || !strings.Contains(err.Error(), "lock already held by flyway-128bit-random-hex") {
+		t.Fatalf("expected lock acquisition to fail due to Flyway lock at -100, got: %v", err)
+	}
+
+	// Remove the -100 lock
+	if _, err := client.Apply(ctx, []*spanner.Mutation{spanner.Delete("flyway_schema_history", spanner.Key{int64(-100)})}); err != nil {
+		t.Fatalf("failed deleting lock at -100: %v", err)
+	}
+
+	// 2. Insert transitional noway lock row at installed_rank = -1
+	m1 := spanner.Insert("flyway_schema_history",
+		[]string{"installed_rank", "version", "description", "type", "script", "checksum", "installed_by", "installed_on", "execution_time", "success"},
+		[]interface{}{
+			int64(-1),
+			spanner.NullString{StringVal: "old-noway-lock-id", Valid: true},
+			"flyway-lock",
+			"SCHEMA",
+			"",
+			spanner.NullInt64{},
+			"old-noway-lock-id",
+			spanner.CommitTimestamp,
+			int64(0),
+			true,
+		},
+	)
+	if _, err := client.Apply(ctx, []*spanner.Mutation{m1}); err != nil {
+		t.Fatalf("failed inserting transitional lock row at -1: %v", err)
+	}
+
+	// Lock attempt must also fail while -1 lock is active
+	_, err = db.Lock(ctx, "", "flyway_schema_history")
+	if err == nil || !strings.Contains(err.Error(), "lock already held by old-noway-lock-id") {
+		t.Fatalf("expected lock acquisition to fail due to transitional lock at -1, got: %v", err)
+	}
+
+	// 3. Mark the lock at -1 as expired (> 10 minutes old)
+	oldTimestamp := time.Now().Add(-15 * time.Minute)
+	m1Expired := spanner.Update("flyway_schema_history",
+		[]string{"installed_rank", "installed_on"},
+		[]interface{}{int64(-1), oldTimestamp},
+	)
+	if _, err := client.Apply(ctx, []*spanner.Mutation{m1Expired}); err != nil {
+		t.Fatalf("failed expiring lock at -1: %v", err)
+	}
+
+	// Now lock acquisition must succeed, taking over the expired lock at -100
+	unlock, err := db.Lock(ctx, "", "flyway_schema_history")
+	if err != nil {
+		t.Fatalf("expected lock acquisition to take over expired lock, got: %v", err)
+	}
+	defer func() { _ = unlock(ctx) }()
+
+	// Verify the row at -1 was cleaned up and active lock row is at -100
+	row1, err := client.Single().ReadRow(ctx, "flyway_schema_history", spanner.Key{int64(-1)}, []string{"version"})
+	if err == nil || spanner.ErrCode(err) != codes.NotFound {
+		t.Fatalf("expected row at -1 to be deleted, got row=%v err=%v", row1, err)
+	}
+
+	row100, err := client.Single().ReadRow(ctx, "flyway_schema_history", spanner.Key{int64(-100)}, []string{"version", "description"})
+	if err != nil {
+		t.Fatalf("expected row at -100 to exist: %v", err)
+	}
+	var ver spanner.NullString
+	var desc string
+	if err := row100.Columns(&ver, &desc); err != nil {
+		t.Fatalf("failed scanning row at -100: %v", err)
+	}
+	if !ver.Valid || ver.StringVal == "" || desc != "flyway-lock" {
+		t.Errorf("unexpected lock row at -100: ver=%+v, desc=%q", ver, desc)
 	}
 }
 
