@@ -14,7 +14,6 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	"github.com/google/uuid"
-	"golang.org/x/oauth2"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -141,37 +140,11 @@ func New(ctx context.Context, cfg *config.Configuration) (*BigQueryDatabase, err
 			}
 			opts = append(opts, option.WithEndpoint(ep))
 		}
-		if cfg.GCPAccessToken != "" && (cfg.GCPOAuthType == nil || *cfg.GCPOAuthType != 2) {
-			return nil, fmt.Errorf("OAuthAccessToken is only valid when OAuthType is 2")
-		} else if cfg.GCPOAuthType != nil {
-			switch *cfg.GCPOAuthType {
-			case 0:
-				// Service Account: requires private key file or JSON
-				if cfg.GCPCredentialsJSON != "" {
-					opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
-				} else if cfg.GCPCredentialsFile != "" {
-					opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
-				} else {
-					return nil, fmt.Errorf("OAuthType=0 requires OAuthPvtKeyPath (service account key file)")
-				}
-			case 2:
-				// AccessToken: requires access token
-				if cfg.GCPAccessToken == "" {
-					return nil, fmt.Errorf("OAuthType=2 requires OAuthAccessToken")
-				}
-				opts = append(opts, option.WithTokenSource(oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.GCPAccessToken})))
-			case 3:
-				// ADC: Application Default Credentials
-			default:
-				return nil, fmt.Errorf("unsupported or incomplete OAuthType=%d: required credentials not provided", *cfg.GCPOAuthType)
-			}
-		} else {
-			if cfg.GCPCredentialsJSON != "" {
-				opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
-			} else if cfg.GCPCredentialsFile != "" {
-				opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
-			}
+		credOpts, err := database.CredentialOptions(cfg)
+		if err != nil {
+			return nil, err
 		}
+		opts = append(opts, credOpts...)
 	}
 
 	client, err := bigquery.NewClient(ctx, cfg.GCPProjectID, opts...)

@@ -155,6 +155,9 @@ type SpannerConnectionParams struct {
 	CredentialsFile    string
 	UsePlainText       bool
 	AutoConfigEmulator bool
+	OAuthType          int
+	OAuthTypeSet       bool
+	AccessToken        string
 }
 
 // IsSpannerURL checks whether a raw URL targets Google Cloud Spanner.
@@ -236,8 +239,17 @@ func ParseJDBCSpannerURL(rawURL string) (*SpannerConnectionParams, error) {
 			v := strings.TrimSpace(kv[1])
 
 			switch k {
-			case "credentials", "credentials_file", "keyfile", "oauthpkeyfile":
+			case "credentials", "credentials_file", "keyfile", "oauthpkeyfile", "oauthpvtkeypath", "oauth_pvt_key_path":
 				params.CredentialsFile = v
+			case "oauthtype", "oauth_type":
+				num, err := strconv.Atoi(strings.TrimSpace(v))
+				if err != nil {
+					return nil, fmt.Errorf("invalid integer value %q for %s", v, k)
+				}
+				params.OAuthType = num
+				params.OAuthTypeSet = true
+			case "oauthaccesstoken", "oauth_access_token", "access_token":
+				params.AccessToken = v
 			case "autoconfigemulator", "auto_config_emulator":
 				params.AutoConfigEmulator = strings.EqualFold(v, "true") || v == "1"
 			case "useplaintext", "use_plain_text":

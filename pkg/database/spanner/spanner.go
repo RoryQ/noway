@@ -142,11 +142,11 @@ func New(ctx context.Context, cfg *config.Configuration) (*SpannerDatabase, erro
 		if cfg.GCPSpannerEndpoint != "" {
 			opts = append(opts, option.WithEndpoint(cfg.GCPSpannerEndpoint))
 		}
-		if cfg.GCPCredentialsJSON != "" {
-			opts = append(opts, option.WithCredentialsJSON([]byte(cfg.GCPCredentialsJSON)))
-		} else if cfg.GCPCredentialsFile != "" {
-			opts = append(opts, option.WithCredentialsFile(cfg.GCPCredentialsFile))
+		credOpts, err := database.CredentialOptions(cfg)
+		if err != nil {
+			return nil, err
 		}
+		opts = append(opts, credOpts...)
 	}
 
 	dbPath := fmt.Sprintf("projects/%s/instances/%s/databases/%s", projectID, instanceID, databaseID)

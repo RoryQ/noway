@@ -193,6 +193,12 @@ func (c *Configuration) Finalize() error {
 			if c.GCPCredentialsFile == "" && sParams.CredentialsFile != "" {
 				c.GCPCredentialsFile = sParams.CredentialsFile
 			}
+			if c.GCPOAuthType == nil && sParams.OAuthTypeSet {
+				c.GCPOAuthType = &sParams.OAuthType
+			}
+			if c.GCPAccessToken == "" && sParams.AccessToken != "" {
+				c.GCPAccessToken = sParams.AccessToken
+			}
 			if c.Driver == "" {
 				c.Driver = "cloudspanner"
 			}

@@ -2294,7 +2294,7 @@ func TestBigQueryNew_OAuthTypeValidation(t *testing.T) {
 	invalid := 99
 	cfgUnknown.GCPOAuthType = &invalid
 	_, err = New(ctx, cfgUnknown)
-	if err == nil || !strings.Contains(err.Error(), "unsupported or incomplete OAuthType=99") {
+	if err == nil || !strings.Contains(err.Error(), "OAuthType=99 is not supported") {
 		t.Errorf("expected error for unknown OAuthType, got: %v", err)
 	}
 }
