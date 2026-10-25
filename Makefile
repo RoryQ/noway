@@ -25,7 +25,7 @@ vuln:
 ## test-floci: Start floci-gcp emulator via docker compose and run integration tests
 test-floci: floci-up
 	@echo "Running tests against floci-gcp emulator..."
-	@FLOCI_BIGQUERY_ENDPOINT=$(FLOCI_ENDPOINT) go test -v -count=1 ./...
+	@BIGQUERY_EMULATOR_HOST=$(FLOCI_ENDPOINT) FLOCI_BIGQUERY_ENDPOINT=$(FLOCI_ENDPOINT) go test -race -v -count=1 ./...
 	@$(MAKE) floci-down
 
 ## test-integration: Alias for test-floci

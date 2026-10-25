@@ -128,6 +128,7 @@ func TestNowayFlociIntegration(t *testing.T) {
 		WithProject("floci-local"),
 		WithDataset("floci_noway_e2e"),
 		WithEndpoint(endpoint),
+		WithEmulator(true),
 		WithLocations("migrations"),
 		WithFS(fstest.MapFS{
 			"migrations/V1__init.sql": &fstest.MapFile{

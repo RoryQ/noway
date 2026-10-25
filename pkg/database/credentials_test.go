@@ -143,3 +143,31 @@ func TestCredentialOptions_GoogleApplicationCredentialsEnv(t *testing.T) {
 		t.Fatalf("expected error when explicit credentials file is set with OAuthType=3, got: %v", err)
 	}
 }
+
+func TestPlainHTTPEndpointWithoutEmulatorFails(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. BigQuery rejects plain HTTP when emulator=false
+	cfgBQ := config.NewDefaultConfiguration()
+	cfgBQ.GCPProjectID = "test-project"
+	cfgBQ.GCPBigQueryEndpoint = "http://localhost:4588/bigquery/v2/"
+	cfgBQ.GCPUseEmulator = false
+
+	_, errBQ := bigquery.New(ctx, cfgBQ)
+	if errBQ == nil || !strings.Contains(errBQ.Error(), "uses plain HTTP; set emulator=true") {
+		t.Fatalf("expected BigQuery driver to reject plain http endpoint without emulator, got: %v", errBQ)
+	}
+
+	// 2. Spanner rejects plain HTTP when emulator=false
+	cfgSpanner := config.NewDefaultConfiguration()
+	cfgSpanner.GCPProjectID = "test-project"
+	cfgSpanner.GCPSpannerInstanceID = "test-instance"
+	cfgSpanner.GCPSpannerDatabaseID = "test-db"
+	cfgSpanner.GCPSpannerEndpoint = "http://localhost:9010"
+	cfgSpanner.GCPUseEmulator = false
+
+	_, errSpanner := spanner.New(ctx, cfgSpanner)
+	if errSpanner == nil || !strings.Contains(errSpanner.Error(), "uses plain HTTP; set emulator=true") {
+		t.Fatalf("expected Spanner driver to reject plain http endpoint without emulator, got: %v", errSpanner)
+	}
+}

@@ -140,6 +140,9 @@ func New(ctx context.Context, cfg *config.Configuration) (*SpannerDatabase, erro
 			option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
 	default:
 		if cfg.GCPSpannerEndpoint != "" {
+			if strings.HasPrefix(strings.ToLower(cfg.GCPSpannerEndpoint), "http://") {
+				return nil, fmt.Errorf("endpoint %q uses plain HTTP; set emulator=true for a local emulator, or use https://", cfg.GCPSpannerEndpoint)
+			}
 			opts = append(opts, option.WithEndpoint(cfg.GCPSpannerEndpoint))
 		}
 		credOpts, err := database.CredentialOptions(cfg)

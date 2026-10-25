@@ -128,8 +128,11 @@ func New(ctx context.Context, cfg *config.Configuration) (*BigQueryDatabase, err
 		opts = append(opts, option.WithEndpoint(endpoint), option.WithoutAuthentication())
 	default:
 		if cfg.GCPBigQueryEndpoint != "" {
+			if strings.HasPrefix(strings.ToLower(cfg.GCPBigQueryEndpoint), "http://") {
+				return nil, fmt.Errorf("endpoint %q uses plain HTTP; set emulator=true for a local emulator, or use https://", cfg.GCPBigQueryEndpoint)
+			}
 			ep := cfg.GCPBigQueryEndpoint
-			if !strings.HasPrefix(ep, "http://") && !strings.HasPrefix(ep, "https://") {
+			if !strings.HasPrefix(ep, "https://") {
 				ep = "https://" + ep
 			}
 			if !strings.HasSuffix(ep, "/") {

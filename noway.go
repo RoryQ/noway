@@ -135,6 +135,15 @@ func WithEndpoint(endpoint string) Option {
 	}
 }
 
+// WithEmulator enables or disables emulator mode for GCP services.
+func WithEmulator(enabled bool) Option {
+	return func(o *nowayOptions) {
+		o.modifiers = append(o.modifiers, func(c *config.Configuration) {
+			c.GCPUseEmulator = enabled
+		})
+	}
+}
+
 // WithSpannerInstance sets the Cloud Spanner instance ID.
 func WithSpannerInstance(instanceID string) Option {
 	return func(o *nowayOptions) {

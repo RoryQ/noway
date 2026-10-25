@@ -75,6 +75,7 @@ func TestFlociGCPIntegration(t *testing.T) {
 	cfg := config.NewDefaultConfiguration()
 	cfg.GCPProjectID = projectID
 	cfg.GCPBigQueryEndpoint = endpoint
+	cfg.GCPUseEmulator = true
 	cfg.DefaultSchema = datasetName
 	cfg.Schemas = []string{datasetName}
 	cfg.Table = tableName
@@ -240,6 +241,7 @@ func TestFlociRepeatableMigrationRename(t *testing.T) {
 	cfg := config.NewDefaultConfiguration()
 	cfg.GCPProjectID = projectID
 	cfg.GCPBigQueryEndpoint = endpoint
+	cfg.GCPUseEmulator = true
 	cfg.DefaultSchema = datasetName
 	cfg.Schemas = []string{datasetName}
 	cfg.Table = tableName
@@ -347,6 +349,7 @@ func TestFlociValidationParity(t *testing.T) {
 		cfg := config.NewDefaultConfiguration()
 		cfg.GCPProjectID = projectID
 		cfg.GCPBigQueryEndpoint = endpoint
+		cfg.GCPUseEmulator = true
 		cfg.DefaultSchema = datasetName
 		cfg.Schemas = []string{datasetName}
 		cfg.Table = tableName
