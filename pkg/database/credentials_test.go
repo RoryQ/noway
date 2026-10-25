@@ -118,3 +118,28 @@ func TestSpannerAndBigQuery_DriverCredentialOptionsParity(t *testing.T) {
 		t.Errorf("expected BigQuery to reject OAuthType=3 with credentials file, got: %v", errBQADC)
 	}
 }
+
+func TestCredentialOptions_GoogleApplicationCredentialsEnv(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/secrets/sa.json")
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.URL = "jdbc:bigquery://https://www.googleapis.com/bigquery/v2:443;ProjectId=p;OAuthType=3;DefaultDataset=ds"
+	if err := cfg.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+
+	opts, err := database.CredentialOptions(cfg)
+	if err != nil {
+		t.Fatalf("expected OAuthType=3 with GOOGLE_APPLICATION_CREDENTIALS to succeed, got: %v", err)
+	}
+	if len(opts) != 0 {
+		t.Fatalf("expected 0 options for ADC, got %d", len(opts))
+	}
+
+	// But if gcpCredentialsFile is explicitly set, OAuthType=3 must fail
+	cfg.GCPCredentialsFile = "/explicit/path.json"
+	_, err = database.CredentialOptions(cfg)
+	if err == nil || !strings.Contains(err.Error(), "OAuthType=3 uses Application Default Credentials; remove") {
+		t.Fatalf("expected error when explicit credentials file is set with OAuthType=3, got: %v", err)
+	}
+}

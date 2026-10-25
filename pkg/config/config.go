@@ -238,12 +238,6 @@ func (c *Configuration) Finalize() error {
 		}
 	}
 
-	// Environment variable fallback for GCP credentials & endpoints
-	if c.GCPCredentialsFile == "" {
-		if envKey := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); envKey != "" {
-			c.GCPCredentialsFile = envKey
-		}
-	}
 	// Emulator detection: environment variables opt-in to emulator mode
 	if !c.GCPUseEmulator {
 		if os.Getenv("BIGQUERY_EMULATOR_HOST") != "" || os.Getenv("SPANNER_EMULATOR_HOST") != "" {
