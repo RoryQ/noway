@@ -211,6 +211,11 @@ flyway.outOfOrder=false
 flyway.cleanDisabled=true
 ```
 
+### Placeholder Escaping Extension
+
+In standard Flyway SQL migrations, there is no escape syntax for placeholders (`${...}` is always evaluated as a placeholder).
+As an extension, `noway` supports `$${placeholder}` escaping in SQL migrations, which outputs a literal `${placeholder}` without substitution or error if undefined. (Note: script migrations use Flyway's standard environment variables and do not perform escape parsing).
+
 ---
 
 ## License
