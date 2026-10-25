@@ -98,16 +98,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if cfg.OutputFile != "" {
-		f, err := os.Create(cfg.OutputFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: failed to open output file '%s': %v\n", cfg.OutputFile, err)
-			os.Exit(1)
-		}
-		defer f.Close()
-		os.Stdout = f
-	}
-
 	level := slog.LevelInfo
 	if cfg.Debug { // -X
 		level = slog.LevelDebug
@@ -121,6 +111,16 @@ func main() {
 	if err := cfg.Finalize(); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)
+	}
+
+	if cfg.OutputFile != "" {
+		f, err := os.OpenFile(cfg.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: failed to open output file '%s': %v\n", cfg.OutputFile, err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		os.Stdout = f
 	}
 
 	if !cfg.Quiet && cfg.OutputType != "json" {

@@ -1341,6 +1341,22 @@ func TestResolver_SymlinkCycles(t *testing.T) {
 	}
 }
 
+func TestResolver_RejectsControlCharactersInFilename(t *testing.T) {
+	tmpDir := t.TempDir()
+	badFile := filepath.Join(tmpDir, "V1__test\x00name.sql")
+	if err := os.WriteFile(badFile, []byte("SELECT 1;"), 0644); err != nil {
+		t.Skipf("filesystem rejected null byte in filename: %v", err)
+	}
+
+	res := NewResolver(ResolverConfig{
+		Locations: []string{tmpDir},
+	})
+	_, err := res.Resolve()
+	if err == nil || !strings.Contains(err.Error(), "invalid control characters") {
+		t.Errorf("expected error rejecting filename with control character, got: %v", err)
+	}
+}
+
 
 
 

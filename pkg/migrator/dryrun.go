@@ -34,16 +34,27 @@ func NewDryRunBuilder(db database.Database, schema, table, dbName, user string) 
 	}
 }
 
+// sqlStringLiteral returns a BigQuery/Spanner single-quoted string literal.
+func sqlStringLiteral(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`, "\n", `\n`, "\r", `\r`, "\t", `\t`)
+	return "'" + r.Replace(s) + "'"
+}
+
+// sqlComment makes s safe to put after "-- ".
+func sqlComment(s string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+}
+
 // WriteHeader outputs the Dry Run header comment block.
 func (b *DryRunBuilder) WriteHeader(operation, targetVersion string) {
 	b.sb.WriteString("-- --------------------------------------------------------------------------------\n")
-	b.sb.WriteString(fmt.Sprintf("-- Flyway / Noway Dry Run Output (%s)\n", operation))
+	b.sb.WriteString(fmt.Sprintf("-- Flyway / Noway Dry Run Output (%s)\n", sqlComment(operation)))
 	if b.database != "" {
-		b.sb.WriteString(fmt.Sprintf("-- Database: %s\n", b.database))
+		b.sb.WriteString(fmt.Sprintf("-- Database: %s\n", sqlComment(b.database)))
 	}
-	b.sb.WriteString(fmt.Sprintf("-- Schema: %s\n", b.schema))
+	b.sb.WriteString(fmt.Sprintf("-- Schema: %s\n", sqlComment(b.schema)))
 	if targetVersion != "" {
-		b.sb.WriteString(fmt.Sprintf("-- Target Version: %s\n", targetVersion))
+		b.sb.WriteString(fmt.Sprintf("-- Target Version: %s\n", sqlComment(targetVersion)))
 	}
 	b.sb.WriteString(fmt.Sprintf("-- Generated: %s\n", time.Now().Format("2006-01-02 15:04:05 MST")))
 	b.sb.WriteString("-- --------------------------------------------------------------------------------\n\n")
@@ -52,7 +63,7 @@ func (b *DryRunBuilder) WriteHeader(operation, targetVersion string) {
 // WriteSchemaCreation outputs schema creation DDL if needed.
 func (b *DryRunBuilder) WriteSchemaCreation(schema string) {
 	quoted := b.db.Quote(schema)
-	b.sb.WriteString(fmt.Sprintf("-- Ensure schema exists: %s\n", schema))
+	b.sb.WriteString(fmt.Sprintf("-- Ensure schema exists: %s\n", sqlComment(schema)))
 	b.sb.WriteString(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s;\n\n", quoted))
 }
 
@@ -76,7 +87,7 @@ func (b *DryRunBuilder) WriteCallback(event string, cb resolver.ResolvedCallback
 	if trimmed == "" {
 		return
 	}
-	b.sb.WriteString(fmt.Sprintf("-- Callback: %s (%s)\n", event, cb.Filename))
+	b.sb.WriteString(fmt.Sprintf("-- Callback: %s (%s)\n", sqlComment(event), sqlComment(cb.Filename)))
 	b.sb.WriteString(trimmed)
 	if !strings.HasSuffix(trimmed, ";") {
 		b.sb.WriteString(";")
@@ -96,7 +107,7 @@ func (b *DryRunBuilder) WriteMigration(mig resolver.ResolvedMigration, replacedS
 	}
 
 	b.sb.WriteString("-- --------------------------------------------------------------------------------\n")
-	b.sb.WriteString(fmt.Sprintf("-- Migration: %s (%sDescription: %s, Type: %s)\n", mig.Script, verStr, mig.Description, recType))
+	b.sb.WriteString(fmt.Sprintf("-- Migration: %s (%sDescription: %s, Type: %s)\n", sqlComment(mig.Script), sqlComment(verStr), sqlComment(mig.Description), sqlComment(recType)))
 	b.sb.WriteString("-- --------------------------------------------------------------------------------\n")
 	trimmed := strings.TrimSpace(replacedSQL)
 	if trimmed != "" {
@@ -122,7 +133,7 @@ func (b *DryRunBuilder) WriteUndo(mig resolver.ResolvedMigration, replacedSQL st
 	}
 
 	b.sb.WriteString("-- --------------------------------------------------------------------------------\n")
-	b.sb.WriteString(fmt.Sprintf("-- Undo Migration: %s (%sDescription: %s)\n", mig.Script, verStr, mig.Description))
+	b.sb.WriteString(fmt.Sprintf("-- Undo Migration: %s (%sDescription: %s)\n", sqlComment(mig.Script), sqlComment(verStr), sqlComment(mig.Description)))
 	b.sb.WriteString("-- --------------------------------------------------------------------------------\n")
 	trimmed := strings.TrimSpace(replacedSQL)
 	if trimmed != "" {
@@ -150,12 +161,12 @@ func (b *DryRunBuilder) WriteHistoryInsert(rank int, version, description, recTy
 
 	verVal := "NULL"
 	if version != "" {
-		verVal = fmt.Sprintf("'%s'", strings.ReplaceAll(version, "'", "\\'"))
+		verVal = sqlStringLiteral(version)
 	}
-	descVal := fmt.Sprintf("'%s'", strings.ReplaceAll(description, "'", "\\'"))
-	typeVal := fmt.Sprintf("'%s'", strings.ReplaceAll(recType, "'", "\\'"))
-	scriptVal := fmt.Sprintf("'%s'", strings.ReplaceAll(script, "'", "\\'"))
-	userVal := fmt.Sprintf("'%s'", strings.ReplaceAll(user, "'", "\\'"))
+	descVal := sqlStringLiteral(description)
+	typeVal := sqlStringLiteral(recType)
+	scriptVal := sqlStringLiteral(script)
+	userVal := sqlStringLiteral(user)
 
 	csVal := "NULL"
 	if recType != "BASELINE" && recType != "SCHEMA" {
@@ -182,12 +193,12 @@ func (b *DryRunBuilder) Save(destination string) error {
 
 	dir := filepath.Dir(destination)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("failed to create directory for dryRunOutput '%s': %w", destination, err)
 		}
 	}
 
-	if err := os.WriteFile(destination, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(destination, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("failed to write dryRunOutput to '%s': %w", destination, err)
 	}
 
