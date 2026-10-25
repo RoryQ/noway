@@ -1,4 +1,4 @@
-.PHONY: all build test test-floci test-integration floci-up floci-down floci-logs vet clean help
+.PHONY: all build test test-floci test-integration floci-up floci-down floci-logs vet vuln clean help
 
 BINARY_NAME ?= noway
 BIN_DIR ?= bin
@@ -12,11 +12,15 @@ all: build test
 ## build: Build the noway CLI binary
 build:
 	@mkdir -p $(BIN_DIR)
-	go build -ldflags "$(LDFLAGS)" -v -o $(BIN_DIR)/$(BINARY_NAME) ./cmd/noway
+	go build -trimpath -ldflags "$(LDFLAGS)" -v -o $(BIN_DIR)/$(BINARY_NAME) ./cmd/noway
 
 ## test: Run unit tests across all packages
 test:
 	go test -race -v -count=1 ./...
+
+## vuln: Run govulncheck for security vulnerabilities
+vuln:
+	govulncheck ./...
 
 ## test-floci: Start floci-gcp emulator via docker compose and run integration tests
 test-floci: floci-up
