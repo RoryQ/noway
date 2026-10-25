@@ -463,6 +463,55 @@ func TestMigrate_ValidateOnMigrate_PreservesMigrateOperation(t *testing.T) {
 	}
 }
 
+func TestMigrate_ValidateOnMigrate_FiresValidateCallbacksWithMigrateOperation(t *testing.T) {
+	ctx := context.Background()
+	db := mock.NewMockDatabase()
+	tmpDir := t.TempDir()
+
+	beforeFile := filepath.Join(tmpDir, "before_val.txt")
+	afterFile := filepath.Join(tmpDir, "after_val.txt")
+
+	beforeScript := filepath.Join(tmpDir, "beforeValidate.sh")
+	_ = os.WriteFile(beforeScript, []byte(fmt.Sprintf("#!/bin/bash\necho \"FLYWAY_OPERATION=$FLYWAY_OPERATION\" > %s\nexit 0\n", beforeFile)), 0755)
+
+	afterScript := filepath.Join(tmpDir, "afterValidate.sh")
+	_ = os.WriteFile(afterScript, []byte(fmt.Sprintf("#!/bin/bash\necho \"FLYWAY_OPERATION=$FLYWAY_OPERATION\" > %s\nexit 0\n", afterFile)), 0755)
+
+	sqlMigration := filepath.Join(tmpDir, "V1__init.sql")
+	_ = os.WriteFile(sqlMigration, []byte("CREATE TABLE t (id INT64);"), 0644)
+
+	cfg := config.NewDefaultConfiguration()
+	cfg.DefaultSchema = "test_ds"
+	cfg.Locations = []string{tmpDir}
+	cfg.ValidateOnMigrate = true
+
+	m, err := New(cfg, db)
+	if err != nil {
+		t.Fatalf("failed to create migrator: %v", err)
+	}
+
+	_, err = m.Migrate(ctx)
+	if err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	bData, err := os.ReadFile(beforeFile)
+	if err != nil {
+		t.Fatalf("expected beforeValidate.sh to run: %v", err)
+	}
+	if !strings.Contains(string(bData), "FLYWAY_OPERATION=MIGRATE") {
+		t.Errorf("expected beforeValidate to get FLYWAY_OPERATION=MIGRATE, got %s", string(bData))
+	}
+
+	aData, err := os.ReadFile(afterFile)
+	if err != nil {
+		t.Fatalf("expected afterValidate.sh to run: %v", err)
+	}
+	if !strings.Contains(string(aData), "FLYWAY_OPERATION=MIGRATE") {
+		t.Errorf("expected afterValidate to get FLYWAY_OPERATION=MIGRATE, got %s", string(aData))
+	}
+}
+
 func TestScriptMigration_EnvironmentVariables(t *testing.T) {
 	ctx := context.Background()
 	db := mock.NewMockDatabase()
