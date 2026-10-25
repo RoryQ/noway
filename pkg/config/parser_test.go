@@ -560,6 +560,22 @@ customEnvProp = "custom"
 	if cfgEnv.GCPDataset != "d" {
 		t.Errorf("expected dataset 'd', got %q", cfgEnv.GCPDataset)
 	}
+
+	// Invalid value (e.g. non-integer connectRetries) inside [environments.default] MUST fail
+	invalidToml := filepath.Join(tmpDir, "invalid_env.toml")
+	invalidContent := `
+[environments.default]
+url = "jdbc:bigquery:;ProjectId=p;DefaultDataset=d;"
+connectRetries = "abc"
+`
+	_ = os.WriteFile(invalidToml, []byte(invalidContent), 0644)
+	_, err = LoadFromFile(invalidToml)
+	if err == nil {
+		t.Fatalf("expected error for invalid connectRetries integer in [environments.default], got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid integer value") {
+		t.Errorf("expected 'invalid integer value' error, got: %v", err)
+	}
 }
 
 

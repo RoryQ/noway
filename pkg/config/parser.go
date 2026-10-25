@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -438,8 +439,11 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 				continue
 			}
 			if err := applyAnyValue(cfg, k, v); err != nil {
-				slog.Warn(err.Error())
-				continue
+				if errors.Is(err, ErrUnknownProperty) {
+					slog.Warn(err.Error())
+					continue
+				}
+				return err
 			}
 		}
 		// Apply nested [environments.<env>.flyway]
@@ -448,8 +452,11 @@ func applyMergedConfig(mergedMap map[string]any, targetEnv string, cfg *Configur
 				if envFlywayMap, ok := v.(map[string]any); ok {
 					for fk, fv := range envFlywayMap {
 						if err := applyAnyValue(cfg, fk, fv); err != nil {
-							slog.Warn(err.Error())
-							continue
+							if errors.Is(err, ErrUnknownProperty) {
+								slog.Warn(err.Error())
+								continue
+							}
+							return err
 						}
 					}
 				}
@@ -1337,13 +1344,16 @@ func SuggestNearest(key string) string {
 	return ""
 }
 
+// ErrUnknownProperty indicates an unknown configuration property.
+var ErrUnknownProperty = errors.New("Unknown configuration property")
+
 // UnknownPropertyError formats an unknown configuration property error, including a nearest suggestion if available.
 func UnknownPropertyError(key string) error {
 	clean := strings.TrimPrefix(key, "flyway.")
 	clean = strings.TrimPrefix(clean, "noway.")
 	suggestion := SuggestNearest(clean)
 	if suggestion != "" {
-		return fmt.Errorf("Unknown configuration property: %s. Did you mean '%s'?", clean, suggestion)
+		return fmt.Errorf("%w: %s. Did you mean '%s'?", ErrUnknownProperty, clean, suggestion)
 	}
-	return fmt.Errorf("Unknown configuration property: %s", clean)
+	return fmt.Errorf("%w: %s", ErrUnknownProperty, clean)
 }
