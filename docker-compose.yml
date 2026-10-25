@@ -1,6 +1,6 @@
 services:
   floci-gcp:
-    image: floci/floci-gcp:latest
+    image: floci/floci-gcp@sha256:e78122803e9ba0eb87ac55f0a78982399b198f86b547ccfa6bd1c918ea72cca0
     container_name: floci-gcp
     ports:
       - "4588:4588"
@@ -8,5 +8,3 @@ services:
       - FLOCI_GCP_HOSTNAME=floci-gcp
       - FLOCI_GCP_BASE_URL=http://localhost:4588
       - FLOCI_GCP_SERVICES_BIGQUERY_ENABLED=true
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
