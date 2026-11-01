@@ -247,7 +247,7 @@ func TestParseCLIArgs_UnknownPropertySuggestsNearest(t *testing.T) {
 
 func TestCLIOverridesEnvironmentVariables(t *testing.T) {
 	t.Setenv("FLYWAY_TARGET", "1")
-	t.Setenv("FLYWAY_URL", "jdbc:bigquery:;ProjectId=env-proj;DefaultDataset=env_ds;")
+	t.Setenv("FLYWAY_URL", "jdbc:bigquery:;ProjectId=env-proj;DefaultDataset=env_ds;OAuthType=2;OAuthAccessToken=dummy-token;")
 
 	args := []string{
 		"-target=5",

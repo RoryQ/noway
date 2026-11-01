@@ -152,6 +152,7 @@ func TestNowaySpannerOptions(t *testing.T) {
 		WithSpannerInstance("my-spanner-inst"),
 		WithSpannerDatabase("my-spanner-db"),
 		WithSpannerEndpoint("localhost:9010"),
+		WithEmulator(true),
 		WithLocations("migrations"),
 		WithFS(fstest.MapFS{
 			"migrations/V1__init.sql": &fstest.MapFile{
