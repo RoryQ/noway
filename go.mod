@@ -10,7 +10,7 @@ require (
 	github.com/earthboundkid/versioninfo/v2 v2.24.1
 	github.com/google/uuid v1.6.0
 	github.com/pelletier/go-toml/v2 v2.4.3
-	golang.org/x/oauth2 v0.37.0
+	golang.org/x/oauth2 v0.38.0
 	golang.org/x/text v0.44.0
 	google.golang.org/api v0.310.0
 	google.golang.org/grpc v1.85.0
